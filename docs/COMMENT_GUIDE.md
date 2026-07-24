@@ -22,6 +22,7 @@ Set `sticky_comment: false` to always post a new comment (e.g. if you want a ful
 - The Horizon endpoint used for verification.
 - The target asset code and issuer.
 - Per-check status for funding, trustline readiness, and XLM reserve.
+- A machine-readable validation-gate summary that callers can use to tell whether the run is release-ready or blocked.
 - Links to Stellar Laboratory and LOBSTR for remediation.
 
 ## Maintainer tips

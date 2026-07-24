@@ -9,6 +9,7 @@ import {
   formatXlmDeficit,
   estimateTrustlineSetupCost,
   buildReserveRequirement,
+  buildValidationGate,
   horizonFailureResult,
   STELLAR_BASE_RESERVE_XLM,
   STELLAR_MIN_ACCOUNT_BALANCE_XLM,
@@ -274,6 +275,32 @@ describe('buildReserveRequirement', () => {
       actual: 1,
       missing: '0.5000000',
       met: false,
+    });
+  });
+});
+
+describe('buildValidationGate', () => {
+  it('reports a ready gate when every check passes', () => {
+    const result = runAccountChecks(makeAccount(), defaultConfig);
+
+    expect(buildValidationGate(result)).toEqual({
+      ready: true,
+      totalChecks: 3,
+      passedChecks: 3,
+      failedChecks: 0,
+      failedLabels: [],
+    });
+  });
+
+  it('reports blocked labels for failed checks', () => {
+    const result = runAccountChecks(makeAccount({ balances: [] }), defaultConfig);
+
+    expect(buildValidationGate(result)).toEqual({
+      ready: false,
+      totalChecks: 3,
+      passedChecks: 1,
+      failedChecks: 2,
+      failedLabels: ['USDC trustline', 'XLM reserve'],
     });
   });
 });

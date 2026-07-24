@@ -33928,6 +33928,7 @@ exports.unfundedAccountResult = unfundedAccountResult;
 exports.getFailedCheckLabels = getFailedCheckLabels;
 exports.horizonFailureResult = horizonFailureResult;
 exports.buildReserveRequirement = buildReserveRequirement;
+exports.buildValidationGate = buildValidationGate;
 const horizon_1 = __nccwpck_require__(9164);
 const markdown_1 = __nccwpck_require__(3758);
 /** Stellar public network base reserve per ledger entry (XLM). */
@@ -34096,6 +34097,23 @@ function buildReserveRequirement(required, actual) {
         met: actual >= required,
     };
 }
+/**
+ * Build a machine-readable gate summary from the validation result.
+ * This stays intentionally small so it can be consumed by comment output,
+ * dashboards, or future release automation without re-parsing Markdown.
+ */
+function buildValidationGate(result) {
+    const failedLabels = getFailedCheckLabels(result);
+    const failedChecks = failedLabels.length;
+    const totalChecks = result.checks.length;
+    return {
+        ready: failedChecks === 0,
+        totalChecks,
+        passedChecks: totalChecks - failedChecks,
+        failedChecks,
+        failedLabels,
+    };
+}
 
 
 /***/ }),
@@ -34159,6 +34177,7 @@ function statusIcon(passed) {
 }
 function formatCommentBody(result, config) {
     const stellarLabNetwork = (0, links_1.inferStellarNetwork)(config.horizonUrl);
+    const gate = (0, checks_1.buildValidationGate)(result);
     const lines = [
         exports.STICKY_COMMENT_MARKER,
         '## TrustBridge — Stellar Account Check',
@@ -34173,7 +34192,9 @@ function formatCommentBody(result, config) {
     for (const check of result.checks) {
         lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
-    lines.push('', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+    lines.push('', '### Validation gate', '', gate.ready
+        ? '- Ready to proceed: all checks passed.'
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     if (result.remediation) {
         lines.push('', '### Remediation', '', result.remediation);
     }

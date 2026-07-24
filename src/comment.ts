@@ -4,6 +4,7 @@ import {
   CheckConfig,
   STELLAR_BASE_RESERVE_XLM,
   STELLAR_MIN_ACCOUNT_BALANCE_XLM,
+  buildValidationGate,
   ValidationResult,
   estimateTrustlineSetupCost,
 } from './checks';
@@ -32,6 +33,7 @@ export function formatCommentBody(
   config: CommentConfig,
 ): string {
   const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
+  const gate = buildValidationGate(result);
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     '## TrustBridge — Stellar Account Check',
@@ -49,6 +51,14 @@ export function formatCommentBody(
   }
 
   lines.push(
+    '',
+    '### Validation gate',
+    '',
+    gate.ready
+      ? '- Ready to proceed: all checks passed.'
+      : `- Blocked by: ${gate.failedLabels.join(', ')}`,
+    `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`,
+    `- Failed checks: ${gate.failedChecks}`,
     '',
     '### Balances',
     '',

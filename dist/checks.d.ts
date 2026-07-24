@@ -39,3 +39,16 @@ export interface ReserveRequirement {
     met: boolean;
 }
 export declare function buildReserveRequirement(required: number, actual: number): ReserveRequirement;
+export interface ValidationGate {
+    ready: boolean;
+    totalChecks: number;
+    passedChecks: number;
+    failedChecks: number;
+    failedLabels: string[];
+}
+/**
+ * Build a machine-readable gate summary from the validation result.
+ * This stays intentionally small so it can be consumed by comment output,
+ * dashboards, or future release automation without re-parsing Markdown.
+ */
+export declare function buildValidationGate(result: ValidationResult): ValidationGate;
