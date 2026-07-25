@@ -32,6 +32,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Verify comment golden snapshots and test coverage
+        run: npm run test:coverage
+
       - name: Build
         run: npm run build
 

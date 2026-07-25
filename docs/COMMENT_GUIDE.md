@@ -28,3 +28,8 @@ Set `sticky_comment: false` to always post a new comment (e.g. if you want a ful
 ## Maintainer tips
 
 If contributors are confused, ask them to compare the account and issuer shown in the comment with the wallet account they intended to use. Most failures come from unfunded accounts, wrong issuers, or missing Change Trust operations.
+
+## Golden Snapshots in Release/CI
+
+Comment Markdown formatting is protected by golden snapshot tests (`__tests__/comment.test.ts`). Any changes to comment structure, headers, status icons, or links will cause golden snapshot verification in CI (`.github/workflows/ci.yml`) to fail unless explicitly updated via `npx jest -u`.
+

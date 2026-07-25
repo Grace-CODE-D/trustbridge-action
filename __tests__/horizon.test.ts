@@ -2,7 +2,7 @@ import { HorizonError, isCreditBalance,
   isRetryableStatus,
   parseRetryAfterMs,
   parseHorizonBalance, normalizeHorizonUrl } from '../src/horizon';
-import { fetchAccount, HorizonAccount, waitForFundedAccount } from '../src/horizon';
+import { fetchAccount, HorizonAccount, waitForFundedAccount, getNativeBalance, hasTrustline } from '../src/horizon';
 import * as loggerModule from '../src/logger';
 import { SimpleCache } from '../src/cache';
 import type { Request, RequestInit, Response } from 'node-fetch';
@@ -169,6 +169,25 @@ describe('parseHorizonBalance', () => {
   it('parses numeric balances and falls back to zero', () => {
     expect(parseHorizonBalance('1.5000000')).toBe(1.5);
     expect(parseHorizonBalance('bad')).toBe(0);
+  });
+});
+
+describe('getNativeBalance & hasTrustline', () => {
+  it('extracts native XLM balance correctly', () => {
+    const account = makeAccount();
+    expect(getNativeBalance(account)).toBe('10.0000000');
+  });
+
+  it('returns 0 when native balance is missing', () => {
+    const account = makeAccount();
+    account.balances = [];
+    expect(getNativeBalance(account)).toBe('0');
+  });
+
+  it('checks if trustline exists for code and issuer', () => {
+    const account = makeAccount();
+    expect(hasTrustline(account, 'USDC', TEST_ADDRESS_2)).toBe(true);
+    expect(hasTrustline(account, 'EURT', TEST_ADDRESS_2)).toBe(false);
   });
 });
 

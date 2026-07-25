@@ -54,6 +54,8 @@ export interface FetchAccountOptions {
   timeoutMs?: number;
   maxRetries?: number;
   horizonUrlFallback?: string;
+  fallbackUrls?: string[];
+  useCache?: boolean;
   cacheTtlMs?: number;
   cache?: SimpleCache;
   fetchFn?: FetchLike;
@@ -391,8 +393,9 @@ export async function fetchAccount(
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = options.cache ?? defaultCache;
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
-  const normalizedFallbackUrl = options.horizonUrlFallback
-    ? normalizeHorizonUrl(options.horizonUrlFallback)
+  const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
+  const normalizedFallbackUrl = fallbackCandidate
+    ? normalizeHorizonUrl(fallbackCandidate)
     : '';
 
   if (!normalizedHorizonUrl) {

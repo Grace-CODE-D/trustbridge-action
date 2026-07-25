@@ -89,7 +89,9 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `wait_until_funded_timeout_ms` | No | `120000` | Max time to poll for funding, in milliseconds (0-600000) |
 | `wait_until_funded_interval_ms` | No | `5000` | Delay between funding polls, in milliseconds (1000-60000) |
 | `horizon_url_fallback` | No | _(empty)_ | Optional fallback Horizon URL. When the primary `horizon_url` fails with a retryable non-404 error (429/502/503/504, timeout), TrustBridge retries the full request against this URL. Use for cross-region or multi-provider resilience. |
+| `rpc_fallback_url` | No | `""` | Comma-separated secondary Horizon or RPC URLs to fail over to if primary node fails |
 | `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
+| `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
@@ -314,10 +316,16 @@ Details: [docs/STRUCTURE.md](docs/STRUCTURE.md).
 git clone https://github.com/Stellar-TrustBridge/trustbridge-action.git
 cd trustbridge-action
 npm ci
-npm test          # unit tests
-npm run lint      # ESLint
-npm run build     # compile TypeScript → dist/
+npm test               # unit tests
+npm run test:coverage  # unit tests + Jest coverage gate + comment golden snapshot verification
+npm run lint           # ESLint
+npm run build          # compile TypeScript → dist/
 ```
+
+### Comment Golden Snapshots & Coverage Gates
+
+- **Comment Golden Snapshots**: TrustBridge enforces golden snapshots for Markdown issue comments (`__tests__/comment.test.ts`) across success and failure paths to prevent formatting regressions during active Waves and release cycles.
+- **Jest Coverage Gate**: Enforces strict statement, branch, function, and line coverage thresholds for `src/horizon.ts` (fetch, retries, caching, RPC fallback) and globally in `jest.config.js`.
 
 Contributing guidelines: [CONTRIBUTING.md](CONTRIBUTING.md).
 
