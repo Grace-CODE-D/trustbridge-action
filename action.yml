@@ -65,6 +65,20 @@ inputs:
       (1000-60000). Only used when wait_until_funded is true.
     required: false
     default: '5000'
+  horizon_url_fallback:
+    description: >-
+      Optional fallback Horizon API base URL. When the primary Horizon URL
+      fails with a non-404 retryable error, the action transparently retries
+      against this URL before giving up. Useful for cross-region or
+      multi-provider resilience.
+    required: false
+    default: ''
+  horizon_cache_ttl_ms:
+    description: >-
+      Time-to-live for the in-memory Horizon account cache, in milliseconds.
+      Set to 0 to disable caching entirely. Default 60000 (60 seconds).
+    required: false
+    default: '60000'
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true

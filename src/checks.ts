@@ -1,5 +1,6 @@
 import { HorizonAccount, getNativeBalance, hasTrustline, parseHorizonBalance } from './horizon';
 import { escapeMarkdownInline, inlineCode } from './markdown';
+import { buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
 
 /** Stellar public network base reserve per ledger entry (XLM). */
 export const STELLAR_BASE_RESERVE_XLM = 0.5;
@@ -11,6 +12,7 @@ export interface CheckConfig {
   assetCode: string;
   assetIssuer: string;
   minXlmReserve: number;
+  horizonUrl?: string;
 }
 
 export interface CheckResultItem {
@@ -108,10 +110,11 @@ export function runAccountChecks(
   let remediation: string | undefined;
 
   if (!valid) {
+    const network = inferStellarNetwork(config.horizonUrl ?? '');
     const steps: string[] = [];
     if (!trustlineExists) {
       steps.push(
-        `Add a **${safeAssetCode}** trustline using [Stellar Laboratory](https://laboratory.stellar.org/#txbuilder?network=public) (Change Trust operation) or a wallet such as [LOBSTR](https://lobstr.co/).`,
+        `Add a **${safeAssetCode}** trustline using [Stellar Laboratory](${buildChangeTrustLink(network)}) (Change Trust operation) or a wallet such as [LOBSTR](${buildLobstrLink()}).`,
       );
     }
     if (!xlmReserveMet) {
@@ -139,6 +142,7 @@ export function unfundedAccountResult(
 ): ValidationResult {
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
   const safeAddress = inlineCode(stellarAddress);
+  const network = inferStellarNetwork(config.horizonUrl ?? '');
 
   const checks: CheckResultItem[] = [
     {
@@ -167,7 +171,7 @@ export function unfundedAccountResult(
     checks,
     remediation: [
       `Activate ${safeAddress} by sending at least **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
-      `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](https://laboratory.stellar.org/#txbuilder?network=public) or [LOBSTR](https://lobstr.co/).`,
+      `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](${buildChangeTrustLink(network)}) or [LOBSTR](${buildLobstrLink()}).`,
       `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
     ].join('\n\n'),
   };
