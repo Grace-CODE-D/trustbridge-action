@@ -98,6 +98,20 @@ inputs:
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true
+  sep0007_deep_links:
+    description: >-
+      Emit SEP-0007 wallet deep links (web+stellar:pay / web+stellar:tx) in
+      the issue comment so contributors can open a pre-filled wallet screen
+      directly from the comment. Requires a funded account on the same network
+      as horizon_url to be useful. Default false.
+    required: false
+    default: 'false'
+  sep0007_origin_domain:
+    description: >-
+      Optional origin domain embedded in SEP-0007 URIs for wallet validation
+      (SEP-0007 §3.4). Leave empty to omit the field.
+    required: false
+    default: ''
 
 outputs:
   trustline_exists:
