@@ -5,6 +5,8 @@
 
 **TrustBridge Action** is a GitHub Action that validates Stellar accounts before sensitive workflow steps — such as assigning bounty issues, granting repository access, or releasing payments. It queries the [Stellar Horizon API](https://developers.stellar.org/docs/data/apis/horizon), verifies that an account is funded, holds a trustline for a configured asset (USDC by default), and meets a minimum XLM reserve. Results are posted as a formatted comment on the GitHub issue with clear remediation steps.
 
+The issue comment now includes a machine-readable validation gate summary so dashboard jobs and release automation can tell at a glance whether the run is ready or blocked.
+
 ---
 
 ## Why TrustBridge?
@@ -18,6 +20,10 @@ Open-source programs and DAOs often gate contributions on Stellar wallet readine
 | Silent CI failures | Configurable `fail_on_missing` to fail or warn |
 | Custom assets / testnet | All Horizon and asset inputs are configurable |
 | Re-runs spam the issue with duplicate comments | `sticky_comment` (default `true`) updates the previous TrustBridge comment in place |
+
+## Release pipeline
+
+The repository ships a dedicated `release` workflow (`.github/workflows/release.yml`) that runs the same lint, test, and build checks used in CI before a tag is considered release-ready. Use the release checklist in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) before moving a `v*` tag.
 
 ---
 

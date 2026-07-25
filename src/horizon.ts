@@ -1,6 +1,4 @@
-import { logger, LogContext, redactHorizonUrl, redactString } from './logger';
-import { defaultCache, SimpleCache } from './cache';
-
+import { retryWithBackoff } from './resilience';
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -648,4 +646,9 @@ export function hasTrustline(
 export function parseHorizonBalance(balance: string): number {
   const parsed = Number(balance);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export interface HorizonFetchOptions {
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
 }

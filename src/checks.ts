@@ -235,3 +235,29 @@ export function buildReserveRequirement(required: number, actual: number): Reser
     met: actual >= required,
   };
 }
+
+export interface ValidationGate {
+  ready: boolean;
+  totalChecks: number;
+  passedChecks: number;
+  failedChecks: number;
+  failedLabels: string[];
+}
+
+/**
+ * Build a machine-readable gate summary from the validation result.
+ * This stays intentionally small so it can be consumed by comment output,
+ * dashboards, or future release automation without re-parsing Markdown.
+ */
+export function buildValidationGate(result: ValidationResult): ValidationGate {
+  const failedLabels = getFailedCheckLabels(result);
+  const failedChecks = failedLabels.length;
+  const totalChecks = result.checks.length;
+  return {
+    ready: failedChecks === 0,
+    totalChecks,
+    passedChecks: totalChecks - failedChecks,
+    failedChecks,
+    failedLabels,
+  };
+}

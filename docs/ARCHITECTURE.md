@@ -49,8 +49,8 @@ graph LR
 |--------|----------------|
 | `index.ts` | Read inputs, orchestrate fetch → validate → comment → fail/warn, set outputs |
 | `horizon.ts` | HTTP client, response typing, retries, `HorizonError` |
-| `checks.ts` | Address validation, trustline/XLM rules, result aggregation |
-| `comment.ts` | Markdown rendering, Octokit `issues.createComment` |
+| `checks.ts` | Address validation, trustline/XLM rules, result aggregation, validation-gate summary |
+| `comment.ts` | Markdown rendering, Octokit `issues.createComment`, sticky comment upsert |
 
 ---
 
@@ -207,6 +207,20 @@ permissions:
 | HTTP | `node-fetch` v2 (CommonJS-compatible) |
 
 The action ships compiled JavaScript in `dist/`. Consumers reference a release tag; they do not run `npm install` in the action repo.
+
+## Release pipeline
+
+The repository includes `.github/workflows/release.yml` to verify the shipped bundle before a tag release is cut.
+
+The release job intentionally re-runs the same checks that protect the action at runtime:
+
+1. Install dependencies with `npm ci`
+2. Run `npm run lint`
+3. Run `npm test`
+4. Run `npm run build`
+5. Confirm `dist/index.js` exists
+
+This keeps the packaged action and the source-of-truth TypeScript code in sync before publishing a release tag.
 
 ---
 

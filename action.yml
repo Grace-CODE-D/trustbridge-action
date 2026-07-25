@@ -10,6 +10,14 @@ branding:
   color: 'blue'
 
 inputs:
+  max_retries:
+    description: "Maximum number of retry attempts for Horizon API requests"
+    required: false
+    default: "3"
+  retry_base_delay_ms:
+    description: "Base delay in milliseconds for exponential backoff"
+    required: false
+    default: "1000"
   horizon_url:
     description: 'Stellar Horizon API base URL'
     required: false

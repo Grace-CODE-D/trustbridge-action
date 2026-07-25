@@ -18,7 +18,10 @@ import { globalMetrics } from './metrics';
 import { validateContractAddress } from './validation';
 
 async function run(): Promise<void> {
-  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
+  const horizonUrl = 
+const maxRetries = parseInt(core.getInput('max_retries') || '3', 10);
+const retryBaseDelayMs = parseInt(core.getInput('retry_base_delay_ms') || '1000', 10);
+core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
     core.getInput('asset_issuer') ||
