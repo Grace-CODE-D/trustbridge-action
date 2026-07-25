@@ -1,3 +1,5 @@
+import { defaultCache, SimpleCache } from './cache';
+import { logger, redactHorizonUrl, redactStellarAddress, redactString, LogContext } from './logger';
 import { retryWithBackoff } from './resilience';
 export interface HorizonBalanceNative {
   balance: string;
