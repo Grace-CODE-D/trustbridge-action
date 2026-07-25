@@ -44,6 +44,76 @@ describe('TRUSTBRIDGE_FOOTER', () => {
   });
 });
 
+describe('formatCommentBody golden snapshots', () => {
+  it('matches golden snapshot for successful validation result', () => {
+    const successResult: ValidationResult = {
+      valid: true,
+      accountFunded: true,
+      trustlineExists: true,
+      xlmBalance: '10.5000000',
+      xlmReserveMet: true,
+      checks: [
+        { passed: true, label: 'Account funded', detail: 'Account exists on Horizon.' },
+        { passed: true, label: 'USDC trustline', detail: 'Trustline exists with balance 50.0.' },
+        { passed: true, label: 'XLM reserve', detail: 'Balance 10.5 XLM >= minimum 1.5 XLM.' },
+      ],
+    };
+
+    const body = formatCommentBody(successResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+    });
+
+    expect(body).toMatchSnapshot();
+  });
+
+  it('matches golden snapshot for unfunded account failure path', () => {
+    const unfundedResult: ValidationResult = {
+      valid: false,
+      accountFunded: false,
+      trustlineExists: false,
+      xlmBalance: '0',
+      xlmReserveMet: false,
+      checks: [
+        { passed: false, label: 'Account funded', detail: 'Account was not found on Horizon (404).' },
+        { passed: false, label: 'USDC trustline', detail: 'Cannot check trustline without an active account.' },
+        { passed: false, label: 'XLM reserve', detail: 'Cannot check XLM reserve without an active account.' },
+      ],
+      remediation: 'Send at least 1 XLM to activate account GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF.',
+    };
+
+    const body = formatCommentBody(unfundedResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+    });
+
+    expect(body).toMatchSnapshot();
+  });
+
+  it('matches golden snapshot for missing trustline failure path', () => {
+    const missingTrustlineResult: ValidationResult = {
+      valid: false,
+      accountFunded: true,
+      trustlineExists: false,
+      xlmBalance: '5.0000000',
+      xlmReserveMet: true,
+      checks: [
+        { passed: true, label: 'Account funded', detail: 'Account exists on Horizon.' },
+        { passed: false, label: 'USDC trustline', detail: 'Account does not hold a trustline for USDC.' },
+        { passed: true, label: 'XLM reserve', detail: 'Balance 5.0 XLM >= minimum 1.5 XLM.' },
+      ],
+      remediation: 'Add a trustline for asset USDC issued by GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN.',
+    };
+
+    const body = formatCommentBody(missingTrustlineResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+    });
+
+    expect(body).toMatchSnapshot();
+  });
+});
+
 describe('formatCommentBody', () => {
   it('uses public Stellar Laboratory links for public Horizon', () => {
     const body = formatCommentBody(validationResult, {

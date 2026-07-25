@@ -18,10 +18,7 @@ import { globalMetrics } from './metrics';
 import { validateContractAddress } from './validation';
 
 async function run(): Promise<void> {
-  const horizonUrl = 
-const maxRetries = parseInt(core.getInput('max_retries') || '3', 10);
-const retryBaseDelayMs = parseInt(core.getInput('retry_base_delay_ms') || '1000', 10);
-core.getInput('horizon_url') || 'https://horizon.stellar.org';
+  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
     core.getInput('asset_issuer') ||
@@ -47,10 +44,17 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
     { min: 1000, max: 60000 },
   );
   const horizonUrlFallback = core.getInput('horizon_url_fallback') || '';
+  const rpcFallbackUrlRaw = core.getInput('rpc_fallback_url') || '';
+  const fallbackUrls = rpcFallbackUrlRaw
+    ? rpcFallbackUrlRaw.split(',').map((u) => u.trim()).filter(Boolean)
+    : horizonUrlFallback
+      ? [horizonUrlFallback]
+      : [];
   const horizonCacheTtlMs = parseNumberInput(core.getInput('horizon_cache_ttl_ms'), 60000, {
     min: 0,
     max: 3_600_000,
   });
+  const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const githubToken = core.getInput('github_token', { required: true });
 
   logger.setDebugMode(debugMode);
@@ -68,6 +72,8 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
     waitUntilFundedIntervalMs,
+    rpcFallbackUrl: rpcFallbackUrlRaw,
+    useCache,
   });
 
   validateStellarAddress(stellarAddress);
@@ -111,23 +117,31 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
-    cacheTtlMs: horizonCacheTtlMs,
+    fallbackUrls,
+    cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
+    useCache,
   };
 
   try {
     const account = waitUntilFunded
-      ? await waitForFundedAccount(horizonUrl, stellarAddress, {
-          timeoutMs: waitUntilFundedTimeoutMs,
-          pollIntervalMs: waitUntilFundedIntervalMs,
-          requestTimeoutMs: horizonTimeoutMs,
-          maxRetries: undefined,
-          onPoll: (attempt, elapsedMs) =>
-            logger.debug(`Account not yet funded — polling again`, {
-              component: 'index',
-              attempt,
-              elapsedMs,
-            }),
-        }, (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }))
+      ? await waitForFundedAccount(
+          horizonUrl,
+          stellarAddress,
+          {
+            timeoutMs: waitUntilFundedTimeoutMs,
+            pollIntervalMs: waitUntilFundedIntervalMs,
+            requestTimeoutMs: horizonTimeoutMs,
+            fallbackUrls,
+            useCache,
+            onPoll: (attempt, elapsedMs) =>
+              logger.debug(`Account not yet funded — polling again`, {
+                component: 'index',
+                attempt,
+                elapsedMs,
+              }),
+          },
+          (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
+        )
       : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
   } catch (error) {

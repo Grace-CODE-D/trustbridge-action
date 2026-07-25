@@ -87,6 +87,14 @@ inputs:
       Set to 0 to disable caching entirely. Default 60000 (60 seconds).
     required: false
     default: '60000'
+  rpc_fallback_url:
+    description: 'Optional secondary/fallback Horizon or RPC URL if primary fails'
+    required: false
+    default: ''
+  use_cache:
+    description: 'Cache successful Horizon responses in job memory (true/false)'
+    required: false
+    default: 'false'
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true
