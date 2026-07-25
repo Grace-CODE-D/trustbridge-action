@@ -8,6 +8,8 @@ Use this lightweight checklist before tagging a new action release.
 - Run linting.
 - Run the build so `dist/` matches `src/`. CI fails the build if `dist/` drifts from a fresh `npm run build` (see `.github/workflows/ci.yml`), but re-run it locally before tagging to be sure.
 - Confirm `action.yml` inputs and README inputs stay aligned.
+- Confirm the release workflow still passes on the tag you plan to ship. The repo-level release job is a dry run gate for `v*` tags and should stay green before moving a major tag.
+- Keep an eye on XLM fee buffer guidance in the docs if the validation defaults change; the release checklist should point maintainers back to the current remediation copy.
 
 ## Tagging
 

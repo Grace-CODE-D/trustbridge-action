@@ -73,6 +73,18 @@ describe('formatCommentBody', () => {
 
     expect(body).toContain(STICKY_COMMENT_MARKER);
   });
+
+  it('includes a machine-readable validation gate summary', () => {
+    const body = formatCommentBody(validationResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+    });
+
+    expect(body).toContain('### Validation gate');
+    expect(body).toContain('Blocked by: Account funded');
+    expect(body).toContain('Passed checks: 0/1');
+    expect(body).toContain('Failed checks: 1');
+  });
 });
 
 function makeOctokit(overrides: Record<string, jest.Mock> = {}) {
