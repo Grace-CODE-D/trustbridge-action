@@ -11,18 +11,40 @@ import {
 import { buildAccountViewerLink, buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
 import { inlineCode } from './markdown';
 
+/**
+ * Semantic schema version embedded in every TrustBridge issue comment.
+ * Bump when the comment body structure (sections, markers, remediation
+ * shape, etc.) changes in a way that downstream consumers or future
+ * versions of this action need to detect.
+ */
+export const COMMENT_SCHEMA_VERSION = '1.0.0';
+
 export interface CommentConfig extends CheckConfig {
   stellarAddress: string;
   horizonUrl: string;
+  failOnMissing?: boolean;
+  waitUntilFunded?: boolean;
+  waitUntilFundedTimeoutMs?: number;
+  waitUntilFundedIntervalMs?: number;
+  stickyComment?: boolean;
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
 
 /**
- * Hidden marker embedded in every TrustBridge comment body. Used to find a
- * prior comment to update in place instead of posting a new one each run.
+ * Legacy hidden marker (pre-schema-version). Kept for backward
+ * compatibility in `findStickyComment` so comments posted by older
+ * releases of the action are still eligible for upsert.
  */
-export const STICKY_COMMENT_MARKER = '<!-- trustbridge-action:sticky-comment -->';
+export const STICKY_COMMENT_MARKER_LEGACY = '<!-- trustbridge-action:sticky-comment -->';
+
+/**
+ * Hidden marker embedded in every TrustBridge comment body. Includes the
+ * comment schema version so future releases can detect the format of a
+ * prior comment and decide whether to update it in place or post a new
+ * one.
+ */
+export const STICKY_COMMENT_MARKER = `<!-- trustbridge-action:sticky-comment:schema-v${COMMENT_SCHEMA_VERSION} -->`;
 
 function statusIcon(passed: boolean): string {
   return passed ? '✅' : '❌';
@@ -36,6 +58,7 @@ export function formatCommentBody(
   const gate = buildValidationGate(result);
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
+    `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
     '## TrustBridge — Stellar Account Check',
     '',
     `Checked account: ${inlineCode(config.stellarAddress)}`,
@@ -84,8 +107,39 @@ export function formatCommentBody(
 
   lines.push(
     '',
+    '### Configuration summary',
+    '',
+    `| Input | Value |`,
+    `| --- | --- |`,
+    `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`,
+    `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`,
+    `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`,
+  );
+
+  if (config.waitUntilFunded) {
+    const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
+    const interval = config.waitUntilFundedIntervalMs ?? 5000;
+    lines.push(
+      `| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`,
+      `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`,
+    );
+  }
+
+  lines.push(
+    '',
+    '### Action outputs reference',
+    '',
+    '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._',
+    '',
+    `| Output | Value in this run | Description |`,
+    `| --- | --- | --- |`,
+    `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`,
+    `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`,
+    `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`,
+    `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`,
+    '',
     '---',
-    '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_',
+    TRUSTBRIDGE_FOOTER,
   );
 
   return lines.join('\n');
@@ -104,9 +158,29 @@ export interface UpsertCommentOptions {
 type Octokit = ReturnType<typeof github.getOctokit>;
 
 /**
+ * Returns true when a comment body matches any of the TrustBridge
+ * identifiers: the current versioned sticky marker, the legacy marker
+ * (pre-schema-version), or the TrustBridge footer. Matching on any of
+ * these provides defense-in-depth across upgrades and accidental
+ * marker drift.
+ */
+export function isTrustBridgeComment(body: string | undefined | null): boolean {
+  if (!body) return false;
+  return (
+    body.includes(STICKY_COMMENT_MARKER) ||
+    body.includes(STICKY_COMMENT_MARKER_LEGACY) ||
+    body.includes(TRUSTBRIDGE_FOOTER)
+  );
+}
+
+/**
  * Find TrustBridge's previous sticky comment on the issue, if any.
  * Paginates through every comment so the marker is found even on
  * high-traffic issues with 100+ comments.
+ *
+ * Matches on the current versioned marker, the legacy marker, and the
+ * action footer so comments posted by older releases are still eligible
+ * for upsert.
  */
 export async function findStickyComment(
   octokit: Octokit,
@@ -121,7 +195,7 @@ export async function findStickyComment(
     per_page: 100,
   });
 
-  const existing = comments.find((comment) => comment.body?.includes(STICKY_COMMENT_MARKER));
+  const existing = comments.find((comment) => isTrustBridgeComment(comment.body));
   return existing?.id;
 }
 

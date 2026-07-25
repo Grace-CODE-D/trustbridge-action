@@ -46,12 +46,19 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
     5000,
     { min: 1000, max: 60000 },
   );
+  const horizonUrlFallback = core.getInput('horizon_url_fallback') || '';
+  const horizonCacheTtlMs = parseNumberInput(core.getInput('horizon_cache_ttl_ms'), 60000, {
+    min: 0,
+    max: 3_600_000,
+  });
   const githubToken = core.getInput('github_token', { required: true });
 
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {
     component: 'index',
     horizonUrl,
+    horizonUrlFallback,
+    horizonCacheTtlMs,
     assetCode,
     assetIssuer,
     minXlmReserveRaw,
@@ -88,6 +95,7 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
     minXlmReserve,
+    horizonUrl,
   };
 
   core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
@@ -100,20 +108,27 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
 
   let result;
 
+  const horizonOptions = {
+    timeoutMs: horizonTimeoutMs,
+    horizonUrlFallback: horizonUrlFallback || undefined,
+    cacheTtlMs: horizonCacheTtlMs,
+  };
+
   try {
     const account = waitUntilFunded
       ? await waitForFundedAccount(horizonUrl, stellarAddress, {
           timeoutMs: waitUntilFundedTimeoutMs,
           pollIntervalMs: waitUntilFundedIntervalMs,
           requestTimeoutMs: horizonTimeoutMs,
+          maxRetries: undefined,
           onPoll: (attempt, elapsedMs) =>
             logger.debug(`Account not yet funded — polling again`, {
               component: 'index',
               attempt,
               elapsedMs,
             }),
-        })
-      : await fetchAccount(horizonUrl, stellarAddress, { timeoutMs: horizonTimeoutMs });
+        }, (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }))
+      : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
     if (error instanceof HorizonError && error.statusCode === 404) {
@@ -134,6 +149,11 @@ core.getInput('horizon_url') || 'https://horizon.stellar.org';
     ...checkConfig,
     stellarAddress,
     horizonUrl,
+    failOnMissing,
+    stickyComment,
+    waitUntilFunded,
+    waitUntilFundedTimeoutMs,
+    waitUntilFundedIntervalMs,
   });
 
   let commentUrl: string | undefined;

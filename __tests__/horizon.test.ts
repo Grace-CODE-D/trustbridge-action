@@ -3,15 +3,22 @@ import { HorizonError, isCreditBalance,
   parseRetryAfterMs,
   parseHorizonBalance, normalizeHorizonUrl } from '../src/horizon';
 import { fetchAccount, HorizonAccount, waitForFundedAccount } from '../src/horizon';
+import * as loggerModule from '../src/logger';
+import { SimpleCache } from '../src/cache';
+import type { Request, RequestInit, Response } from 'node-fetch';
 
 const TEST_ADDRESS = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+const TEST_ADDRESS_2 = `G${'B'.repeat(52)}WHF`;
+const FALLBACK_ADDRESS = `G${'C'.repeat(52)}WHF`;
+const PRIMARY_HORIZON = 'https://horizon.stellar.org';
+const FALLBACK_HORIZON = 'https://horizon-fallback.stellar.org';
 
-function makeAccount(): HorizonAccount {
+function makeAccount(address: string = TEST_ADDRESS): HorizonAccount {
   return {
-    id: TEST_ADDRESS,
-    account_id: TEST_ADDRESS,
+    id: address,
+    account_id: address,
     sequence: '1',
-    subentry_count: 0,
+    subentry_count: 2,
     num_sponsoring: 0,
     num_sponsored: 0,
     balances: [
@@ -21,8 +28,107 @@ function makeAccount(): HorizonAccount {
         buying_liabilities: '0.0000000',
         selling_liabilities: '0.0000000',
       },
+      {
+        balance: '5.0000000',
+        asset_type: 'credit_alphanum4',
+        asset_code: 'USDC',
+        asset_issuer: TEST_ADDRESS_2,
+        buying_liabilities: '0.0000000',
+        selling_liabilities: '0.0000000',
+      },
     ],
   };
+}
+
+type DebugCall = { message: string; context: loggerModule.LogContext | undefined };
+type TestContext = loggerModule.LogContext & Record<string, unknown>;
+type FetchArg = string | Request;
+
+function captureDebugCalls(): { calls: DebugCall[]; restore: () => void } {
+  const calls: DebugCall[] = [];
+  const spy = jest
+    .spyOn(loggerModule.logger, 'debug')
+    .mockImplementation((message, context) => {
+      const safeMessage = loggerModule.redactString(message);
+      const safeContext = loggerModule.redactContext(context);
+      calls.push({
+        message: safeMessage,
+        context: safeContext ? { ...safeContext } : undefined,
+      });
+    });
+  return {
+    calls,
+    restore: () => spy.mockRestore(),
+  };
+}
+
+function assertNoRawAddress(text: string | undefined, raw: string): void {
+  if (!text) return;
+  expect(text).not.toContain(raw);
+}
+
+function assertContextHasNoRawAddress(
+  context: loggerModule.LogContext | undefined,
+  rawAddress: string,
+): void {
+  if (!context) return;
+  for (const [, value] of Object.entries(context)) {
+    if (typeof value === 'string') {
+      assertNoRawAddress(value, rawAddress);
+    } else if (typeof value === 'object' && value !== null) {
+      const json = JSON.stringify(value);
+      assertNoRawAddress(json, rawAddress);
+    }
+  }
+}
+
+function assertAllCallsRedacted(
+  calls: DebugCall[],
+  rawAddresses: string[],
+): void {
+  for (const call of calls) {
+    for (const addr of rawAddresses) {
+      assertNoRawAddress(call.message, addr);
+      assertContextHasNoRawAddress(call.context, addr);
+    }
+  }
+}
+
+function redactForAddress(raw: string): string {
+  return loggerModule.redactStellarAddress(raw);
+}
+
+function requireContext(call: DebugCall | undefined): TestContext {
+  expect(call).toBeDefined();
+  return (call?.context ?? {}) as TestContext;
+}
+
+type MockFetch = jest.Mock<Promise<Response>, [FetchArg, RequestInit?]>;
+
+function makeMockFetch(
+  impl: (url: FetchArg, init?: RequestInit) => Promise<Response>,
+): MockFetch {
+  return jest.fn<Promise<Response>, [FetchArg, RequestInit?]>(impl);
+}
+
+function makeMockResponse(
+  status: number,
+  body: unknown,
+  opts?: { headers?: Record<string, string> },
+): Response {
+  const headersMap: Record<string, string> = opts?.headers ?? {};
+  const headers = new (class {
+    private h: Record<string, string>;
+    constructor(h: Record<string, string>) { this.h = h; }
+    get(k: string) { return this.h[k.toLowerCase()] ?? null; }
+  })(headersMap);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? 'OK' : status === 404 ? 'Not Found' : 'Error',
+    headers,
+    json: async () => body,
+  } as unknown as Response;
 }
 
 describe('normalizeHorizonUrl', () => {
@@ -54,18 +160,8 @@ describe('isRetryableStatus', () => {
 
 describe('isCreditBalance', () => {
   it('detects credit balances', () => {
-    expect(isCreditBalance({ balance: '1', asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: 'GISSUER', buying_liabilities: '0', selling_liabilities: '0' })).toBe(true);
+    expect(isCreditBalance({ balance: '1', asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: 'GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', buying_liabilities: '0', selling_liabilities: '0' })).toBe(true);
     expect(isCreditBalance({ balance: '1', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' })).toBe(false);
-  });
-});
-
-describe('fetchAccount', () => {
-  it('fails fast when horizon_url is blank', async () => {
-    await expect(fetchAccount('   ', 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF')).rejects.toMatchObject({
-      message: 'horizon_url is required.',
-      statusCode: 0,
-      retryable: false,
-    } satisfies Partial<HorizonError>);
   });
 });
 
@@ -73,6 +169,16 @@ describe('parseHorizonBalance', () => {
   it('parses numeric balances and falls back to zero', () => {
     expect(parseHorizonBalance('1.5000000')).toBe(1.5);
     expect(parseHorizonBalance('bad')).toBe(0);
+  });
+});
+
+describe('fetchAccount: basic', () => {
+  it('fails fast when horizon_url is blank', async () => {
+    await expect(fetchAccount('   ', TEST_ADDRESS)).rejects.toMatchObject({
+      message: 'horizon_url is required.',
+      statusCode: 0,
+      retryable: false,
+    } satisfies Partial<HorizonError>);
   });
 });
 
@@ -88,7 +194,7 @@ describe('waitForFundedAccount', () => {
     const onPoll = jest.fn();
 
     const result = await waitForFundedAccount(
-      'https://horizon.stellar.org',
+      PRIMARY_HORIZON,
       TEST_ADDRESS,
       { timeoutMs: 5000, pollIntervalMs: 5, onPoll },
       fetchAccountFn,
@@ -104,7 +210,7 @@ describe('waitForFundedAccount', () => {
 
     await expect(
       waitForFundedAccount(
-        'https://horizon.stellar.org',
+        PRIMARY_HORIZON,
         TEST_ADDRESS,
         { timeoutMs: 20, pollIntervalMs: 5 },
         fetchAccountFn,
@@ -118,12 +224,355 @@ describe('waitForFundedAccount', () => {
 
     await expect(
       waitForFundedAccount(
-        'https://horizon.stellar.org',
+        PRIMARY_HORIZON,
         TEST_ADDRESS,
         { timeoutMs: 5000, pollIntervalMs: 5 },
         fetchAccountFn,
       ),
     ).rejects.toBe(outage);
     expect(fetchAccountFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Horizon debug log redaction', () => {
+  const RAW_ADDRESSES = [TEST_ADDRESS, TEST_ADDRESS_2, FALLBACK_ADDRESS];
+
+  describe('fetch path: success debug logs redact addresses and URLs', () => {
+    it('redacts stellar addresses and horizon URLs from every debug line on success', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const account = makeAccount(TEST_ADDRESS);
+      const mock = makeMockFetch(async () => makeMockResponse(200, account));
+      loggerModule.logger.setDebugMode(true);
+      const expectedRedacted = redactForAddress(TEST_ADDRESS);
+
+      try {
+        const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          fetchFn: mock,
+        });
+        expect(result.account_id).toBe(TEST_ADDRESS);
+        expect(mock).toHaveBeenCalledTimes(1);
+        expect(calls.length).toBeGreaterThan(0);
+        const fetchStart = calls.find((c) => c.message === 'Horizon fetch start');
+        expect(fetchStart).toBeDefined();
+        expect(fetchStart!.context?.url).toContain(expectedRedacted);
+        const success = calls.find((c) => c.message === 'Horizon fetch success');
+        const successCtx = requireContext(success);
+        expect(successCtx.balancesCount).toBe(2);
+        expect(successCtx.creditTrustlineCount).toBe(1);
+        expect(successCtx.subentryCount).toBe(2);
+        expect(successCtx.balances).toBeUndefined();
+        expect(successCtx.sequence).toBeUndefined();
+        expect(successCtx.account_id).toBeUndefined();
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+
+    it('redacts addresses in error debug lines (400 non-retryable parses body)', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const errBody = { type: 'https://stellar.org/horizon-errors/bad_request', title: 'Bad Request', status: 400, detail: `The resource at /accounts/${TEST_ADDRESS} was malformed` };
+      const mock = makeMockFetch(async () => makeMockResponse(400, errBody));
+      loggerModule.logger.setDebugMode(true);
+      const expectedRedacted = redactForAddress(TEST_ADDRESS);
+
+      try {
+        await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          fetchFn: mock,
+        })).rejects.toMatchObject({ statusCode: 400 });
+        expect(mock).toHaveBeenCalledTimes(1);
+        expect(calls.length).toBeGreaterThan(0);
+        const parsed = calls.find((c) => c.message === 'Horizon error response parsed');
+        const parsedCtx = requireContext(parsed);
+        expect(parsedCtx.errorDetail).toContain(expectedRedacted);
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+
+    it('emits 404-specific debug line and does not try fallback for 404', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const errBody = { type: 'https://stellar.org/horizon-errors/not_found', title: 'Not Found', status: 404, detail: `Not found` };
+      const mock = makeMockFetch(async () => makeMockResponse(404, errBody));
+      loggerModule.logger.setDebugMode(true);
+
+      try {
+        await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          horizonUrlFallback: FALLBACK_HORIZON,
+          fetchFn: mock,
+        })).rejects.toMatchObject({ statusCode: 404 });
+        expect(mock).toHaveBeenCalledTimes(1);
+        const notFound = calls.find((c) => c.message === 'Horizon account not found (404)');
+        expect(notFound).toBeDefined();
+        const fallbackSwitch = calls.find((c) =>
+          c.message === 'Horizon RPC fallback: primary exhausted, switching to fallback URL',
+        );
+        expect(fallbackSwitch).toBeUndefined();
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+  });
+
+  describe('retry path: transient HTTP 429 + retry debug logs redacted', () => {
+    it('redacts addresses and retry details on transient HTTP retries', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const account = makeAccount(TEST_ADDRESS);
+      const errBody = { type: 'rate_limit', title: 'Too Many Requests', status: 429, detail: `Account ${TEST_ADDRESS} exceeded rate limit` };
+      let callCount = 0;
+      const mock = makeMockFetch(async () => {
+        callCount += 1;
+        if (callCount < 2) {
+          return makeMockResponse(429, errBody, { headers: { 'retry-after': '0' } });
+        }
+        return makeMockResponse(200, account);
+      });
+      const origSetTimeout = global.setTimeout;
+      global.setTimeout = ((callback: Parameters<typeof setTimeout>[0]) =>
+        origSetTimeout(callback, 0)) as typeof setTimeout;
+      loggerModule.logger.setDebugMode(true);
+      const expectedRedacted = redactForAddress(TEST_ADDRESS);
+
+      try {
+        const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 2,
+          cacheTtlMs: 0,
+          fetchFn: mock,
+        });
+        expect(result.account_id).toBe(TEST_ADDRESS);
+        expect(mock).toHaveBeenCalledTimes(2);
+        const retrySched = calls.find((c) => c.message === 'Horizon retry scheduled');
+        const retryCtx = requireContext(retrySched);
+        expect(retryCtx.nextAttempt).toBe(1);
+        expect(retryCtx.retryAfterFromHeader).toBe(true);
+        const parsedErr = calls.find((c) => c.message === 'Horizon error response parsed');
+        const parsedErrCtx = requireContext(parsedErr);
+        expect(parsedErrCtx.errorDetail).not.toContain(TEST_ADDRESS);
+        expect(parsedErrCtx.errorDetail).toContain(expectedRedacted);
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        global.setTimeout = origSetTimeout;
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+  });
+
+  describe('cache path: cache lookup, hit, miss, and populate debug logs redacted', () => {
+    it('redacts cache keys and embedded addresses on cache hit and populate', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const cache = new SimpleCache();
+      const account = makeAccount(TEST_ADDRESS);
+      const mock = makeMockFetch(async () => makeMockResponse(200, account));
+      loggerModule.logger.setDebugMode(true);
+      const expectedRedacted = redactForAddress(TEST_ADDRESS);
+
+      try {
+        const first = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 60_000,
+          cache,
+          fetchFn: mock,
+        });
+        expect(first.account_id).toBe(TEST_ADDRESS);
+        expect(mock).toHaveBeenCalledTimes(1);
+        const lookup = calls.find((c) => c.message === 'Horizon cache lookup start');
+        const lookupCtx = requireContext(lookup);
+        expect(lookupCtx.cacheKey).toContain('horizon:account:');
+        expect(lookupCtx.cacheKey).not.toContain(TEST_ADDRESS);
+        expect(lookupCtx.cacheKey).toContain(expectedRedacted);
+        const miss = calls.find((c) => c.message === 'Horizon cache miss');
+        expect(miss).toBeDefined();
+        const populate = calls.find((c) => c.message === 'Horizon cache populate after primary success');
+        const populateCtx = requireContext(populate);
+        expect(populateCtx.source).toBe('primary');
+        expect(populateCtx.cacheSizeAfter).toBe(1);
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+
+        calls.length = 0;
+        mock.mockClear();
+        const second = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 60_000,
+          cache,
+          fetchFn: mock,
+        });
+        expect(second.account_id).toBe(TEST_ADDRESS);
+        expect(mock).not.toHaveBeenCalled();
+        const hit = calls.find((c) => c.message === 'Horizon cache hit');
+        const hitCtx = requireContext(hit);
+        expect(hitCtx.balancesCount).toBe(2);
+        expect(hitCtx.cacheKey).not.toContain(TEST_ADDRESS);
+        const fetchCalls = calls.filter((c) => c.message === 'Horizon fetch start');
+        expect(fetchCalls.length).toBe(0);
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+
+    it('emits a cache-disabled debug line when ttl is 0', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const account = makeAccount(TEST_ADDRESS);
+      const mock = makeMockFetch(async () => makeMockResponse(200, account));
+      loggerModule.logger.setDebugMode(true);
+
+      try {
+        await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          fetchFn: mock,
+        });
+        expect(mock).toHaveBeenCalledTimes(1);
+        const disabled = calls.find((c) => c.message === 'Horizon cache disabled (ttl=0)');
+        const disabledCtx = requireContext(disabled);
+        expect(disabledCtx.cacheTtlMs).toBe(0);
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+  });
+
+  describe('RPC fallback path: fallback switch, success, and exhaustion debug logs redacted', () => {
+    it('redacts primary/fallback URLs and error messages when fallback succeeds', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const account = makeAccount(FALLBACK_ADDRESS);
+      const primaryErrBody = { type: 'server_error', title: 'Service Unavailable', status: 503, detail: `Upstream error while querying account ${TEST_ADDRESS_2}` };
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(503, primaryErrBody);
+        }
+        return makeMockResponse(200, account);
+      });
+      loggerModule.logger.setDebugMode(true);
+      const expectedTestAddr = redactForAddress(TEST_ADDRESS);
+      const expectedAddr2 = redactForAddress(TEST_ADDRESS_2);
+
+      try {
+        const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          horizonUrlFallback: FALLBACK_HORIZON,
+          fetchFn: mock,
+        });
+        expect(result.account_id).toBe(FALLBACK_ADDRESS);
+        expect(mock).toHaveBeenCalledTimes(2);
+
+        const switchLog = calls.find((c) =>
+          c.message === 'Horizon RPC fallback: primary exhausted, switching to fallback URL',
+        );
+        const switchCtx = requireContext(switchLog);
+        expect(switchCtx.horizonUrlFallback).toContain(FALLBACK_HORIZON.replace(/\/+$/, ''));
+        expect(switchCtx.primaryStatusCode).toBe(503);
+        expect(switchCtx.primaryErrorMessage).not.toContain(TEST_ADDRESS_2);
+        expect(switchCtx.primaryErrorMessage).toContain(expectedAddr2);
+
+        const fallbackSuccess = calls.find(
+          (c) => c.message === 'Horizon RPC fallback succeeded',
+        );
+        const fallbackSuccessCtx = requireContext(fallbackSuccess);
+        expect(fallbackSuccessCtx.fallbackAttempts).toBeDefined();
+        expect(fallbackSuccessCtx.fallbackLatencyMs).toBeDefined();
+
+        const fallbackFetches = calls.filter(
+          (c) => c.message === 'Horizon fetch start' && requireContext(c).endpointKind === 'fallback',
+        );
+        expect(fallbackFetches.length).toBe(1);
+        expect(requireContext(fallbackFetches[0]).url).toContain(expectedTestAddr);
+
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+
+    it('redacts both primary and fallback errors when fallback is exhausted', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const primaryErrBody = { type: 'server_error', title: 'Bad Gateway', status: 502, detail: `Connecting to account ${TEST_ADDRESS} failed` };
+      const fallbackErrBody = { type: 'server_error', title: 'Service Unavailable', status: 503, detail: `Fallback also down for ${TEST_ADDRESS_2}` };
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(502, primaryErrBody);
+        }
+        return makeMockResponse(503, fallbackErrBody);
+      });
+      loggerModule.logger.setDebugMode(true);
+      const expectedTestAddr = redactForAddress(TEST_ADDRESS);
+      const expectedAddr2 = redactForAddress(TEST_ADDRESS_2);
+
+      try {
+        await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          horizonUrlFallback: FALLBACK_HORIZON,
+          fetchFn: mock,
+        })).rejects.toMatchObject({ statusCode: 503 });
+        expect(mock).toHaveBeenCalledTimes(2);
+
+        const exhausted = calls.find(
+          (c) => c.message === 'Horizon RPC fallback exhausted',
+        );
+        const exhaustedCtx = requireContext(exhausted);
+        expect(exhaustedCtx.primaryStatusCode).toBe(502);
+        expect(exhaustedCtx.fallbackStatusCode).toBe(503);
+        expect(exhaustedCtx.primaryErrorMessage).not.toContain(TEST_ADDRESS);
+        expect(exhaustedCtx.fallbackErrorMessage).not.toContain(TEST_ADDRESS_2);
+        expect(exhaustedCtx.primaryErrorMessage).toContain(expectedTestAddr);
+        expect(exhaustedCtx.fallbackErrorMessage).toContain(expectedAddr2);
+
+        assertAllCallsRedacted(calls, RAW_ADDRESSES);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+  });
+
+  describe('safeAccountSummary: never emits sensitive account fields into debug context', () => {
+    it('strips balance, sequence, sponsor counts and raw id from success context', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const account = makeAccount(TEST_ADDRESS);
+      const mock = makeMockFetch(async () => makeMockResponse(200, account));
+      loggerModule.logger.setDebugMode(true);
+
+      try {
+        await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          fetchFn: mock,
+        });
+        expect(mock).toHaveBeenCalledTimes(1);
+        const success = calls.find((c) => c.message === 'Horizon fetch success');
+        const ctx = requireContext(success);
+        expect(ctx.sequence).toBeUndefined();
+        expect(ctx.balances).toBeUndefined();
+        expect(ctx.id).toBeUndefined();
+        expect(ctx.account_id).toBeUndefined();
+        expect(ctx.num_sponsoring).toBeUndefined();
+        expect(ctx.num_sponsored).toBeUndefined();
+        expect(ctx.balancesCount).toBe(2);
+        expect(ctx.creditTrustlineCount).toBe(1);
+        expect(ctx.hasNativeBalance).toBe(true);
+        expect(ctx.subentryCount).toBe(2);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
   });
 });

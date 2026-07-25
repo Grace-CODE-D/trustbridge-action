@@ -88,6 +88,8 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `wait_until_funded` | No | `false` | Poll Horizon until the account is funded instead of failing on the first 404 |
 | `wait_until_funded_timeout_ms` | No | `120000` | Max time to poll for funding, in milliseconds (0-600000) |
 | `wait_until_funded_interval_ms` | No | `5000` | Delay between funding polls, in milliseconds (1000-60000) |
+| `horizon_url_fallback` | No | _(empty)_ | Optional fallback Horizon URL. When the primary `horizon_url` fails with a retryable non-404 error (429/502/503/504, timeout), TrustBridge retries the full request against this URL. Use for cross-region or multi-provider resilience. |
+| `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
@@ -143,6 +145,55 @@ Only a Horizon 404 ("account not found") triggers a poll. Rate limits, timeouts,
 
 ---
 
+## Resilience: in-memory cache and RPC fallback
+
+TrustBridge ships with two opt-in resilience features that reduce round-trips to Horizon and survive single-region outages. Both are fully compatible with `wait_until_funded` and retry-on-rate-limit logic.
+
+### In-memory Horizon account cache
+
+Within a single GitHub Actions job, account lookups are cached in memory by default (60 s TTL, configurable via `horizon_cache_ttl_ms`). Subsequent checks for the same `(horizon_url, stellar_address)` pair return the cached response without issuing another HTTP call:
+
+```yaml
+with:
+  # ...other inputs...
+  horizon_cache_ttl_ms: 120000   # cache for 2 minutes within this job
+```
+
+Setting `horizon_cache_ttl_ms: 0` disables the cache entirely so every check reaches Horizon live.
+
+### Horizon RPC fallback URL
+
+For high-reliability workflows, point `horizon_url_fallback` at a second Horizon endpoint (e.g. a different region or an alternative provider):
+
+```yaml
+with:
+  horizon_url: https://horizon.stellar.org
+  horizon_url_fallback: https://horizon-alt.stellar.org   # e.g. Cloudflare, self-hosted
+```
+
+When the primary endpoint exhausts its retries on a retryable error (429 / 502 / 503 / 504 / network timeout), TrustBridge transparently re-runs the same request against the fallback URL before surfacing a failure. Account-not-found (404) is **not** retried on the fallback — a missing account on primary is treated as a missing account everywhere, consistent with `wait_until_funded` semantics. Caching is shared between primary and fallback (the cache key is keyed on primary URL), so a fallback success populates the cache for subsequent lookups.
+
+---
+
+## Debug logging and redaction
+
+When `debug_mode: true` is set, TrustBridge emits detailed `core.debug` lines covering every stage of the Horizon client:
+
+| Debug event | Description |
+|-------------|-------------|
+| `Horizon cache lookup start` / `Horizon cache hit` / `Horizon cache miss` / `Horizon cache populate after… success` / `Horizon cache disabled (ttl=0)` | Caching pipeline. Cache keys, stats entries, and summary payloads are all redacted. |
+| `Horizon fetch start` / `Horizon fetch success` | Fetch lifecycle, tagged with `endpointKind=primary\|fallback`. URL path and context addresses are masked. |
+| `Horizon account not found (404)` | 404 response (never retried, never falls back). |
+| `Horizon error response parsed` / `Horizon error response missing JSON body` | Non-2xx responses. Upstream `detail`, `title`, `type` strings are scanned and redacted before logging. |
+| `Horizon retry scheduled` / `Horizon transport retry scheduled` | Transient HTTP or transport errors scheduled for retry. |
+| `Horizon non-retryable HTTP error (exhausted retries)` / `Horizon transport error (exhausted retries)` | Primary endpoint giving up. |
+| `Horizon RPC fallback: primary exhausted, switching to fallback URL` | Start of fallback attempt. Primary error message and both URLs are redacted. |
+| `Horizon RPC fallback succeeded` / `Horizon RPC fallback exhausted` | Fallback outcome. Both primary and fallback status/message fields are redacted on exhaustion. |
+
+**Redaction policy.** Every Stellar G-address / C-address, every Horizon account URL, every cache key that embeds an address, and every free-form upstream string that could contain an address is run through the `StructuredLogger` redaction pipeline before any line reaches GitHub Actions log output. The policy is: addresses are masked to `first4…last4` (e.g. `GA5Z…KZVN`), hostnames and paths are preserved so operators can verify *which* Horizon instance was called without leaking contributor account data. Sensitive account fields — raw balance numbers, sequence numbers, sponsor counts, the full `balances` array — are never placed in debug context; only aggregate structural summaries (`balancesCount`, `creditTrustlineCount`, `hasNativeBalance`, `subentryCount`) are emitted alongside the redacted address. Refer to [src/logger.ts](src/logger.ts) (`redactStellarAddress`, `redactHorizonUrl`, `redactContext`, `redactString`) and the safe-context helpers in [src/horizon.ts](src/horizon.ts) (`safeHorizonContext`, `safeAccountSummary`) for the exact implementations.
+
+---
+
 ## Example issue comment
 
 When checks fail, TrustBridge posts a comment like:
@@ -180,6 +231,28 @@ Asset: **USDC** · Issuer: `GA5ZSEJ...KZVN`
 ### Remediation
 
 Activate `GABC...` by sending at least **1 XLM**...
+
+### Configuration summary
+
+| Input | Value |
+| --- | --- |
+| `fail_on_missing` | `true` — step fails on missing checks |
+| `sticky_comment` | `true` — upserts prior comment |
+| `wait_until_funded` | `false` (default) |
+
+### Action outputs reference
+
+_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._
+
+| Output | Value in this run | Description |
+| --- | --- | --- |
+| `account_funded` | `false` | Whether the account exists on the Stellar network (from `action.yml`) |
+| `trustline_exists` | `false` | Whether the **USDC** trustline is configured (from `action.yml`) |
+| `xlm_balance` | `0` | Native XLM balance reported by Horizon (from `action.yml`) |
+| `comment_url` | _set after posting_ | URL of this issue comment (from `action.yml`) |
+
+---
+_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_
 ```
 
 ---
@@ -257,8 +330,9 @@ TrustBridge handles common failure modes from Horizon and invalid input:
 | Scenario | Behavior |
 |----------|----------|
 | Invalid G-address | Fails before Horizon call |
-| Account not found (404) | `account_funded=false`, remediation comment |
-| Horizon 429 / 503 / timeout | Exponential backoff retries, then failure result |
+| Account not found (404) | `account_funded=false`, remediation comment. 404 is **not** retried or fallen back. |
+| Horizon 429 / 502 / 503 / 504 / timeout | Per-endpoint exponential backoff retries. If `horizon_url_fallback` is set and primary exhausts retries, transparently retries against fallback. |
+| Cached account lookup | Returns cached response (no HTTP call); cache keys, stats, and summaries are redacted in debug output. |
 | Account with zero trustlines | Trustline check fails with specific message |
 | Comment post failure | Warning logged; check result still applied |
 
