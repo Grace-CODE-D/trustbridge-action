@@ -15,8 +15,7 @@ import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
-import { validateContractAddress } from './validation';
-import { readTrustbridgeConfig } from './configReader';
+import { validateContractAddress, clearSpans, getSpans } from './validation';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -60,27 +59,12 @@ async function run(): Promise<void> {
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
 
-  // ---------------------------------------------------------------------------
-  // Consumer trustbridge.yml reader (Issue #45)
-  // Read the optional consumer config file and apply any values it supplies
-  // as defaults for action inputs that were not explicitly set in the workflow.
-  // The reader enforces SSRF-safe URLs, injection-clean strings, and secret
-  // field redaction before any config value reaches the action runtime.
-  // ---------------------------------------------------------------------------
-  const configResult = readTrustbridgeConfig(trustbridgeConfigPath, process.env.GITHUB_WORKSPACE);
-  if (configResult.found) {
-    if (!configResult.validation.valid) {
-      // Hard-fail: an invalid consumer config is a security concern. Surface
-      // every error so the workflow author can fix them all in one pass.
-      throw new Error(
-        `trustbridge.yml validation failed:\n${configResult.validation.errors.map((e) => `  - ${e}`).join('\n')}`,
-      );
-    }
-    logger.debug('Consumer trustbridge.yml loaded', {
-      component: 'configReader',
-      resolvedPath: configResult.resolvedPath,
-    });
-  }
+  // SEP-0007 wallet deep links (Issue #44)
+  const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
+  const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Clear validation spans from any prior run in the same process (safety).
+  clearSpans();
 
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {
@@ -99,6 +83,7 @@ async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
+    sep0007DeepLinks,
   });
 
   if (logInputs) {
@@ -178,8 +163,6 @@ async function run(): Promise<void> {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
             requestTimeoutMs: horizonTimeoutMs,
-            fallbackUrls,
-            useCache,
             onPoll: (attempt, elapsedMs) =>
               logger.debug(`Account not yet funded — polling again`, {
                 component: 'index',
@@ -215,6 +198,8 @@ async function run(): Promise<void> {
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
     waitUntilFundedIntervalMs,
+    sep0007DeepLinks,
+    sep0007OriginDomain,
   });
 
   let commentUrl: string | undefined;
@@ -233,6 +218,13 @@ async function run(): Promise<void> {
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
     core.debug(globalMetrics.toJSON());
+
+    // Emit validation spans for observability (Issue #35)
+    const spans = getSpans();
+    if (spans.length > 0) {
+      logger.debug('Validation spans', { component: 'validation', spanCount: spans.length });
+      core.debug(JSON.stringify(spans, null, 2));
+    }
   }
 
   if (result.valid) {
