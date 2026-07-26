@@ -93,6 +93,7 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
 | `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
+| `auto_wallet_labels` | No | `false` | Automatically apply a wallet state label to the issue (`wallet: funded`, `wallet: unfunded`, `wallet: trustline-missing`, `wallet: reserve-low`, `wallet: horizon-error`). Requires `issues: write`. |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
 
@@ -146,6 +147,140 @@ with:
 Only a Horizon 404 ("account not found") triggers a poll. Rate limits, timeouts, and other Horizon errors are not treated as "not yet funded" — they surface immediately as a failure result so a Horizon outage can't turn into a silent multi-minute hang.
 
 ---
+
+## Auto wallet labels (Wave #31)
+
+When `auto_wallet_labels: true` is set, TrustBridge applies a single state label to the issue after every check run:
+
+| Label | When applied |
+|-------|-------------|
+| `wallet: funded` | Account active, trustline present, XLM reserve met |
+| `wallet: unfunded` | Horizon returned 404 — account not yet created |
+| `wallet: trustline-missing` | Account active but missing the required asset trustline |
+| `wallet: reserve-low` | Account active + trustline present, but XLM balance below reserve |
+| `wallet: horizon-error` | Non-404 Horizon error; wallet state could not be determined |
+
+Stale wallet labels (from previous runs) are automatically removed before the new label is applied, so an issue always shows exactly one wallet state. Label failures (e.g. missing `issues: write` permission) are non-fatal — they emit a `core.warning` and do not block the validation result or comment.
+
+```yaml
+- name: TrustBridge check
+  uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    auto_wallet_labels: true
+```
+
+The label is derived from `deriveWalletLabel` in `src/horizon.ts` using this priority order: `horizon-error` → `unfunded` → `trustline-missing` → `reserve-low` → `funded`.
+
+## Octokit metrics and JSON artifact (Wave #37)
+
+Every GitHub API call made during a run (issue comment create/update, wallet label apply/remove) is instrumented by `OctokitMetrics` in `src/metrics.ts`. Each call records:
+
+- Operation name (`issues.createComment`, `issues.addLabels`, etc.)
+- HTTP status code and classified outcome (`success`, `auth_error`, `not_found`, `rate_limited`, `server_error`, `network_error`, `unknown`)
+- Wall-clock latency in milliseconds
+- Retry count
+- ISO-8601 start timestamp
+- Error message on failure
+
+When `debug_mode: true` is set, the full JSON summary is emitted to `core.debug()` and is visible in the Actions log. The summary shape:
+
+```json
+{
+  "totalCalls": 2,
+  "successCount": 2,
+  "failureCount": 0,
+  "totalLatencyMs": 312,
+  "averageLatencyMs": 156,
+  "totalRetries": 0,
+  "outcomeBreakdown": {
+    "success": 2, "auth_error": 0, "not_found": 0,
+    "rate_limited": 0, "server_error": 0, "network_error": 0, "unknown": 0
+  },
+  "operations": [
+    { "operation": "issues.createComment", "statusCode": 201, "latencyMs": 180, "outcome": "success", ... },
+    { "operation": "issues.addLabels",     "statusCode": 200, "latencyMs": 132, "outcome": "success", ... }
+  ]
+}
+```
+
+`403` responses with `x-ratelimit-remaining: 0` are classified as `rate_limited` (not `auth_error`) so dashboards can distinguish token exhaustion from permission failures.
+
+## Resilience: circuit breaker, GitHub Check Run annotations, and Horizon mock matrix
+
+### Circuit breaker (Wave #26)
+
+The `CircuitBreaker` class in `src/resilience.ts` wraps any async operation with the standard three-state circuit-breaker pattern:
+
+| State | Behavior |
+|-------|----------|
+| **closed** | Normal operation. Consecutive failures are counted. |
+| **open** | Fast-fail. Requests throw `CircuitOpenError` immediately. A recovery timer controls transition to `half-open`. |
+| **half-open** | A single probe request is allowed. Success (repeated `successThreshold` times) closes the circuit; failure re-opens it. |
+
+State transitions are emitted as **GitHub Check Run annotations** (`core.warning` on open, `core.notice` on closed/half-open) so circuit trips and recoveries appear in the Actions summary panel without requiring `debug_mode: true`.
+
+```typescript
+import { CircuitBreaker } from './src/resilience';
+
+const breaker = new CircuitBreaker({ failureThreshold: 5, recoveryTimeoutMs: 30_000 });
+const result = await breaker.execute(() => fetchAccount(horizonUrl, address));
+```
+
+You can supply a custom `onStateChange` handler to integrate with external monitoring:
+
+```typescript
+const breaker = new CircuitBreaker({
+  failureThreshold: 3,
+  onStateChange: (from, to, reason) => myMonitor.record({ from, to, reason }),
+});
+```
+
+### Check Run annotation helpers (Wave #26)
+
+Four convenience helpers emit structured resilience events as Check Run annotations visible in the Actions summary:
+
+| Helper | Level | When to use |
+|--------|-------|-------------|
+| `annotateRetry(attempt, delayMs, reason)` | `notice` | A retry has been scheduled |
+| `annotateRateLimit(waitMs)` | `warning` | Horizon returned 429 |
+| `annotateFallback(fallbackUrl, reason)` | `warning` | RPC fallback activated |
+| `annotateCircuitOpen(consecutiveFailures)` | `error` | Circuit breaker opened |
+
+### Horizon HTTP mock matrix (Wave #36)
+
+`HttpMockMatrix` in `src/resilience.ts` provides deterministic per-scenario mock `fetch` functions for use in tests and local development — no live Horizon endpoint required:
+
+```typescript
+import { HttpMockMatrix } from './src/resilience';
+import { fetchAccount } from './src/horizon';
+
+// Test the rate-limit → retry path:
+const fetchFn = HttpMockMatrix.build('flaky_then_success', { flakyFailCount: 2 });
+const account = await fetchAccount(PRIMARY, address, { fetchFn, maxRetries: 3, cacheTtlMs: 0 });
+
+// Test the primary-outage → fallback path:
+const fetchFn2 = HttpMockMatrix.buildFallbackMatrix('server_error', 'success', PRIMARY);
+const account2 = await fetchAccount(PRIMARY, address, { fetchFn: fetchFn2, horizonUrlFallback: FALLBACK });
+```
+
+Available scenarios:
+
+| Scenario | Status | Notes |
+|----------|--------|-------|
+| `success` | 200 | Returns default or custom `accountPayload` |
+| `not_found` | 404 | Triggers unfunded-account path |
+| `rate_limit` | 429 | Includes `Retry-After` header (default `0` for instant test retries) |
+| `server_error` | 503 | Retryable |
+| `bad_gateway` | 502 | Retryable |
+| `gateway_timeout` | 504 | Retryable |
+| `timeout` | — | Rejects with `AbortError` when `AbortSignal` fires |
+| `network_error` | — | Rejects with `ECONNREFUSED` |
+| `flaky_then_success` | mixed | Fails `flakyFailCount` times then succeeds |
+| `always_fail` | 503 | Never succeeds |
+
+Use `HttpMockMatrix.buildFallbackMatrix(primaryScenario, fallbackScenario, primaryUrl)` to route different scenarios to primary vs. fallback URLs in a single mock.
 
 ## Resilience: in-memory cache and RPC fallback
 

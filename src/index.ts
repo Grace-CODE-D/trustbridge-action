@@ -1,4 +1,5 @@
 import * as core from '@actions/core';
+import * as github from '@actions/github';
 import {
   CheckConfig,
   horizonFailureResult,
@@ -7,14 +8,14 @@ import {
   unfundedAccountResult,
   validateStellarAddress,
 } from './checks';
-import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
+import { fetchAccount, HorizonError, waitForFundedAccount, applyWalletLabels } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger } from './logger';
-import { globalMetrics } from './metrics';
+import { globalMetrics, globalOctokitMetrics } from './metrics';
 import { validateContractAddress } from './validation';
 
 async function run(): Promise<void> {
@@ -56,6 +57,7 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const githubToken = core.getInput('github_token', { required: true });
+  const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {
@@ -172,7 +174,11 @@ async function run(): Promise<void> {
 
   let commentUrl: string | undefined;
   try {
-    commentUrl = await postIssueComment(githubToken, commentBody, { sticky: stickyComment });
+    commentUrl = await globalOctokitMetrics.track(
+      'issues.createComment',
+      () => postIssueComment(githubToken, commentBody, { sticky: stickyComment })
+        .then((url) => ({ status: 201, headers: {}, data: url })),
+    ).then((r) => r.data);
     if (commentUrl) {
       logger.info('Issue comment created', { component: 'index', commentUrl });
     }
@@ -182,6 +188,44 @@ async function run(): Promise<void> {
   }
 
   setValidationOutputs(result, commentUrl);
+
+  // Wave #31: auto wallet labels — apply wallet state label to the issue.
+  const issueNumber = github.context.payload.issue?.number;
+  if (autoWalletLabels && issueNumber) {
+    const octokit = github.getOctokit(githubToken);
+    const { owner, repo } = github.context.repo;
+    const isHorizonError =
+      !result.accountFunded && result.xlmBalance === 'unknown';
+
+    const labelResult = await globalOctokitMetrics.track(
+      'issues.addLabels',
+      async () => {
+        const r = await applyWalletLabels(octokit, owner, repo, issueNumber, {
+          accountFunded: result.accountFunded,
+          trustlineExists: result.trustlineExists,
+          xlmReserveMet: result.xlmReserveMet,
+          horizonError: isHorizonError,
+        });
+        return { status: r.error ? 422 : 200, headers: {}, data: r };
+      },
+    );
+
+    if (labelResult.data.error) {
+      core.warning(`Auto wallet label failed: ${labelResult.data.error}`);
+    } else {
+      logger.info(`Wallet label applied: ${labelResult.data.applied}`, {
+        component: 'index',
+        applied: labelResult.data.applied,
+        removed: labelResult.data.removed.length,
+      });
+    }
+  }
+
+  // Wave #37: emit Octokit metrics JSON artifact in debug mode.
+  if (debugMode) {
+    logger.debug('Octokit metrics summary (JSON artifact)', { component: 'metrics' });
+    core.debug(globalOctokitMetrics.toJSON());
+  }
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });

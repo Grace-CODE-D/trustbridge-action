@@ -98,6 +98,14 @@ inputs:
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true
+  auto_wallet_labels:
+    description: >-
+      Automatically apply a wallet state label to the issue
+      (wallet: funded | wallet: unfunded | wallet: trustline-missing |
+      wallet: reserve-low | wallet: horizon-error). Requires
+      `issues: write` permission. Default false.
+    required: false
+    default: 'false'
 
 outputs:
   trustline_exists:
