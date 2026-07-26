@@ -33,12 +33,59 @@ export interface ValidationResult {
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
 
+/** Pattern to find any Stellar G-address embedded in free-form text. */
+const STELLAR_ADDRESS_IN_TEXT_REGEX = /\bG[A-Z2-7]{55}\b/g;
+
 export function normalizeStellarAddress(address: string): string {
   return address.trim();
 }
 
 export function isValidStellarAddress(address: string): boolean {
   return STELLAR_ADDRESS_REGEX.test(normalizeStellarAddress(address));
+}
+
+export interface AddressExtractionResult {
+  /** The first valid Stellar G-address found, or undefined if none. */
+  address: string | undefined;
+  /** All valid G-addresses found in the text (deduplicated, order preserved). */
+  allAddresses: string[];
+}
+
+/**
+ * Extract Stellar G-addresses from free-form text such as an issue body.
+ *
+ * Scans the text for all 56-character sequences starting with G followed by
+ * base32 characters, validates each one, and returns the first valid hit
+ * together with a deduplicated list of every valid address found.
+ *
+ * Safe to call with arbitrary untrusted input — performs no network requests
+ * and never throws.
+ *
+ * @param text - Issue body, comment text, or any free-form string.
+ * @returns `address` (first found) and `allAddresses` (all found, deduped).
+ */
+export function extractStellarAddressFromText(text: string | undefined | null): AddressExtractionResult {
+  if (!text) {
+    return { address: undefined, allAddresses: [] };
+  }
+
+  STELLAR_ADDRESS_IN_TEXT_REGEX.lastIndex = 0;
+  const seen = new Set<string>();
+  const allAddresses: string[] = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = STELLAR_ADDRESS_IN_TEXT_REGEX.exec(text)) !== null) {
+    const candidate = match[0];
+    if (isValidStellarAddress(candidate) && !seen.has(candidate)) {
+      seen.add(candidate);
+      allAddresses.push(candidate);
+    }
+  }
+
+  return {
+    address: allAddresses[0],
+    allAddresses,
+  };
 }
 
 export function validateStellarAddress(address: string): void {

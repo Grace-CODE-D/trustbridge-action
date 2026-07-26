@@ -69,7 +69,7 @@ jobs:
 
 ## Combined trigger (assigned + manual)
 
-Matches the action design target:
+Matches the action design target. Use `issue_number` on `workflow_dispatch` runs to target a specific issue for the result comment (Wave #29):
 
 ```yaml
 on:
@@ -81,7 +81,7 @@ on:
         description: 'Stellar G-address (manual runs)'
         required: true
       issue_number:
-        description: 'Optional issue number for context'
+        description: 'Issue number to post result on (manual runs only)'
         required: false
 
 jobs:
@@ -104,6 +104,7 @@ jobs:
         id: bridge
         with:
           stellar_address_input: ${{ steps.addr.outputs.value }}
+          issue_number: ${{ github.event.inputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log results
@@ -218,9 +219,106 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 Common patterns:
 
-### Issue template field
+### Automatic extraction via `extract_address_from_issue`
 
-Parse a labeled line from the issue body:
+Enable `extract_address_from_issue: true` to have TrustBridge scan the issue body for any valid Stellar G-address and use the first one it finds. No extra scripting step needed:
+
+```yaml
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          extract_address_from_issue: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_missing: true
+```
+
+If no valid G-address is found in the issue body, the run fails immediately with a clear error. Set `extract_address_from_issue: false` (default) and supply `stellar_address_input` explicitly if you want predictable, single-source-of-truth address handling.
+
+### `workflow_dispatch` with `issue_number` (Wave #29 benchmark)
+
+Run TrustBridge manually against any issue by supplying both a Stellar address and an issue number:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      stellar_address:
+        description: 'Stellar G-address to validate'
+        required: true
+      issue_number:
+        description: 'Issue number to post the result comment on'
+        required: true
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ github.event.inputs.stellar_address }}
+          issue_number: ${{ github.event.inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_missing: false   # warn only for manual checks
+```
+
+`issue_number` overrides any issue number derived from the event payload. Without it (or when it is empty), `workflow_dispatch` runs skip the comment step because there is no issue context in the event.
+
+### `workflow_dispatch` + `extract_address_from_issue` combined
+
+Specify an issue to read the address _from_ while also targeting it for the result comment:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number — address is read from its body'
+        required: true
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Read issue body and extract address
+        id: addr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number('${{ github.event.inputs.issue_number }}'),
+            });
+            const match = issue.body?.match(/\bG[A-Z2-7]{55}\b/);
+            if (!match) core.setFailed('No Stellar address found in issue body');
+            core.setOutput('address', match[0]);
+
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.addr.outputs.address }}
+          issue_number: ${{ github.event.inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Issue template field (scripted extraction)
+
+Parse a labeled line from the issue body using `actions/github-script`:
 
 ```yaml
 - name: Extract Stellar address

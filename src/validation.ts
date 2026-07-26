@@ -333,8 +333,30 @@ export function combineResults(...results: ValidationResult[]): ValidationResult
 /**
  * Private IP ranges and loopback patterns that must never appear in a
  * consumer-supplied Horizon or RPC URL (SSRF prevention).
+ *
+ * ## Horizon SSRF Allowlist (Wave #20)
+ *
+ * Any URL that reaches `validateSsrfSafeUrl` is blocked if it matches any
+ * entry in this list. The allowlist is intentionally _block_-oriented:
+ * everything is permitted unless it matches a known-dangerous pattern.
+ *
+ * Blocked categories:
+ *   - IPv4 loopback (127.x.x.x)
+ *   - IPv4 link-local (169.254.x.x) — includes AWS/GCP/Azure metadata
+ *   - IPv4 private class-A (10.x.x.x)
+ *   - IPv4 private class-B (172.16–31.x.x)
+ *   - IPv4 private class-C (192.168.x.x)
+ *   - IPv6 loopback (::1)
+ *   - IPv6 link-local (fe80::)
+ *   - Bare "localhost" hostname
+ *   - AWS instance metadata (169.254.169.254)
+ *   - GCP metadata (metadata.google.internal)
+ *   - file:// protocol
+ *
+ * Exported as `SSRF_BLOCKED_PATTERNS` so the CI audit job and tests can
+ * assert that every category is covered without re-implementing the list.
  */
-const SSRF_BLOCKED_PATTERNS: RegExp[] = [
+export const SSRF_BLOCKED_PATTERNS: RegExp[] = [
   // IPv4 loopback
   /^https?:\/\/127\./,
   // IPv4 link-local
@@ -394,9 +416,14 @@ export function validateSsrfSafeUrl(
     return { valid: false, errors, warnings };
   }
 
-  // SSRF pattern check
+  // Strip embedded credentials (http://user:pass@host → http://host) so
+  // SSRF patterns always match against the actual target host regardless
+  // of whether the URL contains a userinfo component.
+  const strippedUrl = trimmed.replace(/^(https?:\/\/)[^@/]*@/, '$1');
+
+  // SSRF pattern check — run against credential-stripped URL
   for (const pattern of SSRF_BLOCKED_PATTERNS) {
-    if (pattern.test(trimmed)) {
+    if (pattern.test(strippedUrl)) {
       errors.push(
         `${fieldName} targets a blocked address (private IP, loopback, or metadata endpoint): "${trimmed}"`,
       );
@@ -405,6 +432,23 @@ export function validateSsrfSafeUrl(
   }
 
   return { valid: errors.length === 0, errors, warnings };
+}
+
+/**
+ * Convenience wrapper: validates a Horizon (or RPC fallback) URL against
+ * the full SSRF block-list. Intended as the single entry-point used in
+ * the CI audit job (Wave #20) and anywhere a Horizon URL is accepted.
+ *
+ * Compared to the lower-level `validateSsrfSafeUrl` this helper:
+ *   - Always allows both http and https (testnet runs use http)
+ *   - Uses the exported `SSRF_BLOCKED_PATTERNS` list so the audit can
+ *     introspect the exact list that is enforced at runtime
+ *
+ * @param url       The candidate Horizon or RPC URL.
+ * @param fieldName Human-readable field label used in error messages.
+ */
+export function validateHorizonUrl(url: string, fieldName = 'horizon_url'): ValidationResult {
+  return validateSsrfSafeUrl(url, fieldName, { allowHttp: true });
 }
 
 /**

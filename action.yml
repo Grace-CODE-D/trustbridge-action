@@ -35,8 +35,12 @@ inputs:
     required: false
     default: '1.5'
   stellar_address_input:
-    description: 'Stellar account address (G-address) to validate'
-    required: true
+    description: >-
+      Stellar account address (G-address) to validate. Required unless
+      `extract_address_from_issue` is true, in which case the address is
+      extracted from the issue body automatically.
+    required: false
+    default: ''
   fail_on_missing:
     description: 'Fail the workflow step when checks do not pass (true) or only warn (false)'
     required: false
@@ -133,6 +137,25 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  issue_number:
+    description: >-
+      GitHub issue number to post the TrustBridge comment on. Intended for
+      `workflow_dispatch` benchmark runs where the event context does not
+      carry an issue payload. When supplied, this overrides any issue number
+      derived from the event context. Must be a positive integer string
+      (e.g. "29"). Leave empty (default) to derive the issue number from the
+      event context as usual.
+    required: false
+    default: ''
+  extract_address_from_issue:
+    description: >-
+      When true, TrustBridge will attempt to extract a Stellar G-address from
+      the body of the issue identified by `issue_number` (or the current issue
+      context). The extracted address is used as `stellar_address_input` when
+      no explicit address is provided. Set to false (default) to disable
+      automatic extraction and require an explicit `stellar_address_input`.
+    required: false
+    default: 'false'
 
 outputs:
   trustline_exists:

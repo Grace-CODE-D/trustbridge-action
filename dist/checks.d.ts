@@ -7,6 +7,7 @@ export interface CheckConfig {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: number;
+    horizonUrl?: string;
 }
 export interface CheckResultItem {
     passed: boolean;
@@ -24,6 +25,26 @@ export interface ValidationResult {
 }
 export declare function normalizeStellarAddress(address: string): string;
 export declare function isValidStellarAddress(address: string): boolean;
+export interface AddressExtractionResult {
+    /** The first valid Stellar G-address found, or undefined if none. */
+    address: string | undefined;
+    /** All valid G-addresses found in the text (deduplicated, order preserved). */
+    allAddresses: string[];
+}
+/**
+ * Extract Stellar G-addresses from free-form text such as an issue body.
+ *
+ * Scans the text for all 56-character sequences starting with G followed by
+ * base32 characters, validates each one, and returns the first valid hit
+ * together with a deduplicated list of every valid address found.
+ *
+ * Safe to call with arbitrary untrusted input — performs no network requests
+ * and never throws.
+ *
+ * @param text - Issue body, comment text, or any free-form string.
+ * @returns `address` (first found) and `allAddresses` (all found, deduped).
+ */
+export declare function extractStellarAddressFromText(text: string | undefined | null): AddressExtractionResult;
 export declare function validateStellarAddress(address: string): void;
 export declare function parseMinXlmReserve(value: string): number;
 export declare function estimateTrustlineSetupCost(): number;
