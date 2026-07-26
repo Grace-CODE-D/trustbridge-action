@@ -16,6 +16,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress } from './validation';
+import { readTrustbridgeConfig } from './configReader';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -56,7 +57,30 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
+  const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
+
+  // ---------------------------------------------------------------------------
+  // Consumer trustbridge.yml reader (Issue #45)
+  // Read the optional consumer config file and apply any values it supplies
+  // as defaults for action inputs that were not explicitly set in the workflow.
+  // The reader enforces SSRF-safe URLs, injection-clean strings, and secret
+  // field redaction before any config value reaches the action runtime.
+  // ---------------------------------------------------------------------------
+  const configResult = readTrustbridgeConfig(trustbridgeConfigPath, process.env.GITHUB_WORKSPACE);
+  if (configResult.found) {
+    if (!configResult.validation.valid) {
+      // Hard-fail: an invalid consumer config is a security concern. Surface
+      // every error so the workflow author can fix them all in one pass.
+      throw new Error(
+        `trustbridge.yml validation failed:\n${configResult.validation.errors.map((e) => `  - ${e}`).join('\n')}`,
+      );
+    }
+    logger.debug('Consumer trustbridge.yml loaded', {
+      component: 'configReader',
+      resolvedPath: configResult.resolvedPath,
+    });
+  }
 
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {

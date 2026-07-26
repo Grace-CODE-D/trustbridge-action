@@ -93,6 +93,7 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
 | `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls |
 | `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
+| `trustbridge_config_path` | No | `.trustbridge.yml` | Path (relative to repository root, or absolute) to a consumer `trustbridge.yml` config file that can supply defaults for `horizon_url`, `asset_code`, `asset_issuer`, `min_xlm_reserve`, and other inputs. Explicit action inputs always override file values. The file is validated for SSRF-safe URLs, injection-clean strings, and secret field redaction before any value is used. Leave empty to skip the file entirely. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
@@ -122,6 +123,52 @@ Use outputs in downstream steps:
   if: steps.trustbridge.outputs.account_funded == 'true'
   run: echo "Account is active"
 ```
+
+---
+
+## Consumer trustbridge.yml config file
+
+For repositories that run TrustBridge on many workflows or want to centralise defaults without duplicating inputs across workflow files, place a `.trustbridge.yml` at the repository root:
+
+```yaml
+# .trustbridge.yml — TrustBridge consumer config
+horizon_url: https://horizon.stellar.org
+horizon_url_fallback: https://horizon-alt.stellar.org  # optional
+asset_code: USDC
+asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+min_xlm_reserve: '1.5'
+fail_on_missing: true
+```
+
+Values in the file are applied as **defaults** — any input set explicitly in the workflow step always wins. Unknown keys are silently ignored so the file stays forward-compatible.
+
+### Security guarantees
+
+Every field read from the file is validated through a strict security pipeline before it reaches the action runtime:
+
+| Threat | Defence |
+|--------|---------|
+| **SSRF via Horizon/RPC URL** | `horizon_url`, `horizon_url_fallback`, and `rpc_fallback_url` are blocked if they target private IPs (10.x, 172.16-31.x, 192.168.x), loopback (127.x, `localhost`), link-local (169.254.x), or cloud-metadata endpoints (`169.254.169.254`, `metadata.google.internal`). `file://` URLs are also rejected. |
+| **Shell injection via string fields** | `asset_code`, `asset_issuer`, and `min_xlm_reserve` are rejected if they contain shell meta-characters (`;`, `&`, `\|`, `` ` ``, `$`, `(`, `)`, `<`, `>`, `!`, `\`), newlines, or null bytes. |
+| **Secret leakage** | Fields named `github_token`, `api_key`, `secret`, `password`, `token`, `private_key`, and `passphrase` are replaced with `***` in any diagnostic snapshot — their raw values are never logged. |
+| **Path traversal** | A `trustbridge_config_path` that resolves outside the workspace root is rejected before the file is read. |
+| **YAML bomb / prototype pollution** | The file is parsed with a minimal built-in line-by-line parser that supports only flat key/value pairs — no nested objects, lists, anchors, or aliases. |
+
+If the file fails validation, the action **fails immediately** and surfaces every error so the workflow author can fix them all in one pass.
+
+### Custom config path
+
+Point to a non-default location with the `trustbridge_config_path` input:
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    trustbridge_config_path: config/trustbridge.yml
+```
+
+Set `trustbridge_config_path: ''` to skip the file entirely and rely only on explicit action inputs.
 
 ---
 
