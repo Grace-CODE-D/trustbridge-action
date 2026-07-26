@@ -6,7 +6,9 @@ export declare const STELLAR_MIN_ACCOUNT_BALANCE_XLM = 1;
 export interface CheckConfig {
     assetCode: string;
     assetIssuer: string;
-    minXlmReserve: number;
+    minXlmReserve: string | number;
+    minAssetBalance?: string | number;
+    horizonUrl?: string;
 }
 export interface CheckResultItem {
     passed: boolean;
@@ -19,26 +21,37 @@ export interface ValidationResult {
     trustlineExists: boolean;
     xlmBalance: string;
     xlmReserveMet: boolean;
+    assetBalance: string;
+    assetBalanceMet: boolean;
     checks: CheckResultItem[];
     remediation?: string;
 }
 export declare function normalizeStellarAddress(address: string): string;
 export declare function isValidStellarAddress(address: string): boolean;
 export declare function validateStellarAddress(address: string): void;
-export declare function parseMinXlmReserve(value: string): number;
+export declare function parseMinXlmReserve(value: string): string;
+export declare function parseMinAssetBalance(value: string): string | undefined;
 export declare function estimateTrustlineSetupCost(): number;
-export declare function formatXlmDeficit(required: number, actual: number): string;
+export declare function formatXlmDeficit(required: bigint, actual: bigint): string;
+export declare function formatAssetDeficit(required: bigint, actual: bigint): string;
 export declare function runAccountChecks(account: HorizonAccount, config: CheckConfig): ValidationResult;
 export declare function unfundedAccountResult(stellarAddress: string, config: CheckConfig): ValidationResult;
 export declare function getFailedCheckLabels(result: ValidationResult): string[];
 export declare function horizonFailureResult(message: string, config: CheckConfig): ValidationResult;
 export interface ReserveRequirement {
-    required: number;
-    actual: number;
+    required: bigint;
+    actual: bigint;
     missing: string;
     met: boolean;
 }
-export declare function buildReserveRequirement(required: number, actual: number): ReserveRequirement;
+export declare function buildReserveRequirement(required: bigint, actual: bigint): ReserveRequirement;
+export interface AssetBalanceRequirement {
+    required: bigint;
+    actual: bigint;
+    missing: string;
+    met: boolean;
+}
+export declare function buildAssetBalanceRequirement(required: bigint, actual: bigint): AssetBalanceRequirement;
 export interface ValidationGate {
     ready: boolean;
     totalChecks: number;

@@ -223,6 +223,9 @@ export function readTrustbridgeConfig(
   if (typeof raw.min_xlm_reserve === 'string' && raw.min_xlm_reserve.trim()) {
     config.min_xlm_reserve = raw.min_xlm_reserve.trim();
   }
+  if (typeof raw.min_asset_balance === 'string' && raw.min_asset_balance.trim()) {
+    config.min_asset_balance = raw.min_asset_balance.trim();
+  }
   if (typeof raw.fail_on_missing === 'boolean') {
     config.fail_on_missing = raw.fail_on_missing;
   }
@@ -263,6 +266,7 @@ export function mergeConsumerConfig<T extends Record<string, unknown>>(
     assetCode: consumerConfig.asset_code,
     assetIssuer: consumerConfig.asset_issuer,
     minXlmReserveRaw: consumerConfig.min_xlm_reserve,
+    minAssetBalanceRaw: consumerConfig.min_asset_balance,
     failOnMissing: consumerConfig.fail_on_missing,
   };
 

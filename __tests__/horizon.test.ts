@@ -1,7 +1,8 @@
 import { HorizonError, isCreditBalance,
   isRetryableStatus,
   parseRetryAfterMs,
-  parseHorizonBalance, normalizeHorizonUrl } from '../src/horizon';
+  fetchNetworkPassphrase, FetchLike,
+  parseHorizonBalance, normalizeHorizonUrl, getAssetBalance } from '../src/horizon';
 import { fetchAccount, HorizonAccount, waitForFundedAccount, getNativeBalance, hasTrustline } from '../src/horizon';
 import * as loggerModule from '../src/logger';
 import { SimpleCache } from '../src/cache';
@@ -76,7 +77,7 @@ function assertContextHasNoRawAddress(
     if (typeof value === 'string') {
       assertNoRawAddress(value, rawAddress);
     } else if (typeof value === 'object' && value !== null) {
-      const json = JSON.stringify(value);
+      const json = JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
       assertNoRawAddress(json, rawAddress);
     }
   }
@@ -166,9 +167,9 @@ describe('isCreditBalance', () => {
 });
 
 describe('parseHorizonBalance', () => {
-  it('parses numeric balances and falls back to zero', () => {
-    expect(parseHorizonBalance('1.5000000')).toBe(1.5);
-    expect(parseHorizonBalance('bad')).toBe(0);
+  it('returns valid bigints or 0n', () => {
+    expect(parseHorizonBalance('1.5000000')).toBe(15000000n);
+    expect(parseHorizonBalance('bad')).toBe(0n);
   });
 });
 
@@ -188,6 +189,52 @@ describe('getNativeBalance & hasTrustline', () => {
     const account = makeAccount();
     expect(hasTrustline(account, 'USDC', TEST_ADDRESS_2)).toBe(true);
     expect(hasTrustline(account, 'EURT', TEST_ADDRESS_2)).toBe(false);
+  });
+});
+
+describe('getAssetBalance', () => {
+  it('extracts asset balance for matching code and issuer', () => {
+    const account = makeAccount();
+    expect(getAssetBalance(account, 'USDC', TEST_ADDRESS_2)).toBe('5.0000000');
+  });
+
+  it('returns 0 when asset trustline does not exist', () => {
+    const account = makeAccount();
+    expect(getAssetBalance(account, 'EURT', TEST_ADDRESS_2)).toBe('0');
+    expect(getAssetBalance(account, 'USDC', FALLBACK_ADDRESS)).toBe('0');
+  });
+
+  it('returns 0 when balances array is empty', () => {
+    const account = makeAccount();
+    account.balances = [];
+    expect(getAssetBalance(account, 'USDC', TEST_ADDRESS_2)).toBe('0');
+  });
+
+  it('matches asset code and issuer exactly', () => {
+    const account = makeAccount();
+    account.balances.push({
+      balance: '25.0000000',
+      asset_type: 'credit_alphanum4',
+      asset_code: 'USDC',
+      asset_issuer: FALLBACK_ADDRESS,
+      buying_liabilities: '0.0000000',
+      selling_liabilities: '0.0000000',
+    });
+    expect(getAssetBalance(account, 'USDC', TEST_ADDRESS_2)).toBe('5.0000000');
+    expect(getAssetBalance(account, 'USDC', FALLBACK_ADDRESS)).toBe('25.0000000');
+  });
+
+  it('handles 12-character asset codes (credit_alphanum12)', () => {
+    const account = makeAccount();
+    account.balances.push({
+      balance: '99.0000000',
+      asset_type: 'credit_alphanum12',
+      asset_code: 'LONGASSET12',
+      asset_issuer: TEST_ADDRESS_2,
+      buying_liabilities: '0.0000000',
+      selling_liabilities: '0.0000000',
+    });
+    expect(getAssetBalance(account, 'LONGASSET12', TEST_ADDRESS_2)).toBe('99.0000000');
   });
 });
 
@@ -593,5 +640,44 @@ describe('Horizon debug log redaction', () => {
         restore();
       }
     });
+  });
+});
+
+describe('fetchNetworkPassphrase', () => {
+  it('returns the network passphrase from the root endpoint', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ network_passphrase: 'Public Global Stellar Network ; September 2015' }),
+    });
+
+    const passphrase = await fetchNetworkPassphrase('https://horizon.stellar.org', {
+      fetchFn: mockFetch as unknown as FetchLike,
+    });
+    expect(passphrase).toBe('Public Global Stellar Network ; September 2015');
+    expect(mockFetch).toHaveBeenCalledWith('https://horizon.stellar.org', expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('retries on retryable errors and succeeds', async () => {
+    const mockFetch = jest
+      .fn()
+      .mockResolvedValueOnce({ status: 429, ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ network_passphrase: 'Test SDF Network ; September 2015' }),
+      });
+
+    const passphrase = await fetchNetworkPassphrase('https://horizon-testnet.stellar.org', {
+      fetchFn: mockFetch as unknown as FetchLike,
+    });
+    expect(passphrase).toBe('Test SDF Network ; September 2015');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws an error on unrecoverable 404', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({ status: 404, statusText: 'Not Found', ok: false });
+    await expect(fetchNetworkPassphrase('https://horizon.example.com', {
+      fetchFn: mockFetch as unknown as FetchLike,
+      maxRetries: 1,
+    })).rejects.toThrow(/Horizon returned 404/);
   });
 });

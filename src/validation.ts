@@ -512,6 +512,8 @@ export interface TrustbridgeConsumerConfig {
   asset_issuer?: string;
   /** Minimum XLM reserve override. */
   min_xlm_reserve?: string;
+  /** Optional minimum asset balance floor. */
+  min_asset_balance?: string;
   /** Whether to fail the step on missing checks. */
   fail_on_missing?: boolean;
 }
@@ -542,7 +544,7 @@ export function validateTrustbridgeConfig(
   }
 
   // String fields — injection sanitization
-  for (const strField of ['asset_code', 'asset_issuer', 'min_xlm_reserve'] as const) {
+  for (const strField of ['asset_code', 'asset_issuer', 'min_xlm_reserve', 'min_asset_balance'] as const) {
     const val = raw[strField];
     if (val !== undefined && val !== null && val !== '') {
       if (typeof val !== 'string') {

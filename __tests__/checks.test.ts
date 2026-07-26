@@ -1,14 +1,17 @@
 import {
   isValidStellarAddress,
   normalizeStellarAddress,
+  parseMinAssetBalance,
   parseMinXlmReserve,
   runAccountChecks,
   unfundedAccountResult,
   validateStellarAddress,
   getFailedCheckLabels,
   formatXlmDeficit,
+  formatAssetDeficit,
   estimateTrustlineSetupCost,
   buildReserveRequirement,
+  buildAssetBalanceRequirement,
   buildValidationGate,
   horizonFailureResult,
   STELLAR_BASE_RESERVE_XLM,
@@ -89,11 +92,11 @@ describe('validateStellarAddress', () => {
 
 describe('parseMinXlmReserve', () => {
   it('parses valid numeric strings', () => {
-    expect(parseMinXlmReserve('1.5')).toBe(1.5);
+    expect(parseMinXlmReserve('1.5')).toBe('1.5');
   });
 
   it('trims valid numeric strings', () => {
-    expect(parseMinXlmReserve(' 2.25 ')).toBe(2.25);
+    expect(parseMinXlmReserve(' 2.25 ')).toBe('2.25');
   });
 
   it('throws for non-numeric values', () => {
@@ -113,6 +116,37 @@ describe('parseMinXlmReserve', () => {
   });
 });
 
+describe('parseMinAssetBalance', () => {
+  it('returns undefined for empty string', () => {
+    expect(parseMinAssetBalance('')).toBeUndefined();
+  });
+
+  it('returns undefined for whitespace-only string', () => {
+    expect(parseMinAssetBalance('   ')).toBeUndefined();
+  });
+
+  it('parses valid numeric strings', () => {
+    expect(parseMinAssetBalance('100')).toBe('100');
+    expect(parseMinAssetBalance('50.5')).toBe('50.5');
+  });
+
+  it('trims valid numeric strings', () => {
+    expect(parseMinAssetBalance(' 25.25 ')).toBe('25.25');
+  });
+
+  it('throws for non-numeric values', () => {
+    expect(() => parseMinAssetBalance('abc')).toThrow(/min_asset_balance/i);
+  });
+
+  it('throws for non-finite values', () => {
+    expect(() => parseMinAssetBalance('Infinity')).toThrow(/min_asset_balance/i);
+  });
+
+  it('throws for negative values', () => {
+    expect(() => parseMinAssetBalance('-10')).toThrow(/min_asset_balance/i);
+  });
+});
+
 describe('estimateTrustlineSetupCost', () => {
   it('adds account and trustline reserves', () => {
     expect(estimateTrustlineSetupCost()).toBe(1.5);
@@ -121,8 +155,16 @@ describe('estimateTrustlineSetupCost', () => {
 
 describe('formatXlmDeficit', () => {
   it('formats missing reserve without going negative', () => {
-    expect(formatXlmDeficit(1.5, 1)).toBe('0.5000000');
-    expect(formatXlmDeficit(1.5, 2)).toBe('0.0000000');
+    expect(formatXlmDeficit(15000000n, 10000000n)).toBe('0.5000000');
+    expect(formatXlmDeficit(15000000n, 20000000n)).toBe('0.0000000');
+  });
+});
+
+describe('formatAssetDeficit', () => {
+  it('formats missing asset balance without going negative', () => {
+    expect(formatAssetDeficit(1000000000n, 500000000n)).toBe('50.0000000');
+    expect(formatAssetDeficit(1000000000n, 1500000000n)).toBe('0.0000000');
+    expect(formatAssetDeficit(0n, 0n)).toBe('0.0000000');
   });
 });
 
@@ -135,7 +177,87 @@ describe('runAccountChecks', () => {
     expect(result.trustlineExists).toBe(true);
     expect(result.xlmReserveMet).toBe(true);
     expect(result.xlmBalance).toBe('10.0000000');
+    expect(result.assetBalance).toBe('100.0000000');
+    expect(result.assetBalanceMet).toBe(true);
     expect(result.checks.every((c) => c.passed)).toBe(true);
+    expect(result.checks.length).toBe(3);
+  });
+
+  it('passes with minAssetBalance when balance meets or exceeds the floor', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 50 };
+    const result = runAccountChecks(makeAccount(), configWithFloor);
+
+    expect(result.valid).toBe(true);
+    expect(result.assetBalanceMet).toBe(true);
+    expect(result.checks.length).toBe(4);
+    expect(result.checks[3].label).toBe('USDC minimum balance');
+    expect(result.checks[3].passed).toBe(true);
+    expect(result.checks[3].detail).toMatch(/meets the minimum of \*\*50 USDC\*\*/);
+  });
+
+  it('passes with minAssetBalance exactly equal to the floor', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '100.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 100 };
+    const result = runAccountChecks(account, configWithFloor);
+
+    expect(result.valid).toBe(true);
+    expect(result.assetBalanceMet).toBe(true);
+    expect(result.checks[3].passed).toBe(true);
+  });
+
+  it('fails when minAssetBalance is set and balance is below the floor', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 200 };
+    const result = runAccountChecks(makeAccount(), configWithFloor);
+
+    expect(result.valid).toBe(false);
+    expect(result.assetBalanceMet).toBe(false);
+    expect(result.checks.length).toBe(4);
+    expect(result.checks[3].label).toBe('USDC minimum balance');
+    expect(result.checks[3].passed).toBe(false);
+    expect(result.checks[3].detail).toMatch(/Deficit:/);
+    expect(result.checks[3].detail).toMatch(/\*\*100\.0000000 USDC\*\*/);
+    expect(result.remediation).toMatch(/Acquire at least/);
+    expect(result.remediation).toMatch(/100\.0000000 USDC/);
+  });
+
+  it('does not block on minAssetBalance when trustline is missing (balance check is informational)', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 100 };
+    const result = runAccountChecks(account, configWithFloor);
+
+    expect(result.valid).toBe(false);
+    expect(result.trustlineExists).toBe(false);
+    expect(result.assetBalance).toBe('0');
+    expect(result.assetBalanceMet).toBe(false);
+    expect(result.checks[3].passed).toBe(true);
+    expect(result.checks[3].detail).toMatch(/Cannot verify/);
+    expect(result.checks[3].detail).toMatch(/trustline is not configured yet/);
   });
 
   it('fails when USDC trustline is missing', () => {
@@ -235,6 +357,23 @@ describe('runAccountChecks', () => {
 
     const result = runAccountChecks(account, defaultConfig);
     expect(result.trustlineExists).toBe(false);
+    expect(result.assetBalance).toBe('0');
+  });
+
+  it('does not add asset balance check when minAssetBalance is 0', () => {
+    const configZero = { ...defaultConfig, minAssetBalance: 0 };
+    const result = runAccountChecks(makeAccount(), configZero);
+
+    expect(result.checks.length).toBe(3);
+    expect(result.assetBalanceMet).toBe(true);
+  });
+
+  it('does not add asset balance check when minAssetBalance is undefined', () => {
+    const configUndefined = { ...defaultConfig, minAssetBalance: undefined };
+    const result = runAccountChecks(makeAccount(), configUndefined);
+
+    expect(result.checks.length).toBe(3);
+    expect(result.assetBalanceMet).toBe(true);
   });
 });
 
@@ -242,6 +381,12 @@ describe('getFailedCheckLabels', () => {
   it('returns labels for failed checks only', () => {
     const result = runAccountChecks(makeAccount({ balances: [] }), defaultConfig);
     expect(getFailedCheckLabels(result)).toEqual(['USDC trustline', 'XLM reserve']);
+  });
+
+  it('includes asset balance minimum in failed labels when applicable', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 500 };
+    const result = runAccountChecks(makeAccount(), configWithFloor);
+    expect(getFailedCheckLabels(result)).toEqual(['USDC minimum balance']);
   });
 });
 
@@ -253,11 +398,26 @@ describe('unfundedAccountResult', () => {
     expect(result.accountFunded).toBe(false);
     expect(result.trustlineExists).toBe(false);
     expect(result.xlmBalance).toBe('0');
+    expect(result.assetBalance).toBe('0');
+    expect(result.assetBalanceMet).toBe(false);
     expect(result.remediation).toMatch(/Activate/);
     expect(result.remediation).toMatch(/Stellar Laboratory/);
     expect(result.remediation).toMatch(
       String(STELLAR_MIN_ACCOUNT_BALANCE_XLM + STELLAR_BASE_RESERVE_XLM),
     );
+    expect(result.checks.length).toBe(3);
+  });
+
+  it('includes asset balance check when minAssetBalance is configured', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 100 };
+    const result = unfundedAccountResult(TEST_ADDRESS, configWithFloor);
+
+    expect(result.checks.length).toBe(4);
+    expect(result.checks[3].label).toBe('USDC minimum balance');
+    expect(result.checks[3].passed).toBe(false);
+    expect(result.checks[3].detail).toMatch(/Fund the account and establish a trustline first/);
+    expect(result.assetBalance).toBe('0');
+    expect(result.assetBalanceMet).toBe(false);
   });
 });
 
@@ -269,12 +429,41 @@ describe('Stellar reserve constants', () => {
 });
 
 describe('buildReserveRequirement', () => {
-  it('summarizes reserve state', () => {
-    expect(buildReserveRequirement(1.5, 1)).toEqual({
-      required: 1.5,
-      actual: 1,
+  it('calculates reserve met status correctly', () => {
+    expect(buildReserveRequirement(15000000n, 10000000n)).toEqual({
+      required: 15000000n,
+      actual: 10000000n,
       missing: '0.5000000',
       met: false,
+    });
+  });
+});
+
+describe('buildAssetBalanceRequirement', () => {
+  it('calculates deficit and met status correctly', () => {
+    expect(buildAssetBalanceRequirement(1000000000n, 500000000n)).toEqual({
+      required: 1000000000n,
+      actual: 500000000n,
+      missing: '50.0000000',
+      met: false,
+    });
+  });
+
+  it('shows zero missing when met', () => {
+    expect(buildAssetBalanceRequirement(1000000000n, 2000000000n)).toEqual({
+      required: 1000000000n,
+      actual: 2000000000n,
+      missing: '0.0000000',
+      met: true,
+    });
+  });
+
+  it('shows zero missing when exactly equal', () => {
+    expect(buildAssetBalanceRequirement(1000000000n, 1000000000n)).toEqual({
+      required: 1000000000n,
+      actual: 1000000000n,
+      missing: '0.0000000',
+      met: true,
     });
   });
 });
@@ -301,6 +490,32 @@ describe('buildValidationGate', () => {
       passedChecks: 1,
       failedChecks: 2,
       failedLabels: ['USDC trustline', 'XLM reserve'],
+    });
+  });
+
+  it('reports 4 total checks and asset balance failure when minAssetBalance is set and fails', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 500 };
+    const result = runAccountChecks(makeAccount(), configWithFloor);
+
+    expect(buildValidationGate(result)).toEqual({
+      ready: false,
+      totalChecks: 4,
+      passedChecks: 3,
+      failedChecks: 1,
+      failedLabels: ['USDC minimum balance'],
+    });
+  });
+
+  it('reports 4 total checks all passing when minAssetBalance is set and met', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 50 };
+    const result = runAccountChecks(makeAccount(), configWithFloor);
+
+    expect(buildValidationGate(result)).toEqual({
+      ready: true,
+      totalChecks: 4,
+      passedChecks: 4,
+      failedChecks: 0,
+      failedLabels: [],
     });
   });
 });
@@ -341,5 +556,27 @@ describe('markdown escape hardening', () => {
 
     expect(result.checks[0].detail).toContain('\\`INJECTED\\`');
     expect(result.checks[0].detail).not.toMatch(/[^\\]`INJECTED[^\\]`/);
+  });
+});
+
+describe('horizonFailureResult', () => {
+  it('sets default fields for asset balance when not configured', () => {
+    const result = horizonFailureResult('Horizon down', defaultConfig);
+
+    expect(result.assetBalance).toBe('unknown');
+    expect(result.assetBalanceMet).toBe(false);
+    expect(result.checks.length).toBe(3);
+  });
+
+  it('includes asset balance check when minAssetBalance is configured', () => {
+    const configWithFloor = { ...defaultConfig, minAssetBalance: 100 };
+    const result = horizonFailureResult('Horizon down', configWithFloor);
+
+    expect(result.checks.length).toBe(4);
+    expect(result.checks[3].label).toBe('USDC minimum balance');
+    expect(result.checks[3].passed).toBe(false);
+    expect(result.checks[3].detail).toBe('Check could not be completed.');
+    expect(result.assetBalance).toBe('unknown');
+    expect(result.assetBalanceMet).toBe(false);
   });
 });

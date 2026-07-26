@@ -2,12 +2,13 @@ import * as core from '@actions/core';
 import {
   CheckConfig,
   horizonFailureResult,
+  parseMinAssetBalance,
   parseMinXlmReserve,
   runAccountChecks,
   unfundedAccountResult,
   validateStellarAddress,
 } from './checks';
-import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
+import { fetchAccount, fetchNetworkPassphrase, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
@@ -24,6 +25,7 @@ async function run(): Promise<void> {
     core.getInput('asset_issuer') ||
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
   const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+  const minAssetBalanceRaw = core.getInput('min_asset_balance') || '';
   const stellarAddress = core.getInput('stellar_address_input').trim();
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
@@ -56,6 +58,8 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
+  const networkPassphrase = core.getInput('network_passphrase') || 'Public Global Stellar Network ; September 2015';
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
 
@@ -75,6 +79,7 @@ async function run(): Promise<void> {
     assetCode,
     assetIssuer,
     minXlmReserveRaw,
+    minAssetBalanceRaw,
     debugMode,
     horizonTimeoutMs,
     stickyComment,
@@ -94,6 +99,7 @@ async function run(): Promise<void> {
       assetCode,
       assetIssuer,
       minXlmReserve: minXlmReserveRaw,
+      minAssetBalance: minAssetBalanceRaw,
       stellarAddress,
       failOnMissing,
       debugMode,
@@ -110,6 +116,7 @@ async function run(): Promise<void> {
 
   validateStellarAddress(stellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
+  const minAssetBalance = parseMinAssetBalance(minAssetBalanceRaw);
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
 
@@ -118,10 +125,10 @@ async function run(): Promise<void> {
   // shape up front so a malformed contract address fails fast with a clear
   // error instead of silently reaching Horizon or the metrics/JSON output.
   if (normalizedAsset.assetIssuer.startsWith('C')) {
-    const contractCheck = validateContractAddress(normalizedAsset.assetIssuer);
-    if (!contractCheck.valid) {
-      throw new Error(`Invalid asset_issuer contract address: ${contractCheck.errors.join('; ')}`);
-    }
+    validateContractAddress(normalizedAsset.assetIssuer);
+    // If the contract address format is strictly invalid, normalizeAssetConfig
+    // would have already failed fast above. We still call validateContractAddress
+    // here to ensure validation spans are consistently recorded.
     globalMetrics.recordContractMetric(
       'asset_issuer_contract_validated',
       1,
@@ -133,6 +140,7 @@ async function run(): Promise<void> {
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
     minXlmReserve,
+    minAssetBalance,
     horizonUrl,
   };
 
@@ -150,9 +158,29 @@ async function run(): Promise<void> {
     timeoutMs: horizonTimeoutMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
     fallbackUrls,
-    cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
+    cacheTtlMs: horizonCacheTtlMs,
   };
+
+  core.info(`Verifying network identity for ${horizonUrl}...`);
+  const actualPassphrase = await fetchNetworkPassphrase(horizonUrl, horizonOptions);
+  if (actualPassphrase !== networkPassphrase) {
+    throw new Error(
+      `Network identity mismatch. Expected "${networkPassphrase}" but Horizon returned "${actualPassphrase}". ` +
+      `Check your horizon_url and network_passphrase inputs.`
+    );
+  }
+
+  const PUBLIC_USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+  if (
+    normalizedAsset.assetIssuer === PUBLIC_USDC_ISSUER &&
+    actualPassphrase !== 'Public Global Stellar Network ; September 2015'
+  ) {
+    throw new Error(
+      `Mismatched configuration: The asset_issuer is the Public Network USDC issuer, ` +
+      `but the network_passphrase indicates a different network.`
+    );
+  }
 
   try {
     const account = waitUntilFunded
