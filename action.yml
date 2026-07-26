@@ -95,6 +95,15 @@ inputs:
     description: 'Cache successful Horizon responses in job memory (true/false)'
     required: false
     default: 'false'
+  log_inputs:
+    description: >-
+      Emit a structured JSON log record of all resolved action inputs at run
+      start (redacted — Stellar addresses, Horizon URLs, and any embedded
+      secrets are masked before the record is written to GitHub Actions log
+      output). Useful for auditing which inputs were active during a run.
+      Defaults to false.
+    required: false
+    default: 'false'
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true

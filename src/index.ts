@@ -13,7 +13,7 @@ import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
-import { logger } from './logger';
+import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress } from './validation';
 
@@ -55,6 +55,7 @@ async function run(): Promise<void> {
     max: 3_600_000,
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
+  const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
   const githubToken = core.getInput('github_token', { required: true });
 
   logger.setDebugMode(debugMode);
@@ -75,6 +76,28 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
   });
+
+  if (logInputs) {
+    emitInputsLogRecord({
+      horizonUrl,
+      horizonUrlFallback,
+      rpcFallbackUrl: rpcFallbackUrlRaw,
+      assetCode,
+      assetIssuer,
+      minXlmReserve: minXlmReserveRaw,
+      stellarAddress,
+      failOnMissing,
+      debugMode,
+      horizonTimeoutMs,
+      stickyComment,
+      waitUntilFunded,
+      waitUntilFundedTimeoutMs,
+      waitUntilFundedIntervalMs,
+      horizonCacheTtlMs,
+      useCache,
+      logInputs,
+    });
+  }
 
   validateStellarAddress(stellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);

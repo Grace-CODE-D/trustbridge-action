@@ -92,6 +92,7 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `rpc_fallback_url` | No | `""` | Comma-separated secondary Horizon or RPC URLs to fail over to if primary node fails |
 | `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
 | `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls |
+| `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
@@ -174,6 +175,25 @@ with:
 ```
 
 When the primary endpoint exhausts its retries on a retryable error (429 / 502 / 503 / 504 / network timeout), TrustBridge transparently re-runs the same request against the fallback URL before surfacing a failure. Account-not-found (404) is **not** retried on the fallback — a missing account on primary is treated as a missing account everywhere, consistent with `wait_until_funded` semantics. Caching is shared between primary and fallback (the cache key is keyed on primary URL), so a fallback success populates the cache for subsequent lookups.
+
+---
+
+## Structured input logging
+
+When `log_inputs: true` is set, TrustBridge emits a single `core.info` line at run start containing a JSON record of every resolved action input:
+
+```
+[TrustBridge] action inputs: {"horizonUrl":"https://horizon.stellar.org","stellarAddress":"GAAA...AWHF",...}
+```
+
+Every Stellar address (`G…` / `C…`) and every Horizon/RPC URL that embeds an account path is redacted to its first-4 / last-4 characters (`GAAA...AWHF`) before the record is written. Non-sensitive scalar fields — `assetCode`, `minXlmReserve`, timeout values, boolean flags — are emitted verbatim. The record is always visible (not gated on `debug_mode`) whenever the opt-in is set, making it safe for audit trails and run comparisons without leaking contributor account data.
+
+```yaml
+with:
+  stellar_address_input: ${{ steps.address.outputs.address }}
+  github_token: ${{ secrets.GITHUB_TOKEN }}
+  log_inputs: true   # emit redacted JSON artifact of all resolved inputs
+```
 
 ---
 
