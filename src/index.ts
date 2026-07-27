@@ -16,6 +16,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { parseBatchAddresses, runBatchValidation, buildBatchSummary, formatBatchSummaryMarkdown } from './batch';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -25,6 +26,11 @@ async function run(): Promise<void> {
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
   const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
   const stellarAddress = core.getInput('stellar_address_input').trim();
+  const stellarAddressesRaw = core.getInput('stellar_addresses').trim();
+  const batchRequestDelayMs = parseNumberInput(core.getInput('batch_request_delay_ms'), 200, {
+    min: 0,
+    max: 60000,
+  });
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
   const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
@@ -108,7 +114,6 @@ async function run(): Promise<void> {
     });
   }
 
-  validateStellarAddress(stellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
@@ -136,6 +141,65 @@ async function run(): Promise<void> {
     horizonUrl,
   };
 
+  const horizonOptions = {
+    timeoutMs: horizonTimeoutMs,
+    horizonUrlFallback: horizonUrlFallback || undefined,
+    fallbackUrls,
+    cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
+    useCache,
+  };
+
+  // ── Batch mode (stellar_addresses set) ──────────────────────────────────
+  if (stellarAddressesRaw) {
+    const addresses = parseBatchAddresses(stellarAddressesRaw);
+    core.info(`[TrustBridge] Batch mode: validating ${addresses.length} addresses via ${horizonUrl}`);
+
+    const batchResults = await runBatchValidation(addresses, checkConfig, horizonUrl, {
+      requestDelayMs: batchRequestDelayMs,
+      fetchOptions: horizonOptions,
+    });
+
+    const batchSummary = buildBatchSummary(batchResults);
+    core.info(`[TrustBridge] Batch complete: ${batchSummary.passed}/${batchSummary.total} passed`);
+
+    core.setOutput('batch_results', JSON.stringify(batchResults));
+    core.setOutput('batch_summary', JSON.stringify(batchSummary));
+    // Clear single-address outputs
+    core.setOutput('trustline_exists', '');
+    core.setOutput('xlm_balance', '');
+    core.setOutput('account_funded', '');
+    core.setOutput('comment_url', '');
+
+    // Post a single summary comment if in issue context
+    const batchCommentBody = formatBatchSummaryMarkdown(batchSummary, assetCode);
+    let batchCommentUrl: string | undefined;
+    try {
+      batchCommentUrl = await postIssueComment(githubToken, batchCommentBody, { sticky: stickyComment });
+      if (batchCommentUrl) {
+        core.setOutput('comment_url', batchCommentUrl);
+        logger.info('Batch summary comment posted', { component: 'index', commentUrl: batchCommentUrl });
+      }
+    } catch (commentError) {
+      const message = getErrorMessage(commentError);
+      core.warning(`Failed to post batch summary comment: ${message}`);
+    }
+
+    if (debugMode) {
+      logger.debug('Batch metrics (JSON artifact)', { component: 'metrics' });
+      core.debug(globalMetrics.toJSON());
+    }
+
+    if (batchSummary.failed > 0 && failOnMissing) {
+      core.setFailed(`TrustBridge batch: ${batchSummary.failed} of ${batchSummary.total} addresses failed validation`);
+    } else if (batchSummary.failed > 0) {
+      core.warning(`TrustBridge batch: ${batchSummary.failed} of ${batchSummary.total} addresses failed validation`);
+    }
+    return;
+  }
+
+  // ── Single-address mode ─────────────────────────────────────────────────
+  validateStellarAddress(stellarAddress);
+
   core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
 
   if (waitUntilFunded) {
@@ -145,14 +209,6 @@ async function run(): Promise<void> {
   }
 
   let result;
-
-  const horizonOptions = {
-    timeoutMs: horizonTimeoutMs,
-    horizonUrlFallback: horizonUrlFallback || undefined,
-    fallbackUrls,
-    cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
-    useCache,
-  };
 
   try {
     const account = waitUntilFunded

@@ -214,6 +214,51 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
+## Batch multi-address validation (roster audit)
+
+To validate many contributor wallets in one job, use the `stellar_addresses`
+input instead of `stellar_address_input`. The action runs all checks
+sequentially with a configurable inter-request delay, collects per-address
+results, and posts a single summary comment.
+
+### Newline-separated list
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  id: batch
+  with:
+    stellar_addresses: |
+      GABC1234AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      GDEF5678BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    fail_on_missing: false
+    batch_request_delay_ms: 300
+```
+
+### Using batch outputs
+
+```yaml
+- name: Check batch results
+  run: |
+    echo '${{ steps.batch.outputs.batch_summary }}' | jq .
+
+- name: Fail if any address failed
+  if: fromJSON(steps.batch.outputs.batch_summary).failed > 0
+  run: exit 1
+```
+
+`batch_results` is a JSON array; `batch_summary` includes aggregate counts
+and a `failureTaxonomy` object. See [README outputs table](../README.md#outputs)
+for full field descriptions.
+
+### Rate-limit awareness
+
+Addresses are validated **sequentially**. `batch_request_delay_ms` (default
+200 ms) adds a pause between each Horizon request. Per-request exponential
+backoff applies to every address in the batch.
+
+---
+
 ## Extracting Stellar addresses from issues
 
 Common patterns:
