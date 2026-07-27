@@ -133,6 +133,21 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  dynamic_reserve:
+    description: >-
+      Compute the account's real network-enforced minimum XLM balance from
+      its live subentry and sponsorship counters (per the Stellar protocol
+      reserve formula) and enforce whichever is higher: that computed value
+      or min_xlm_reserve. Prevents a stale static min_xlm_reserve from
+      under-reporting an account's true reserve requirement. Default false.
+    required: false
+    default: 'false'
+  reserve_buffer_xlm:
+    description: >-
+      Additional XLM safety margin added on top of the computed dynamic
+      reserve requirement (0-1000). Only used when dynamic_reserve is true.
+    required: false
+    default: '0'
 
 outputs:
   trustline_exists:

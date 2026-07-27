@@ -15,7 +15,12 @@ import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
-import { validateContractAddress, clearSpans, getSpans } from './validation';
+import {
+  validateContractAddress,
+  clearSpans,
+  getSpans,
+  computeEffectiveReserveRequirement,
+} from './validation';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -63,6 +68,13 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
+  // Dynamic reserve engine (Issue #15)
+  const dynamicReserve = parseBooleanInput(core.getInput('dynamic_reserve'), false);
+  const reserveBufferXlm = parseNumberInput(core.getInput('reserve_buffer_xlm'), 0, {
+    min: 0,
+    max: 1000,
+  });
+
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
 
@@ -84,6 +96,8 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
     sep0007DeepLinks,
+    dynamicReserve,
+    reserveBufferXlm,
   });
 
   if (logInputs) {
@@ -173,7 +187,31 @@ async function run(): Promise<void> {
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
       : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
-    result = runAccountChecks(account, checkConfig);
+
+    let effectiveCheckConfig = checkConfig;
+    if (dynamicReserve) {
+      const effectiveMinXlmReserve = computeEffectiveReserveRequirement(
+        checkConfig.minXlmReserve,
+        {
+          subentryCount: account.subentry_count,
+          numSponsoring: account.num_sponsoring,
+          numSponsored: account.num_sponsored,
+        },
+        { bufferXlm: reserveBufferXlm },
+      );
+      effectiveCheckConfig = { ...checkConfig, minXlmReserve: effectiveMinXlmReserve };
+      logger.debug('Dynamic reserve engine computed effective requirement', {
+        component: 'index',
+        configuredMinXlmReserve: checkConfig.minXlmReserve,
+        reserveBufferXlm,
+        effectiveMinXlmReserve,
+        subentryCount: account.subentry_count,
+        numSponsoring: account.num_sponsoring,
+        numSponsored: account.num_sponsored,
+      });
+    }
+
+    result = runAccountChecks(account, effectiveCheckConfig);
   } catch (error) {
     if (error instanceof HorizonError && error.statusCode === 404) {
       result = unfundedAccountResult(stellarAddress, checkConfig);

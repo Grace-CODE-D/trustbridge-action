@@ -82,6 +82,8 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `asset_code` | No | `USDC` | Asset code for trustline verification |
 | `asset_issuer` | No | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | Issuer address for the asset |
 | `min_xlm_reserve` | No | `1.5` | Minimum native XLM balance required |
+| `dynamic_reserve` | No | `false` | Compute the account's real network-enforced minimum XLM balance from its live subentry and sponsorship counters, and enforce whichever is higher: that computed value or `min_xlm_reserve`. |
+| `reserve_buffer_xlm` | No | `0` | Additional XLM safety margin added on top of the computed dynamic reserve requirement (0-1000). Only used when `dynamic_reserve` is `true`. |
 | `debug_mode` | No | `false` | Enable extra action logs for troubleshooting |
 | `horizon_timeout_ms` | No | `15000` | Horizon request timeout in milliseconds |
 | `sticky_comment` | No | `true` | Update TrustBridge's previous issue comment instead of posting a new one each run |
