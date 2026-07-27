@@ -16,6 +16,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { checkLedgerFreshness } from './freshness';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -62,6 +63,14 @@ async function run(): Promise<void> {
   // SEP-0007 wallet deep links (Issue #44)
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Ledger freshness guard (Issue #107)
+  const checkLedgerFreshnessEnabled = parseBooleanInput(core.getInput('check_ledger_freshness'), false);
+  const maxLedgerLagSeconds = parseNumberInput(core.getInput('max_ledger_lag_seconds'), 60, {
+    min: 5,
+    max: 3600,
+  });
+  const ledgerFreshnessFailOnStale = parseBooleanInput(core.getInput('ledger_freshness_fail_on_stale'), false);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -135,6 +144,30 @@ async function run(): Promise<void> {
     minXlmReserve,
     horizonUrl,
   };
+
+  // ── Ledger freshness guard (Issue #107) ──────────────────────────────────
+  if (checkLedgerFreshnessEnabled) {
+    core.info('[TrustBridge] Running ledger freshness check...');
+    const freshness = await checkLedgerFreshness(horizonUrl, {
+      maxLagSeconds: maxLedgerLagSeconds,
+      timeoutMs: horizonTimeoutMs,
+    });
+    logger.debug('Ledger freshness result', { component: 'index', ...freshness });
+
+    if (freshness.status === 'stale') {
+      const msg = `[TrustBridge] Ledger freshness: ${freshness.message}`;
+      if (ledgerFreshnessFailOnStale) {
+        core.setFailed(msg);
+        return;
+      } else {
+        core.warning(msg);
+      }
+    } else if (freshness.status === 'unknown') {
+      core.warning(`[TrustBridge] Ledger freshness: ${freshness.message}`);
+    } else {
+      core.info(`[TrustBridge] Ledger freshness: ${freshness.message}`);
+    }
+  }
 
   core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
 

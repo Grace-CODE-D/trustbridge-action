@@ -95,6 +95,9 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
 | `trustbridge_config_path` | No | `.trustbridge.yml` | Path (relative to repository root, or absolute) to a consumer `trustbridge.yml` config file that can supply defaults for `horizon_url`, `asset_code`, `asset_issuer`, `min_xlm_reserve`, and other inputs. Explicit action inputs always override file values. The file is validated for SSRF-safe URLs, injection-clean strings, and secret field redaction before any value is used. Leave empty to skip the file entirely. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
+| `check_ledger_freshness` | No | `false` | Enable ledger freshness guard — warns (or fails) when Horizon is serving stale data |
+| `max_ledger_lag_seconds` | No | `60` | Maximum allowed lag in seconds between latest ledger close time and wall clock |
+| `ledger_freshness_fail_on_stale` | No | `false` | Hard-fail when Horizon is stale; default is warn-only |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
 
