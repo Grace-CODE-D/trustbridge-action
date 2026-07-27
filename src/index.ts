@@ -16,6 +16,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -63,39 +64,88 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
+  // Load and apply optional consumer config file (Issue #45).
+  // readTrustbridgeConfig fails fast (throws) if the file exists but is invalid.
+  // When the file is absent it returns config:null and found:false — no-op.
+  const { config: consumerConfig, validation: configValidation, found: configFound, resolvedPath: configResolvedPath } =
+    readTrustbridgeConfig(trustbridgeConfigPath);
+  if (!configValidation.valid) {
+    // Surface every error so the workflow author can fix them all in one pass.
+    throw new Error(
+      `trustbridge_config_path "${configResolvedPath}" failed validation:\n${configValidation.errors.join('\n')}`,
+    );
+  }
+  if (configFound && consumerConfig) {
+    logger.debug('Consumer config loaded', {
+      component: 'index',
+      configPath: configResolvedPath,
+      keys: Object.keys(consumerConfig),
+    });
+  }
+
+  // Build the set of inputs that were explicitly provided by the workflow
+  // author so mergeConsumerConfig knows which action inputs take precedence.
+  const explicitInputs = new Set<string>(
+    [
+      core.getInput('horizon_url') ? 'horizonUrl' : null,
+      core.getInput('horizon_url_fallback') ? 'horizonUrlFallback' : null,
+      core.getInput('rpc_fallback_url') ? 'rpcFallbackUrl' : null,
+      core.getInput('asset_code') ? 'assetCode' : null,
+      core.getInput('asset_issuer') ? 'assetIssuer' : null,
+      core.getInput('min_xlm_reserve') ? 'minXlmReserveRaw' : null,
+      core.getInput('fail_on_missing') ? 'failOnMissing' : null,
+    ].filter((v): v is string => v !== null),
+  );
+
+  // Merge consumer config defaults under explicit action inputs.
+  const mergedInputs = mergeConsumerConfig(
+    { horizonUrl, horizonUrlFallback, rpcFallbackUrl: rpcFallbackUrlRaw, assetCode, assetIssuer, minXlmReserveRaw, failOnMissing },
+    consumerConfig,
+    explicitInputs,
+  );
+
+  // Re-bind the merged values so the rest of the run uses them.
+  const effectiveHorizonUrl: string = typeof mergedInputs.horizonUrl === 'string' ? mergedInputs.horizonUrl : horizonUrl;
+  const effectiveHorizonUrlFallback: string = typeof mergedInputs.horizonUrlFallback === 'string' ? mergedInputs.horizonUrlFallback : horizonUrlFallback;
+  const effectiveRpcFallbackUrl: string = typeof mergedInputs.rpcFallbackUrl === 'string' ? mergedInputs.rpcFallbackUrl : rpcFallbackUrlRaw;
+  const effectiveAssetCode: string = typeof mergedInputs.assetCode === 'string' ? mergedInputs.assetCode : assetCode;
+  const effectiveAssetIssuer: string = typeof mergedInputs.assetIssuer === 'string' ? mergedInputs.assetIssuer : assetIssuer;
+  const effectiveMinXlmReserveRaw: string = typeof mergedInputs.minXlmReserveRaw === 'string' ? mergedInputs.minXlmReserveRaw : minXlmReserveRaw;
+  const effectiveFailOnMissing: boolean = typeof mergedInputs.failOnMissing === 'boolean' ? mergedInputs.failOnMissing : failOnMissing;
+
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
 
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {
     component: 'index',
-    horizonUrl,
-    horizonUrlFallback,
+    horizonUrl: effectiveHorizonUrl,
+    horizonUrlFallback: effectiveHorizonUrlFallback,
     horizonCacheTtlMs,
-    assetCode,
-    assetIssuer,
-    minXlmReserveRaw,
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+    minXlmReserveRaw: effectiveMinXlmReserveRaw,
     debugMode,
     horizonTimeoutMs,
     stickyComment,
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
     waitUntilFundedIntervalMs,
-    rpcFallbackUrl: rpcFallbackUrlRaw,
+    rpcFallbackUrl: effectiveRpcFallbackUrl,
     useCache,
     sep0007DeepLinks,
   });
 
   if (logInputs) {
     emitInputsLogRecord({
-      horizonUrl,
-      horizonUrlFallback,
-      rpcFallbackUrl: rpcFallbackUrlRaw,
-      assetCode,
-      assetIssuer,
-      minXlmReserve: minXlmReserveRaw,
+      horizonUrl: effectiveHorizonUrl,
+      horizonUrlFallback: effectiveHorizonUrlFallback,
+      rpcFallbackUrl: effectiveRpcFallbackUrl,
+      assetCode: effectiveAssetCode,
+      assetIssuer: effectiveAssetIssuer,
+      minXlmReserve: effectiveMinXlmReserveRaw,
       stellarAddress,
-      failOnMissing,
+      failOnMissing: effectiveFailOnMissing,
       debugMode,
       horizonTimeoutMs,
       stickyComment,
@@ -109,9 +159,12 @@ async function run(): Promise<void> {
   }
 
   validateStellarAddress(stellarAddress);
-  const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
+  const minXlmReserve = parseMinXlmReserve(effectiveMinXlmReserveRaw);
 
-  const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
+  const normalizedAsset = normalizeAssetConfig({
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+  });
 
   // Soroban fungible token contracts (SEP-41) use a "C..." contract address
   // as their issuer instead of a classic "G..." account. Validate that
@@ -133,10 +186,10 @@ async function run(): Promise<void> {
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
     minXlmReserve,
-    horizonUrl,
+    horizonUrl: effectiveHorizonUrl,
   };
 
-  core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
+  core.info(`Checking Stellar account ${stellarAddress} via ${effectiveHorizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -146,23 +199,36 @@ async function run(): Promise<void> {
 
   let result;
 
+  // Create a job-level AbortController so Horizon fetches and polling loops
+  // stop promptly when the GitHub Actions runner cancels the workflow.
+  const jobController = new AbortController();
+
+  // Rebuild fallbackUrls from the effective (possibly config-merged) values.
+  const effectiveFallbackUrls = effectiveRpcFallbackUrl
+    ? effectiveRpcFallbackUrl.split(',').map((u) => u.trim()).filter(Boolean)
+    : effectiveHorizonUrlFallback
+      ? [effectiveHorizonUrlFallback]
+      : fallbackUrls;
+
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
-    horizonUrlFallback: horizonUrlFallback || undefined,
-    fallbackUrls,
+    horizonUrlFallback: effectiveHorizonUrlFallback || undefined,
+    fallbackUrls: effectiveFallbackUrls,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
+    signal: jobController.signal,
   };
 
   try {
     const account = waitUntilFunded
       ? await waitForFundedAccount(
-          horizonUrl,
+          effectiveHorizonUrl,
           stellarAddress,
           {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
             requestTimeoutMs: horizonTimeoutMs,
+            signal: jobController.signal,
             onPoll: (attempt, elapsedMs) =>
               logger.debug(`Account not yet funded — polling again`, {
                 component: 'index',
@@ -172,11 +238,15 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
+      : await fetchAccount(effectiveHorizonUrl, stellarAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
     if (error instanceof HorizonError && error.statusCode === 404) {
       result = unfundedAccountResult(stellarAddress, checkConfig);
+    } else if (error instanceof HorizonError && error.statusCode === 0 && !error.retryable) {
+      // Cancelled by job signal — exit cleanly without a misleading comment.
+      core.warning(`TrustBridge run was cancelled: ${error.message}`);
+      // result stays undefined; the null guard below returns cleanly.
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       result = horizonFailureResult(error.message, checkConfig);
@@ -185,6 +255,14 @@ async function run(): Promise<void> {
       core.error(message);
       result = horizonFailureResult(message, checkConfig);
     }
+  } finally {
+    // Ensure the controller is not leaked if the function returns early.
+    jobController.abort();
+  }
+
+  // result is undefined only when the run was cancelled and we returned early above.
+  if (result == null) {
+    return;
   }
 
   setValidationOutputs(result);
@@ -192,8 +270,8 @@ async function run(): Promise<void> {
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
     stellarAddress,
-    horizonUrl,
-    failOnMissing,
+    horizonUrl: effectiveHorizonUrl,
+    failOnMissing: effectiveFailOnMissing,
     stickyComment,
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
@@ -236,7 +314,7 @@ async function run(): Promise<void> {
 
   const failureMessage = `TrustBridge checks failed: ${summary}`;
 
-  if (failOnMissing) {
+  if (effectiveFailOnMissing) {
     core.setFailed(failureMessage);
   } else {
     core.warning(failureMessage);

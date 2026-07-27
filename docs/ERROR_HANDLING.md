@@ -105,11 +105,54 @@ If `issues.createComment` fails (permissions, issue locked, etc.):
 - Outputs are still written
 - Pass/fail logic still runs
 
-Ensure `permissions.issues: write` is set and the token is valid.
+### Permission matrix
+
+| Token type | `issues: write` set? | Comment succeeds? |
+|-----------|---------------------|------------------|
+| `GITHUB_TOKEN` (default branch, `issues` trigger) | ✅ Yes | ✅ Yes |
+| `GITHUB_TOKEN` (fork pull request) | N/A — restricted token | ❌ No (403) |
+| `GITHUB_TOKEN` (org restricts default to read-only) | ❌ Not set | ❌ No (403) |
+| Fine-grained PAT with Issues: read+write | ✅ Yes | ✅ Yes |
+| GitHub App token with Issues permission | ✅ Yes | ✅ Yes |
+| `GITHUB_TOKEN` (GHES, admin restricts scopes) | ❌ Depends | ❌ Possibly (403) |
+
+### Common 403 / 404 errors
+
+| HTTP status | GitHub message | Root cause | Fix |
+|-------------|---------------|-----------|-----|
+| 403 | `Resource not accessible by integration` | `issues: write` not granted | Add `permissions: issues: write` to the job, or use a PAT |
+| 403 | `Resource not accessible by integration` (fork PR) | Fork PRs receive a read-only token | Store a PAT with Issues write scope as `secrets.MY_TOKEN` and pass it via `github_token` |
+| 404 | `Not Found` | Issue doesn't exist or issues are disabled on the repo | Verify the issue number and that the repo has issues enabled |
+| 422 | `Validation Failed` | Comment body exceeds GitHub's size limit | Enable `debug_mode: true` and check the generated comment body |
+
+Ensure `permissions: issues: write` is set in the job and the token is valid. For fork pull requests or organizations with restrictive token policies, supply a fine-grained PAT or GitHub App token instead of `GITHUB_TOKEN`.
 
 ---
 
-## fail_on_missing behavior
+## Cancellation (workflow cancellation / AbortSignal)
+
+When a GitHub Actions workflow is cancelled (e.g. by clicking **Cancel** in the UI, a `concurrency` group eviction, or a dependent job failure), the runner sends a SIGTERM to the running Node process. TrustBridge uses an internal `AbortController` to stop in-flight Horizon requests and polling loops promptly when this happens.
+
+### How it works
+
+| Stage | Behaviour on cancellation |
+|-------|--------------------------|
+| **Pre-flight check** (before any Horizon call) | Signal detected immediately; run exits without posting a comment. |
+| **In-flight Horizon request** | The per-request `AbortController` is chained to the job signal. The current HTTP request is aborted; no retry is attempted. |
+| **Retry backoff sleep** | Not aborted (short, ≤ 30 s max). The signal is checked again at the top of the next attempt loop before issuing another request. |
+| **`wait_until_funded` polling loop** | Signal checked before each poll and also during the inter-poll sleep. Polling stops as soon as the signal fires. |
+| **Comment posting** | If cancellation is detected before results are produced, no issue comment is posted. If a result was already produced before cancellation was detected, comment posting proceeds normally. |
+
+### Error classification
+
+A job-cancellation abort is intentionally classified as a **non-retryable error with status code 0** (distinct from a Horizon 404 "account not funded"). This prevents the action from:
+
+- Emitting a misleading "account not funded" comment when the run was only stopped by the runner.
+- Treating a cancelled run as a check failure that blocks the contributor.
+
+A `core.warning` is emitted noting that the run was cancelled, and the action exits with code 0 (no `setFailed`).
+
+---
 
 | Value | Checks fail | Step result |
 |-------|-------------|-------------|

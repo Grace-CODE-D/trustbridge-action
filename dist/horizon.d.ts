@@ -1,3 +1,4 @@
+import { SimpleCache } from './cache';
 export interface HorizonBalanceNative {
     balance: string;
     asset_type: 'native';
@@ -33,9 +34,20 @@ export declare class HorizonError extends Error {
     readonly retryable: boolean;
     constructor(message: string, statusCode: number, retryable?: boolean);
 }
+type FetchLike = (url: string | import('node-fetch').Request, init?: import('node-fetch').RequestInit) => Promise<import('node-fetch').Response>;
 export interface FetchAccountOptions {
     timeoutMs?: number;
     maxRetries?: number;
+    horizonUrlFallback?: string;
+    fallbackUrls?: string[];
+    useCache?: boolean;
+    cacheTtlMs?: number;
+    cache?: SimpleCache;
+    fetchFn?: FetchLike;
+    /** Optional AbortSignal from a parent controller (e.g. job cancellation).
+     *  When the signal fires, in-flight and pending requests are aborted
+     *  immediately; no misleading "account not funded" result is produced. */
+    signal?: AbortSignal;
 }
 export declare function normalizeHorizonUrl(baseUrl: string): string;
 export declare function isRetryableStatus(status: number): boolean;
@@ -52,6 +64,10 @@ export interface WaitForFundedAccountOptions {
     maxRetries?: number;
     /** Called after each unfunded (404) poll, before sleeping for the next attempt. */
     onPoll?: (attempt: number, elapsedMs: number) => void;
+    /** Optional AbortSignal from a parent controller (e.g. job cancellation).
+     *  When the signal fires, polling stops immediately without emitting a
+     *  misleading "account not funded" result. */
+    signal?: AbortSignal;
 }
 /**
  * Poll Horizon for an account until it becomes funded or the timeout budget
@@ -65,3 +81,8 @@ export declare function isCreditBalance(balance: HorizonBalance): balance is Hor
 export declare function getNativeBalance(account: HorizonAccount): string;
 export declare function hasTrustline(account: HorizonAccount, assetCode: string, assetIssuer: string): boolean;
 export declare function parseHorizonBalance(balance: string): number;
+export interface HorizonFetchOptions {
+    maxRetries?: number;
+    retryBaseDelayMs?: number;
+}
+export {};

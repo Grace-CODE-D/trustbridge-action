@@ -60,6 +60,10 @@ export interface FetchAccountOptions {
   cacheTtlMs?: number;
   cache?: SimpleCache;
   fetchFn?: FetchLike;
+  /** Optional AbortSignal from a parent controller (e.g. job cancellation).
+   *  When the signal fires, in-flight and pending requests are aborted
+   *  immediately; no misleading "account not funded" result is produced. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -92,6 +96,31 @@ export function parseRetryAfterMs(response: import('node-fetch').Response): numb
 
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Sleep for `ms` milliseconds, but resolve immediately (without throwing) if
+ * `signal` is aborted before the timer fires.  The caller is responsible for
+ * checking `signal.aborted` after the await if it needs to stop on cancellation.
+ */
+function cancellableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return sleep(ms);
+  }
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function buildCacheKey(normalizedHorizonUrl: string, stellarAddress: string): string {
@@ -164,6 +193,7 @@ async function fetchAccountOnce(
   timeoutMs: number,
   maxRetries: number,
   endpointKind: 'primary' | 'fallback',
+  parentSignal?: AbortSignal,
 ): Promise<FetchOnceResult> {
   const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
   const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
@@ -173,9 +203,21 @@ async function fetchAccountOnce(
   let lastError: Error | undefined;
 
   while (attempt <= maxRetries) {
+    // Bail out immediately if the job was cancelled before this attempt.
+    if (parentSignal?.aborted) {
+      throw new HorizonError('Horizon request aborted (job cancelled).', 0, false);
+    }
+
     const requestStartedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    // Propagate the parent cancellation signal to the per-request controller.
+    let parentAbortHandler: (() => void) | undefined;
+    if (parentSignal) {
+      parentAbortHandler = () => controller.abort();
+      parentSignal.addEventListener('abort', parentAbortHandler);
+    }
 
     logger.debug('Horizon fetch start', safeHorizonContext({
       component: 'horizon',
@@ -267,7 +309,9 @@ async function fetchAccountOnce(
             retryAfterFromHeader: retryAfterHeader !== null,
             nextAttempt: attempt + 1,
           }));
-          await sleep(retryAfter);
+          await cancellableSleep(retryAfter, parentSignal);
+          // If the job was cancelled during the sleep, bail out on the next
+          // iteration's pre-flight check rather than issuing another request.
           attempt += 1;
           continue;
         }
@@ -314,11 +358,15 @@ async function fetchAccountOnce(
       }
 
       const isAbort = error instanceof Error && error.name === 'AbortError';
-      const message = isAbort
-        ? `Horizon request timed out after ${timeoutMs}ms`
-        : error instanceof Error
-          ? error.message
-          : 'Unknown Horizon error';
+      // If the parent job signal fired, propagate as a non-retryable cancellation.
+      const isJobCancelled = isAbort && parentSignal?.aborted;
+      const message = isJobCancelled
+        ? 'Horizon request aborted (job cancelled).'
+        : isAbort
+          ? `Horizon request timed out after ${timeoutMs}ms`
+          : error instanceof Error
+            ? error.message
+            : 'Unknown Horizon error';
 
       const latencyMs = Date.now() - requestStartedAt;
 
@@ -327,12 +375,17 @@ async function fetchAccountOnce(
         stellarAddress,
         horizonUrl: targetHorizonUrl,
         endpointKind,
-        kind: isAbort ? 'timeout' : 'network',
+        kind: isJobCancelled ? 'cancelled' : isAbort ? 'timeout' : 'network',
         latencyMs,
         attempt,
         timeoutMs,
         errorMessage: redactString(message),
       }));
+
+      // Job cancellation is non-retryable — throw immediately.
+      if (isJobCancelled) {
+        throw new HorizonError(message, 0, false);
+      }
 
       lastError = new HorizonError(message, isAbort ? 408 : 0, true);
 
@@ -349,7 +402,9 @@ async function fetchAccountOnce(
           retryAfterMs: backoffMs,
           nextAttempt: attempt + 1,
         }));
-        await sleep(backoffMs);
+        await cancellableSleep(backoffMs, parentSignal);
+        // If the job was cancelled during the backoff sleep, bail out on the
+        // next iteration's pre-flight check rather than issuing another request.
         attempt += 1;
         continue;
       }
@@ -368,6 +423,9 @@ async function fetchAccountOnce(
       throw lastError;
     } finally {
       clearTimeout(timer);
+      if (parentSignal && parentAbortHandler) {
+        parentSignal.removeEventListener('abort', parentAbortHandler);
+      }
     }
   }
 
@@ -393,6 +451,7 @@ export async function fetchAccount(
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = options.cache ?? defaultCache;
+  const signal = options.signal;
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
   const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
   const normalizedFallbackUrl = fallbackCandidate
@@ -401,6 +460,11 @@ export async function fetchAccount(
 
   if (!normalizedHorizonUrl) {
     throw new HorizonError('horizon_url is required.', 0, false);
+  }
+
+  // Bail out immediately if the job was already cancelled before we start.
+  if (signal?.aborted) {
+    throw new HorizonError('Horizon request aborted (job cancelled).', 0, false);
   }
 
   const cachingEnabled = cacheTtlMs > 0;
@@ -463,6 +527,7 @@ export async function fetchAccount(
       timeoutMs,
       maxRetries,
       'primary',
+      signal,
     );
 
     if (cachingEnabled) {
@@ -517,6 +582,7 @@ export async function fetchAccount(
       timeoutMs,
       maxRetries,
       'fallback',
+      signal,
     );
 
     if (cachingEnabled) {
@@ -574,6 +640,10 @@ export interface WaitForFundedAccountOptions {
   maxRetries?: number;
   /** Called after each unfunded (404) poll, before sleeping for the next attempt. */
   onPoll?: (attempt: number, elapsedMs: number) => void;
+  /** Optional AbortSignal from a parent controller (e.g. job cancellation).
+   *  When the signal fires, polling stops immediately without emitting a
+   *  misleading "account not funded" result. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_WAIT_TIMEOUT_MS = 120_000;
@@ -594,16 +664,23 @@ export async function waitForFundedAccount(
 ): Promise<HorizonAccount> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const signal = options.signal;
   const start = Date.now();
   let attempt = 0;
 
   for (;;) {
+    // Bail out cleanly if the job was cancelled — no misleading error message.
+    if (signal?.aborted) {
+      throw new HorizonError('Polling aborted (job cancelled).', 0, false);
+    }
+
     attempt += 1;
 
     try {
       return await fetchAccountFn(horizonUrl, stellarAddress, {
         timeoutMs: options.requestTimeoutMs,
         maxRetries: options.maxRetries,
+        signal,
       });
     } catch (error) {
       if (!(error instanceof HorizonError) || error.statusCode !== 404) {
@@ -620,7 +697,10 @@ export async function waitForFundedAccount(
       }
 
       options.onPoll?.(attempt, elapsedMs);
-      await sleep(Math.min(pollIntervalMs, timeoutMs - elapsedMs));
+
+      // Sleep for the poll interval, but abort immediately if the job is cancelled.
+      const sleepMs = Math.min(pollIntervalMs, timeoutMs - elapsedMs);
+      await cancellableSleep(sleepMs, signal);
     }
   }
 }

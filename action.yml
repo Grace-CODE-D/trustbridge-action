@@ -117,7 +117,15 @@ inputs:
     required: false
     default: '.trustbridge.yml'
   github_token:
-    description: 'GitHub token used to post issue comments'
+    description: >-
+      GitHub token used to post issue comments. Requires `issues: write`
+      permission on the repository. `GITHUB_TOKEN` with `permissions:
+      issues: write` is sufficient for issue-triggered runs on the default
+      branch and on non-fork pull requests. For fork pull requests, org-level
+      token restrictions, or GitHub Enterprise Server, you may need a
+      fine-grained PAT or a GitHub App token with the Issues (read and write)
+      permission. Omit or leave empty when running in a context where comment
+      posting is not required (outputs are still set).
     required: true
   sep0007_deep_links:
     description: >-
