@@ -229,11 +229,54 @@ This keeps the packaged action and the source-of-truth TypeScript code in sync b
 Future enhancements that fit the current architecture:
 
 1. **Soroban / smart contract checks** — new module parallel to `horizon.ts`. `validation.ts` already validates the StrKey shape of a contract (`C...`) `asset_issuer`; querying contract state over Soroban RPC is still open.
-2. **Multi-asset trustlines** — extend `CheckConfig` to accept a list
+2. **Multi-asset trustlines** — `checks.ts` now exports `checkMultiAssetTrustlines` for validating an arbitrary list of assets in one call (Wave #32).
 3. **PR comments** — extend `comment.ts` to detect `context.payload.pull_request`
-4. **Sponsor-aware reserve math** — use `num_sponsoring` / `num_sponsored` from Horizon
+4. **Sponsor-aware reserve math** — `checks.ts` now exports `checkAccountSponsored` and `calculateRecommendedReserve` which factor in the Stellar subentry model (Wave #32).
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for proposing changes.
+
+---
+
+## Reusable workflow helpers (Wave #32)
+
+`checks.ts` ships a set of workflow-composable helper functions extracted from the main validation pipeline. These are pure functions (no I/O) and can be imported directly by other tools in the Stellar ecosystem.
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `checkTrustlineExists` | `(account, code, issuer) → boolean` | Point check: does this account hold this specific trustline? |
+| `checkReserveMet` | `(account, minReserve) → boolean` | Point check: is native XLM balance ≥ threshold? |
+| `validateStrKeyFormat` | `(address) → boolean` | Validates G-address or C-address StrKey shape without throwing |
+| `checkMultiAssetTrustlines` | `(account, assets[]) → Result[]` | Batch-checks required and optional trustlines |
+| `calculateRecommendedReserve` | `(trustlineCount) → number` | Stellar reserve formula: 1 XLM base + 0.5 XLM × entries |
+| `checkAccountSponsored` | `(account) → boolean` | True if `num_sponsored > 0` (reduces effective reserve requirement) |
+| `generateValidationReport` | `(account, config, extras?) → ValidationReport` | Full structured report for dashboards or release automation |
+
+### ValidationReport shape
+
+```typescript
+interface ValidationReport {
+  address: string;
+  strKeyValid: boolean;
+  accountFunded: boolean;
+  xlmBalance: string;
+  reserveStatus: { current: number; required: number; met: boolean; deficit: string };
+  trustlines: Array<{ asset: string; issuer: string; exists: boolean }>;
+  sponsored: boolean;
+  timestamp: string; // ISO 8601
+}
+```
+
+---
+
+## Parser fuzz & property tests (Wave #39)
+
+The test suite now includes three test files that benchmark parser resilience:
+
+| Test file | Scope |
+|---|---|
+| `__tests__/parser-fuzz.test.ts` | Property/fuzz tests for every parser function. Exercises boundary cases, injection payloads, and random inputs. Includes `Performance benchmarks` suite (10k iterations each). |
+| `__tests__/e2e-parser-harness.test.ts` | Full pipeline tests wired through jest.fn() HTTP mocks. Covers success, 404, 503, 429 retry, malformed response shapes, 100-contributor scale, and comment snapshot assertions. |
+| `__tests__/reusable-workflows.test.ts` | Unit and integration tests for all Wave #32 workflow helpers. Includes DAO onboarding, treasury sponsorship, and multi-asset gateway scenarios. |
 
 ---
 

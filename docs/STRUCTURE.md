@@ -112,9 +112,17 @@ coverage/                          # Jest coverage reports
 | `runAccountChecks` | Full validation for funded accounts |
 | `unfundedAccountResult` | Result template for 404 |
 | `horizonFailureResult` | Result template for API errors |
+| `buildValidationGate` | Machine-readable pass/fail summary |
 | `STELLAR_*_XLM` | Documented reserve constants |
+| `checkTrustlineExists` | **(Wave #32)** Point check: trustline exists for asset |
+| `checkReserveMet` | **(Wave #32)** Point check: XLM balance ≥ min reserve |
+| `validateStrKeyFormat` | **(Wave #32)** StrKey shape validation (G- and C-addresses) |
+| `checkMultiAssetTrustlines` | **(Wave #32)** Batch trustline check for multiple assets |
+| `calculateRecommendedReserve` | **(Wave #32)** Stellar reserve formula by trustline count |
+| `checkAccountSponsored` | **(Wave #32)** True if account has `num_sponsored > 0` |
+| `generateValidationReport` | **(Wave #32)** Full structured `ValidationReport` for dashboards |
 
-**Test coverage:** `__tests__/checks.test.ts`
+**Test coverage:** `__tests__/checks.test.ts`, `__tests__/reusable-workflows.test.ts`
 
 ---
 
@@ -137,9 +145,29 @@ coverage/                          # Jest coverage reports
 
 | File | Scope |
 |------|-------|
+| `assets.test.ts` | Asset code normalisation and config helpers |
 | `checks.test.ts` | Address validation, trustline matching, reserve checks, unfunded results |
+| `comment.test.ts` | Markdown formatting and golden snapshot enforcement |
+| `configReader.test.ts` | YAML parsing, SSRF blocking, injection sanitisation, merge precedence |
+| `e2e-parser-harness.test.ts` | **Wave #39** — full pipeline e2e tests via jest.fn() HTTP mocks: success, 404, 503, 429-retry, malformed responses, comment snapshots, 100-contributor scale |
+| `hardened_metrics.test.ts` | Metrics collector hardening |
+| `horizon.test.ts` | Horizon client: fetch, retries, cache, RPC fallback, debug log redaction |
+| `inputs.test.ts` | `parseBooleanInput`, `parseNumberInput`, `getErrorMessage` |
+| `links.test.ts` | Stellar Laboratory and LOBSTR link builders |
+| `logger.test.ts` | StructuredLogger, redaction helpers |
+| `markdown.test.ts` | `escapeMarkdownInline`, `inlineCode` |
+| `metrics.test.ts` | MetricsCollector |
+| `outputs.test.ts` | `setValidationOutputs` |
+| `parser-fuzz.test.ts` | **Wave #39** — property/fuzz tests across all parser functions with malicious inputs, boundary cases, and performance benchmarks |
+| `resilience.test.ts` | Backoff, jitter, RateLimiter, CircuitBreaker, runCliCheck |
+| `reusable-workflows.test.ts` | **Wave #32** — unit and integration tests for workflow helpers: `checkTrustlineExists`, `checkReserveMet`, `validateStrKeyFormat`, `checkMultiAssetTrustlines`, `calculateRecommendedReserve`, `checkAccountSponsored`, `generateValidationReport` |
+| `sep0007.test.ts` | SEP-0007 wallet deep link generation |
+| `spans.test.ts` | OTel-style validation spans |
+| `summary.test.ts` | `formatFailureSummary` |
+| `validation.test.ts` | `validateContractAddress`, `validateAssetCode`, SSRF/injection validators |
+| `workflow.test.ts` | CI workflow YAML sanity checks |
 
-Horizon HTTP is not integration-tested in CI (no live network calls). Retry behavior is covered by unit structure in `horizon.ts` and documented in [ERROR_HANDLING.md](ERROR_HANDLING.md). Future work: mock `node-fetch` in dedicated horizon tests.
+Horizon HTTP is not integration-tested in CI (no live network calls). Retry behavior is covered in `horizon.test.ts` via jest.fn() mocks. The Wave #39 e2e harness (`e2e-parser-harness.test.ts`) exercises the full parser → validation → comment pipeline through mocked Horizon responses.
 
 ---
 

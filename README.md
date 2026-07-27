@@ -95,6 +95,8 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
 | `trustbridge_config_path` | No | `.trustbridge.yml` | Path (relative to repository root, or absolute) to a consumer `trustbridge.yml` config file that can supply defaults for `horizon_url`, `asset_code`, `asset_issuer`, `min_xlm_reserve`, and other inputs. Explicit action inputs always override file values. The file is validated for SSRF-safe URLs, injection-clean strings, and secret field redaction before any value is used. Leave empty to skip the file entirely. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
+| `comment_mode` | No | `post` | Controls comment posting: `post` (default, posts/upserts comment), `dry-run` (skips GitHub API call, all outputs still set), `off` (same as `dry-run`, makes intent explicit for scheduled/health-check workflows) |
+| `dashboard_webhook_url` | No | _(empty)_ | Optional HTTPS endpoint. When set, TrustBridge POSTs a compact JSON validation summary after every run (including dry-run/off). Raw Stellar addresses are redacted (first-4…last-4) before the payload is sent. Webhook failures emit `core.warning` and never fail the step. |
 
 Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
 
@@ -393,6 +395,21 @@ npm run build          # compile TypeScript → dist/
 
 - **Comment Golden Snapshots**: TrustBridge enforces golden snapshots for Markdown issue comments (`__tests__/comment.test.ts`) across success and failure paths to prevent formatting regressions during active Waves and release cycles.
 - **Jest Coverage Gate**: Enforces strict statement, branch, function, and line coverage thresholds for `src/horizon.ts` (fetch, retries, caching, RPC fallback) and globally in `jest.config.js`.
+
+### Test Coverage (Wave #39 & #32)
+
+The test suite includes comprehensive fuzz/property tests and reusable workflow validation:
+
+- **Parser Fuzz Tests** (`__tests__/parser-fuzz.test.ts`): Property-based tests for all parser functions (address validation, numeric parsing, YAML parsing, markdown escaping, logger redaction) with malicious input patterns, boundary cases, and performance benchmarks.
+- **e2e Parser Harness** (`__tests__/e2e-parser-harness.test.ts`): End-to-end tests with HTTP mocks exercising the full parser → validation → comment formatting pipeline, including malformed Horizon responses, rate limits, and 100+ contributor scale simulation.
+- **Reusable Workflows** (`__tests__/reusable-workflows.test.ts`): Tests for workflow helper functions including trustline checks, reserve validation, StrKey format verification, multi-asset validation, and sponsorship detection.
+
+### Test Coverage (Wave #38 & #30)
+
+Integration tests for the `comment_mode` dry-run path and dashboard webhook harness:
+
+- **Index integration tests** (`__tests__/index.test.ts`): Full jest.mock suite covering `comment_mode` (`post`/`dry-run`/`off`/invalid), dashboard webhook payload content and failure handling, Soroban C-address fast-fail validation, SEP-0007 deep link inclusion, `fail_on_missing` across all modes, and scale output independence.
+- **Workflow sanity tests** (`__tests__/workflow.test.ts`): YAML structure assertions for `ci.yml`, `release.yml`, `dry-run.yml`, and `action.yml` confirming all Wave #30 and #38 inputs are declared and the dry-run smoke jobs are present.
 
 Contributing guidelines: [CONTRIBUTING.md](CONTRIBUTING.md).
 

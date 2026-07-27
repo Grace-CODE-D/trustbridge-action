@@ -214,6 +214,100 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
+## comment_mode — dry-run and off (Wave #30)
+
+By default TrustBridge posts (or upserts) a Markdown comment on the issue after every run. Set `comment_mode` to skip that GitHub API call while still running all validation checks and setting all outputs.
+
+| Value | Behaviour |
+|-------|-----------|
+| `post` | **(default)** Post or upsert the comment normally. |
+| `dry-run` | Run all checks, set all outputs, but skip the GitHub API comment call. `comment_url` output is always empty. |
+| `off` | Same as `dry-run` — comment posting is permanently disabled for this step. Use when you want to make the intent explicit (e.g. scheduled health-check workflows). |
+
+### When to use dry-run
+
+- **CI smoke tests** — verify validation logic in PR pipelines without spamming the issue timeline.
+- **Preview jobs** — run TrustBridge in a pre-release dry-run job to confirm the action bundle is working before tagging.
+- **Scheduled health checks** — periodic checks on wallet readiness without writing new comments on every cron tick.
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    comment_mode: dry-run    # validate + set outputs, skip comment
+    fail_on_missing: false
+```
+
+The `comment_url` output is `''` in `dry-run` and `off` modes. All other outputs (`account_funded`, `trustline_exists`, `xlm_balance`) are set exactly as they would be in `post` mode.
+
+### dry-run in downstream conditional steps
+
+```yaml
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bridge
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.addr.outputs.value }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          comment_mode: dry-run
+
+      - name: Gate on validation result
+        if: steps.bridge.outputs.account_funded == 'true'
+        run: echo "Account is funded — safe to proceed"
+```
+
+---
+
+## dashboard_webhook_url — validation telemetry (Wave #38)
+
+When `dashboard_webhook_url` is set, TrustBridge POSTs a compact JSON summary of every validation run to that endpoint. This works in **all** `comment_mode` values including `dry-run` and `off`, making it suitable for dashboards, Slack alerts, and release automation that need a machine-readable signal without a GitHub issue comment.
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    comment_mode: dry-run
+    dashboard_webhook_url: ${{ secrets.TRUSTBRIDGE_WEBHOOK_URL }}
+```
+
+### Webhook payload
+
+```json
+{
+  "validation": {
+    "ready": true,
+    "accountFunded": true,
+    "trustlineExists": true,
+    "xlmBalance": "10.0000000",
+    "xlmReserveMet": true,
+    "failedChecks": 0,
+    "passedChecks": 3,
+    "totalChecks": 3,
+    "failedLabels": []
+  },
+  "config": {
+    "assetCode": "USDC",
+    "assetIssuer": "GA5Z...KZVN",
+    "minXlmReserve": 1.5
+  },
+  "stellarAddressRedacted": "GAAA...AWHF",
+  "commentMode": "dry-run",
+  "commentUrl": "",
+  "timestamp": "2025-01-01T00:00:00.000Z"
+}
+```
+
+**Privacy guarantee:** Raw Stellar addresses are never included in the payload. `stellarAddressRedacted` contains only the first-4/last-4 characters (`GAAA...AWHF`).
+
+If the webhook call fails (network error, non-2xx response), TrustBridge emits a `core.warning` and continues — a webhook failure never fails the action step.
+
+---
+
 ## Extracting Stellar addresses from issues
 
 Common patterns:

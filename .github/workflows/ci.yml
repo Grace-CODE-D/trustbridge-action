@@ -48,3 +48,32 @@ jobs:
             git diff --stat -- dist
             exit 1
           fi
+
+  # Wave #30: dry-run smoke tests validate comment_mode and dashboard_webhook_url
+  dry-run-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Dry-run smoke test
+        uses: ./
+        with:
+          stellar_address_input: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+          horizon_url: "https://horizon.stellar.org"
+          asset_code: "USDC"
+          asset_issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+          comment_mode: 'dry-run'
+          fail_on_missing: false

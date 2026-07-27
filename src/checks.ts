@@ -261,3 +261,211 @@ export function buildValidationGate(result: ValidationResult): ValidationGate {
     failedLabels,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Wave #32: Reusable workflow examples for trustline, reserve, StrKey,
+// multi-asset validation checks (Issue #32)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reusable workflow: verify trustline existence for a specific asset.
+ * Returns true if the account has an active trustline for the given asset code
+ * and issuer, false otherwise.
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify USDC trustline
+ *   run: |
+ *     if check-trustline USDC ${ISSUER}; then
+ *       echo "Trustline configured"
+ *     fi
+ * ```
+ */
+export function checkTrustlineExists(
+  account: HorizonAccount,
+  assetCode: string,
+  assetIssuer: string,
+): boolean {
+  return hasTrustline(account, assetCode, assetIssuer);
+}
+
+/**
+ * Reusable workflow: verify XLM reserve meets minimum threshold.
+ * Returns true if native balance >= minReserve, false otherwise.
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify XLM reserve
+ *   run: |
+ *     if check-reserve ${ADDRESS} 1.5; then
+ *       echo "Reserve met"
+ *     fi
+ * ```
+ */
+export function checkReserveMet(
+  account: HorizonAccount,
+  minReserve: number,
+): boolean {
+  const xlmBalance = getNativeBalance(account);
+  const parsed = parseHorizonBalance(xlmBalance);
+  return parsed >= minReserve;
+}
+
+/**
+ * Reusable workflow: validate StrKey format for Stellar addresses.
+ * Supports both G-addresses (accounts) and C-addresses (contracts).
+ * Returns true if the address matches StrKey shape, false otherwise.
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Validate address format
+ *   run: |
+ *     if validate-strkey ${ADDRESS}; then
+ *       echo "Valid StrKey"
+ *     fi
+ * ```
+ */
+export function validateStrKeyFormat(address: string): boolean {
+  const trimmed = address.trim();
+  if (trimmed.length !== 56) return false;
+  
+  const prefix = trimmed.charAt(0);
+  if (prefix !== 'G' && prefix !== 'C') return false;
+  
+  // StrKey uses base32 alphabet: A-Z, 2-7
+  const strKeyRegex = /^[GC][A-Z2-7]{55}$/;
+  return strKeyRegex.test(trimmed);
+}
+
+/**
+ * Multi-asset trustline check configuration.
+ */
+export interface MultiAssetConfig {
+  assetCode: string;
+  assetIssuer: string;
+  required: boolean; // if false, check is optional (warning only)
+}
+
+/**
+ * Reusable workflow: verify multiple asset trustlines in a single check.
+ * Returns an array of results — one per asset — with pass/fail status.
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify multi-asset trustlines
+ *   run: |
+ *     check-multi-asset USDC,EURC ${USDC_ISSUER},${EURC_ISSUER}
+ * ```
+ */
+export function checkMultiAssetTrustlines(
+  account: HorizonAccount,
+  assets: MultiAssetConfig[],
+): Array<{ asset: string; issuer: string; exists: boolean; required: boolean }> {
+  return assets.map((cfg) => ({
+    asset: cfg.assetCode,
+    issuer: cfg.assetIssuer,
+    exists: hasTrustline(account, cfg.assetCode, cfg.assetIssuer),
+    required: cfg.required,
+  }));
+}
+
+/**
+ * Reusable workflow: calculate recommended XLM reserve for an account.
+ * Formula: base account reserve (1 XLM) + (trustline count × 0.5 XLM per entry).
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Calculate reserve requirement
+ *   run: |
+ *     RESERVE=$(calculate-reserve ${TRUSTLINE_COUNT})
+ *     echo "Recommended reserve: ${RESERVE} XLM"
+ * ```
+ */
+export function calculateRecommendedReserve(trustlineCount: number): number {
+  return STELLAR_MIN_ACCOUNT_BALANCE_XLM + trustlineCount * STELLAR_BASE_RESERVE_XLM;
+}
+
+/**
+ * Reusable workflow: check if account sponsor is configured.
+ * Returns true if the account has a sponsor (num_sponsored > 0), false otherwise.
+ * 
+ * Useful for DAO/treasury workflows where accounts may be sponsored to reduce
+ * reserve requirements for contributors.
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify sponsorship
+ *   run: |
+ *     if check-sponsored ${ADDRESS}; then
+ *       echo "Account is sponsored"
+ *     fi
+ * ```
+ */
+export function checkAccountSponsored(account: HorizonAccount): boolean {
+  return account.num_sponsored > 0;
+}
+
+/**
+ * Reusable workflow example: comprehensive validation report combining all checks.
+ * Produces a structured report for use in workflow decision steps or dashboard output.
+ * 
+ * Usage in workflows:
+ * ```yaml
+ * - name: Generate validation report
+ *   run: |
+ *     REPORT=$(generate-validation-report ${ADDRESS})
+ *     echo "$REPORT" > report.json
+ * ```
+ */
+export interface ValidationReport {
+  address: string;
+  strKeyValid: boolean;
+  accountFunded: boolean;
+  xlmBalance: string;
+  reserveStatus: {
+    current: number;
+    required: number;
+    met: boolean;
+    deficit: string;
+  };
+  trustlines: Array<{ asset: string; issuer: string; exists: boolean }>;
+  sponsored: boolean;
+  timestamp: string;
+}
+
+export function generateValidationReport(
+  account: HorizonAccount,
+  config: CheckConfig,
+  additionalAssets: MultiAssetConfig[] = [],
+): ValidationReport {
+  const xlmBalance = getNativeBalance(account);
+  const xlmParsed = parseHorizonBalance(xlmBalance);
+  const trustlineCount = account.balances.filter((b) => b.asset_type !== 'native').length;
+  const recommendedReserve = calculateRecommendedReserve(trustlineCount);
+  
+  const primaryTrustline = {
+    asset: config.assetCode,
+    issuer: config.assetIssuer,
+    exists: hasTrustline(account, config.assetCode, config.assetIssuer),
+  };
+  
+  const additionalTrustlineResults = checkMultiAssetTrustlines(account, additionalAssets).map(
+    (r) => ({ asset: r.asset, issuer: r.issuer, exists: r.exists }),
+  );
+  
+  return {
+    address: account.account_id,
+    strKeyValid: validateStrKeyFormat(account.account_id),
+    accountFunded: true,
+    xlmBalance,
+    reserveStatus: {
+      current: xlmParsed,
+      required: Math.max(config.minXlmReserve, recommendedReserve),
+      met: xlmParsed >= Math.max(config.minXlmReserve, recommendedReserve),
+      deficit: formatXlmDeficit(Math.max(config.minXlmReserve, recommendedReserve), xlmParsed),
+    },
+    trustlines: [primaryTrustline, ...additionalTrustlineResults],
+    sponsored: checkAccountSponsored(account),
+    timestamp: new Date().toISOString(),
+  };
+}
