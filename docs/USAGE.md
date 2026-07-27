@@ -263,6 +263,13 @@ jobs:
       - run: echo "Ready for payout pipeline"
 ```
 
+> **Balance parsing for release scripts:** The `xlm_balance` output is a raw
+> Horizon decimal string (e.g. `"14.9999700"`). Use `parseFloat()` for
+> threshold comparisons, integer stroop arithmetic for payment math, or
+> `BigInt` for auditable precision. See
+> [DECIMAL_PRECISION.md](DECIMAL_PRECISION.md) for safe-parsing examples and
+> rules to avoid floating-point bugs in downstream payout scripts.
+
 ---
 
 ## Pinning versions

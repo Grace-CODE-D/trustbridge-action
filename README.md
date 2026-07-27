@@ -424,6 +424,7 @@ Full matrix: [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, data flow, module responsibilities |
 | [docs/STRUCTURE.md](docs/STRUCTURE.md) | File and directory reference |
 | [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md) | Error cases and retry behavior |
+| [docs/DECIMAL_PRECISION.md](docs/DECIMAL_PRECISION.md) | Asset balance string format, XLM stroop vs decimal, safe parsing for release scripts |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, PR checklist, release process |
 
 ---

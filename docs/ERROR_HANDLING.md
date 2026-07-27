@@ -95,6 +95,12 @@ Native balance is parsed as a string from Horizon (7 decimal places) and compare
 
 Remediation calculates approximate additional XLM needed.
 
+> **Balance string format and safe parsing rules for release scripts:**
+> See [DECIMAL_PRECISION.md](DECIMAL_PRECISION.md) for a full explanation of
+> why Horizon returns balances as strings, stroop vs decimal XLM, `min_xlm_reserve`
+> validation rules, and safe parsing patterns to avoid rounding bugs in downstream
+> payout automation.
+
 ---
 
 ## GitHub comment failures
