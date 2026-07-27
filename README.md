@@ -70,6 +70,10 @@ jobs:
 
 See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet, extracting addresses from issue templates).
 
+Running TrustBridge across many repos in an org? See [docs/USAGE.md#workflow_call-reusable-workflow](docs/USAGE.md#workflow_call-reusable-workflow) for a copy-paste `workflow_call` reusable workflow example instead of duplicating this job in every repo.
+
+Collecting wallets via a GitHub Issue Form instead of a hardcoded address? See [docs/USAGE.md#extracting-stellar-addresses-from-issue-forms](docs/USAGE.md#extracting-stellar-addresses-from-issue-forms) for a ready-made form + extraction step.
+
 ---
 
 ## Inputs
@@ -210,6 +214,12 @@ with:
 ```
 
 Setting `horizon_cache_ttl_ms: 0` disables the cache entirely so every check reaches Horizon live.
+
+**Cache lifetime.** The cache lives only in the Node.js process heap for a single invocation of the action — it is created fresh when the step starts and discarded when the step exits. It is **in-run only**, never durable: it is not persisted to disk and never shared across separate steps, jobs, matrix legs, or workflow runs. Each `matrix` combination (e.g. different `horizon_url` per network, or different `stellar_address_input`) runs on its own runner/process with its own empty cache, so there is no cross-contamination risk between matrix legs by construction.
+
+**Cache key isolation.** Entries are keyed on the normalized `(horizon_url, stellar_address)` pair (see `buildCacheKey` in `src/horizon.ts`), so two different Horizon endpoints or two different accounts never share a cache entry even if a `SimpleCache` instance were reused programmatically. Asset identity (`asset_code` / `asset_issuer`) is intentionally not part of the key: the cached value is the raw Horizon account response (all trustlines), which is not asset-interpreted, so matrix legs checking different assets against the same address safely share the cached account and independently derive their own trustline result from it.
+
+**Cache metrics.** Every cache lookup records a `horizon_cache_hit` or `horizon_cache_miss` metric point (and counter) tagged with the same `horizonUrl` / `stellarAddress` key dimensions used for the cache entry — but the address tag is redacted to first-4/last-4 (e.g. `GA5Z...KZVN`) before it is recorded, so the metrics JSON export (visible via `debug_mode: true`) never leaks a full contributor address while still letting you distinguish hit/miss behavior per matrix leg.
 
 ### Horizon RPC fallback URL
 
@@ -424,6 +434,7 @@ Full matrix: [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, data flow, module responsibilities |
 | [docs/STRUCTURE.md](docs/STRUCTURE.md) | File and directory reference |
 | [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md) | Error cases and retry behavior |
+| [docs/examples/](docs/examples/) | Copy-paste workflow examples (`workflow_call` reusable workflow, etc.) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, PR checklist, release process |
 
 ---

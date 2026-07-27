@@ -324,7 +324,13 @@ export async function postIssueComment(
     return undefined;
   }
 
-  const octokit = github.getOctokit(token);
+  // `github.getOctokit` defaults to `https://api.github.com` unless a
+  // `baseUrl` is supplied — on GitHub Enterprise Server the runner sets
+  // `GITHUB_API_URL` to the enterprise API base (e.g.
+  // `https://ghes.example.com/api/v3`), which `context.apiUrl` reads.
+  // Passing it explicitly here is what makes comment posting work on GHES
+  // instead of silently calling the wrong (public) API host.
+  const octokit = github.getOctokit(token, { baseUrl: context.apiUrl });
   const { owner, repo } = context.repo;
 
   let existingCommentId: number | undefined;

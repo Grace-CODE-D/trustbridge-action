@@ -12,6 +12,7 @@ jest.mock('@actions/github', () => ({
   context: {
     payload: {},
     repo: { owner: 'test-owner', repo: 'test-repo' },
+    apiUrl: 'https://api.github.com',
   },
   getOctokit: jest.fn(),
 }));
@@ -211,12 +212,17 @@ describe('findStickyComment', () => {
 
 describe('postIssueComment', () => {
   const mockedGithub = github as unknown as {
-    context: { payload: { issue?: { number: number } }; repo: { owner: string; repo: string } };
+    context: {
+      payload: { issue?: { number: number } };
+      repo: { owner: string; repo: string };
+      apiUrl: string;
+    };
     getOctokit: jest.Mock;
   };
 
   beforeEach(() => {
     mockedGithub.context.payload = { issue: { number: 7 } };
+    mockedGithub.context.apiUrl = 'https://api.github.com';
   });
 
   it('returns undefined and warns when there is no issue context', async () => {
@@ -245,6 +251,9 @@ describe('postIssueComment', () => {
       expect.objectContaining({ issue_number: 7, body: 'new body' }),
     );
     expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    expect(mockedGithub.getOctokit).toHaveBeenCalledWith('token', {
+      baseUrl: 'https://api.github.com',
+    });
   });
 
   it('updates the existing sticky comment instead of creating a new one', async () => {
@@ -293,5 +302,63 @@ describe('postIssueComment', () => {
     expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-3');
     expect(octokit.rest.issues.createComment).toHaveBeenCalled();
     expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+});
+
+describe('postIssueComment on GitHub Enterprise Server (GHES)', () => {
+  const mockedGithub = github as unknown as {
+    context: {
+      payload: { issue?: { number: number } };
+      repo: { owner: string; repo: string };
+      apiUrl: string;
+    };
+    getOctokit: jest.Mock;
+  };
+
+  const GHES_API_URL = 'https://ghes.example.com/api/v3';
+
+  beforeEach(() => {
+    mockedGithub.context.payload = { issue: { number: 7 } };
+    mockedGithub.context.apiUrl = GHES_API_URL;
+  });
+
+  afterEach(() => {
+    // Restore the github.com default so other describe blocks in this file
+    // aren't affected by this suite's enterprise API base.
+    mockedGithub.context.apiUrl = 'https://api.github.com';
+  });
+
+  it('creates the Octokit client against the enterprise API base from context.apiUrl', async () => {
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([]);
+    octokit.rest.issues.createComment.mockResolvedValue({
+      data: { html_url: `${GHES_API_URL.replace('/api/v3', '')}/o/r/issues/7#issuecomment-1` },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postIssueComment('token', 'body', { sticky: true });
+
+    expect(mockedGithub.getOctokit).toHaveBeenCalledWith('token', { baseUrl: GHES_API_URL });
+    expect(url).toContain('issuecomment-1');
+  });
+
+  it('still finds and updates a sticky comment when running against a GHES API base', async () => {
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([
+      { id: 99, body: `${STICKY_COMMENT_MARKER}\nold result` },
+    ]);
+    octokit.rest.issues.updateComment.mockResolvedValue({
+      data: { html_url: 'https://ghes.example.com/o/r/issues/7#issuecomment-99' },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postIssueComment('token', 'updated body', { sticky: true });
+
+    expect(mockedGithub.getOctokit).toHaveBeenCalledWith('token', { baseUrl: GHES_API_URL });
+    expect(url).toBe('https://ghes.example.com/o/r/issues/7#issuecomment-99');
+    expect(octokit.rest.issues.updateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ comment_id: 99, body: 'updated body' }),
+    );
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
   });
 });

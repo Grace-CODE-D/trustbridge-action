@@ -1,5 +1,6 @@
 import { defaultCache, SimpleCache } from './cache';
-import { logger, redactHorizonUrl, redactString, LogContext } from './logger';
+import { logger, redactHorizonUrl, redactStellarAddress, redactString, LogContext } from './logger';
+import { globalMetrics } from './metrics';
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -94,6 +95,24 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Cache key is `(normalized horizon base URL, stellar address)`. This is
+ * sufficient to prevent cross-contamination across GitHub Actions matrix
+ * legs and concurrent jobs that validate different assets/networks:
+ *   - Different `horizon_url` values (e.g. mainnet vs testnet legs of a
+ *     matrix build) always produce different keys.
+ *   - Different `stellar_address_input` values always produce different
+ *     keys.
+ * Asset identity (`asset_code` / `asset_issuer`) is deliberately NOT part
+ * of the key: the cached value is the raw Horizon `GET /accounts/{id}`
+ * response, which is not asset-interpreted — it contains the full
+ * `balances` array for every trustline on the account. Two matrix legs
+ * that check different assets against the *same* address+Horizon pair are
+ * expected to share the same cached account object; each leg independently
+ * derives its own trustline result from that shared data via
+ * `hasTrustline()`, so there is no risk of one leg's asset result leaking
+ * into another's.
+ */
 function buildCacheKey(normalizedHorizonUrl: string, stellarAddress: string): string {
   return `horizon:account:${normalizedHorizonUrl}:${stellarAddress}`;
 }
@@ -110,6 +129,26 @@ function redactCacheStats(stats: { size: number; entries: string[] }): {
     size: stats.size,
     entries: stats.entries.map(redactCacheKey),
   };
+}
+
+/**
+ * Record a cache hit/miss metric point. The `horizonUrl` and
+ * `stellarAddress` tags carry the same key dimensions as the cache entry
+ * itself (see `buildCacheKey`), so metrics can be sliced per matrix leg
+ * (e.g. per Horizon endpoint) — but the address is redacted first-4/last-4
+ * so the metric export never leaks a full contributor address, matching
+ * the redaction policy used everywhere else in this module.
+ */
+function recordCacheMetric(
+  outcome: 'hit' | 'miss',
+  normalizedHorizonUrl: string,
+  stellarAddress: string,
+): void {
+  globalMetrics.recordMetric(`horizon_cache_${outcome}`, 1, 'count', {
+    horizonUrl: redactHorizonUrl(normalizedHorizonUrl),
+    stellarAddress: redactStellarAddress(stellarAddress),
+  });
+  globalMetrics.incrementCounter(`horizon_cache_${outcome}`);
 }
 
 function safeHorizonContext(
@@ -432,6 +471,7 @@ export async function fetchAccount(
         cacheTtlMs,
         ...safeAccountSummary(cached),
       }));
+      recordCacheMetric('hit', normalizedHorizonUrl, stellarAddress);
       return cached;
     }
 
@@ -443,6 +483,7 @@ export async function fetchAccount(
       cacheKey,
       cacheTtlMs,
     }));
+    recordCacheMetric('miss', normalizedHorizonUrl, stellarAddress);
   } else {
     logger.debug('Horizon cache disabled (ttl=0)', safeHorizonContext({
       component: 'horizon',

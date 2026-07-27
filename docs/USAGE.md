@@ -214,13 +214,80 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
+## `workflow_call` reusable workflow
+
+If your org runs TrustBridge across many repos, wrap the action in a reusable workflow once and have every repo call it via `uses:` instead of copying the same job YAML everywhere.
+
+Copy-paste starting points (validated as YAML):
+
+- [docs/examples/trustbridge-reusable.yml](examples/trustbridge-reusable.yml) — the callable workflow. Publish it at `.github/workflows/trustbridge-reusable.yml` in an org-level shared-workflows repo (or in this repo, as shown).
+- [docs/examples/trustbridge-caller.yml](examples/trustbridge-caller.yml) — an example consumer workflow that calls it.
+
+### Inputs
+
+All `workflow_call` inputs mirror `action.yml` inputs (see [README inputs table](../README.md#inputs)) except `github_token`, which is a secret (below). Types are widened to `boolean`/`number` where the underlying action input is boolean/numeric so callers get YAML-native typing instead of raw strings:
+
+| `workflow_call` input | Type | Default | Maps to action input |
+| --------- | ------ | --------- | ----------------------- |
+| `stellar_address_input` | string | — (required) | `stellar_address_input` |
+| `horizon_url` | string | `https://horizon.stellar.org` | `horizon_url` |
+| `horizon_url_fallback` | string | `''` | `horizon_url_fallback` |
+| `rpc_fallback_url` | string | `''` | `rpc_fallback_url` |
+| `asset_code` | string | `USDC` | `asset_code` |
+| `asset_issuer` | string | (default USDC issuer) | `asset_issuer` |
+| `min_xlm_reserve` | string | `1.5` | `min_xlm_reserve` |
+| `fail_on_missing` | boolean | `true` | `fail_on_missing` |
+| `debug_mode` | boolean | `false` | `debug_mode` |
+| `sticky_comment` | boolean | `true` | `sticky_comment` |
+| `wait_until_funded` | boolean | `false` | `wait_until_funded` |
+| `wait_until_funded_timeout_ms` | number | `120000` | `wait_until_funded_timeout_ms` |
+| `wait_until_funded_interval_ms` | number | `5000` | `wait_until_funded_interval_ms` |
+| `horizon_timeout_ms` | number | `15000` | `horizon_timeout_ms` |
+| `horizon_cache_ttl_ms` | number | `60000` | `horizon_cache_ttl_ms` |
+| `use_cache` | boolean | `false` | `use_cache` |
+| `trustbridge_config_path` | string | `.trustbridge.yml` | `trustbridge_config_path` |
+| `log_inputs` | boolean | `false` | `log_inputs` |
+| `sep0007_deep_links` | boolean | `false` | `sep0007_deep_links` |
+| `sep0007_origin_domain` | string | `''` | `sep0007_origin_domain` |
+
+### Outputs
+
+| `workflow_call` output | Maps to action output |
+| --------- | ------------------------ |
+| `trustline_exists` | `trustline_exists` |
+| `xlm_balance` | `xlm_balance` |
+| `account_funded` | `account_funded` |
+| `comment_url` | `comment_url` |
+
+Read them from the calling workflow via `needs.<job-id>.outputs.<name>`, same as any other reusable-workflow job.
+
+### Secrets
+
+| Secret | Required | Notes |
+| --------- | ---------- | ------- |
+| `github_token` | No | Token with `issues: write` used to post/update the comment. Most callers should use `secrets: inherit` at the call site, which forwards the caller's own `GITHUB_TOKEN` (and any other secrets) under the same names — the reusable workflow reads it as `secrets.github_token`. The reusable workflow also falls back to `github.token` if no secret is supplied, so `secrets: inherit` is convenience, not a hard requirement. |
+
+### Permissions
+
+The reusable workflow's job declares `permissions: { issues: write, contents: read }` itself, but the **caller** workflow also needs at least `issues: write` in its own `permissions:` block (or org/repo default permissions must allow it) for the forwarded token to be able to post comments.
+
+### Issue context limitations when called from non-`issues` events
+
+TrustBridge posts a comment only when the workflow run's triggering event carries an issue payload (`github.context.payload.issue`). For a reusable workflow, that payload comes from whatever event triggered the **caller** workflow run — not from `workflow_call` itself, which has no event payload of its own. Concretely:
+
+- Caller triggered by `issues: assigned` → issue context is present, comment posting works normally.
+- Caller triggered by `workflow_dispatch`, `schedule`, `push`, etc. → there is no issue context, so `postIssueComment` logs a warning and skips posting (checks and outputs still run normally). This matches the action's existing standalone behavior — see the "Manual run — workflow_dispatch" section above.
+- If you need comments from a non-`issues` trigger, pass an issue number explicitly to your own comment step rather than relying on TrustBridge's built-in poster, or trigger the caller workflow from an `issues` event alongside `workflow_dispatch` as shown in `trustbridge-caller.yml`.
+
+---
+
 ## Extracting Stellar addresses from issues
 
 Common patterns:
 
 ### Issue template field
 
-Parse a labeled line from the issue body:
+Parse a labeled line from a free-form Markdown issue body (classic `.md`/`.yml` issue templates, or any issue where contributors paste an address in a known format):
 
 ```yaml
 - name: Extract Stellar address
@@ -237,6 +304,75 @@ Parse a labeled line from the issue body:
 ### Assignee-linked profile
 
 Fetch a custom field or org profile via your own API step, then pass the result to `stellar_address_input`.
+
+---
+
+## Extracting Stellar addresses from Issue Forms
+
+Most bounty/grant programs collect wallets via a structured **GitHub Issue Form** (a `.github/ISSUE_TEMPLATE/*.yml` file using `body:` fields) rather than a free-form Markdown template, since forms give contributors input validation and a consistent layout. This section documents the recommended field setup and a parser that survives harmless form edits.
+
+Copy-paste starting points (validated as YAML):
+
+- [docs/examples/wallet-issue-form.yml](examples/wallet-issue-form.yml) — an Issue Form with a `stellar_address` field, meant for `.github/ISSUE_TEMPLATE/`.
+- [docs/examples/extract-stellar-address.yml](examples/extract-stellar-address.yml) — a full `issues: [assigned]` workflow that extracts the address and runs TrustBridge.
+
+### Recommended field setup
+
+Use an `input` field with a stable `id` and a human-readable `label`:
+
+```yaml
+- type: input
+  id: stellar_address
+  attributes:
+    label: Stellar wallet address
+    description: Your Stellar public key (G-address, 56 characters, starts with "G").
+    placeholder: GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWX
+  validations:
+    required: true
+```
+
+### Why extraction matches on the label, not the field `id`
+
+GitHub does not expose Issue Form answers as structured JSON via the REST or GraphQL API — it renders the whole form into one composited **Markdown** issue body at creation time, where each field becomes a `### <label>` heading followed by a blank line and the answer (or the literal string `_No response_` for an unanswered optional field). The form's `id:` (`stellar_address`) is a template-authoring identifier only — it never appears in the rendered body — so any extraction step must match on the **label text**, and stays working across template edits that don't rename the label:
+
+```yaml
+script: |
+  const body = context.payload.issue?.body ?? '';
+  const FIELD_LABEL = 'Stellar wallet address';
+  const headingRe = new RegExp(`### ${FIELD_LABEL}\\s*\\n+([\\s\\S]*?)(?:\\n### |$)`);
+  const match = body.match(headingRe);
+  const raw = match ? match[1].trim() : '';
+
+  if (!raw || raw === '_No response_') {
+    core.setFailed(`Could not find a "${FIELD_LABEL}" answer in the issue body.`);
+    return;
+  }
+
+  const addressMatch = raw.match(/^(G[A-Z2-7]{55})$/);
+  if (!addressMatch) {
+    core.setFailed(`The "${FIELD_LABEL}" value does not look like a Stellar G-address: "${raw}"`);
+    return;
+  }
+
+  core.setOutput('address', addressMatch[1]);
+```
+
+The full version with commentary lives in [docs/examples/extract-stellar-address.yml](examples/extract-stellar-address.yml).
+
+### CI caveats
+
+- **Markdown, not HTML, and not YAML.** The issue body you receive in `context.payload.issue.body` is the same Markdown a human sees on github.com — there's no separate "raw form answers" payload to parse instead.
+- **`_No response_` placeholder.** An optional field left blank renders as the literal text `_No response_`, not an empty string — check for both.
+- **Required fields still need shape validation.** A form's `required: true` only guarantees *some* non-empty answer was submitted, not that it looks like a Stellar address — validate the shape yourself (see the regex above) so a typo fails with a clear message instead of reaching Horizon.
+- **Template edits can break label matching.** Renaming the field's `label:` (not its `id:`) will break a label-matching extractor. Keep the label text in the extraction script and the form template in sync, or add a short comment in the form file pointing at the workflow that depends on it (as `wallet-issue-form.yml` does).
+
+### Failure mode when the field is missing
+
+The example step calls `core.setFailed()` with a specific message the moment the label isn't found or the value doesn't match the G-address shape, so the run stops with a clear error (visible in the Actions log and the failed check) instead of silently passing an empty or garbage string into `stellar_address_input` — which would otherwise surface as a confusing "invalid address" failure from `validateStellarAddress` deeper in the action, with no indication that the real cause was upstream parsing.
+
+### Works with `issues.assigned`
+
+Issue Forms are just a creation-time authoring convenience — once the issue exists, its body is a normal issue body available on every subsequent event, including `issues: assigned`. The example workflow above triggers on `assigned` exactly like the rest of this guide's recipes.
 
 ---
 
@@ -272,6 +408,41 @@ jobs:
 | `@v1` | Recommended for production (semver major) |
 | `@main` | Latest development — use for testing only |
 | `@abc1234` | Pin to commit SHA for maximum reproducibility |
+
+---
+
+## GitHub Enterprise Server (GHES) support
+
+**Support statement: best-effort.** TrustBridge is not tested against a live GHES instance in CI (no GHES infra is currently available to this project), but the code path that talks to the GitHub REST API — issue comment posting in `src/comment.ts` — is written to respect the enterprise API base rather than assume `github.com`, and is covered by mocked-API-base tests (`__tests__/comment.test.ts`). Horizon/Stellar checks themselves (`src/horizon.ts`) make no GitHub API calls at all, so they behave identically on GHES and github.com.
+
+### What changes on GHES
+
+On a GHES runner, the Actions runner sets `GITHUB_API_URL` (and `GITHUB_SERVER_URL`, `GITHUB_GRAPHQL_URL`) to your enterprise instance's endpoints instead of the public GitHub ones, e.g.:
+
+```bash
+GITHUB_API_URL=https://ghes.example.com/api/v3
+GITHUB_SERVER_URL=https://ghes.example.com
+```
+
+`@actions/github`'s `context.apiUrl` reads `GITHUB_API_URL` automatically. TrustBridge passes it explicitly as `baseUrl` when constructing its Octokit client (`github.getOctokit(token, { baseUrl: context.apiUrl })` in `postIssueComment`), so REST calls (`listComments`, `createComment`, `updateComment`) target your enterprise API instead of `api.github.com`. No workflow input needs to change for this — it's automatic based on where the runner executes.
+
+### Verification checklist (no live GHES instance required)
+
+Run through this on your own GHES org before relying on TrustBridge there:
+
+- [ ] Runner is a **self-hosted runner registered to the GHES instance** (GHES doesn't offer GitHub-hosted runners) — confirm `runs-on:` targets a valid self-hosted label.
+- [ ] `GITHUB_TOKEN` (or the PAT passed as `github_token`) has `issues: write` scope/permission on the target repo.
+- [ ] The workflow's `permissions:` block includes `issues: write`, `contents: read`.
+- [ ] Your GHES version supports the REST endpoints TrustBridge uses (`GET /repos/{owner}/{repo}/issues/{n}/comments`, `POST`/`PATCH` on the same) — these are core Issues API endpoints present since early GHES releases; no minimum version issue is currently known.
+- [ ] Network egress from the GHES runner to the public Horizon API (`https://horizon.stellar.org` or your configured `horizon_url`) is allowed — GHES runners are often on restricted networks, and Horizon itself is **not** an enterprise-mirrored service (out of scope for this issue; see Horizon RPC fallback docs above if you run a private Horizon mirror).
+
+### Troubleshooting GHES 404 / permission errors
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `Could not look up existing TrustBridge comment, falling back to a new comment: ... 404` or similar on every run | `getOctokit` hit `api.github.com` instead of your GHES instance (e.g. an old TrustBridge version without the `baseUrl` fix, or `GITHUB_API_URL` unset because the runner isn't actually GHES-registered) | Upgrade to a TrustBridge version that includes the GHES `baseUrl` fix; confirm the job actually runs on a GHES-registered self-hosted runner (`echo $GITHUB_API_URL` in a debug step) |
+| `403`/`Resource not accessible by integration` when posting the comment | Token lacks `issues: write`, or your GHES instance enforces stricter default token permissions than github.com | Add `permissions: { issues: write }` to the job/workflow; for a PAT, confirm it has `repo` (classic) or `issues:write` (fine-grained) scope on that specific repo |
+| Comment posts to the wrong host / link in the comment 404s | `comment_url` output correctly reflects whatever host answered the API call — a wrong host here means `GITHUB_API_URL`/`GITHUB_SERVER_URL` are misconfigured on the runner itself, not a TrustBridge issue | Check the self-hosted runner's environment / `_work/_temp` runner config for correct GHES URLs |
 
 ---
 
