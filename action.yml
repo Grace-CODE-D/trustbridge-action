@@ -135,6 +135,7 @@ inputs:
     default: ''
 
 outputs:
+  # ── Legacy outputs (kept for backward compatibility) ──────────────────────
   trustline_exists:
     description: 'Whether the account has a trustline for the configured asset'
   xlm_balance:
@@ -143,6 +144,22 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
+  # ── Per-check named outputs (Issue #106) ──────────────────────────────────
+  check_account_funded:
+    description: >-
+      Boolean string ('true'/'false') — whether the account exists and is
+      funded on the Stellar network. Mirrors account_funded; provided as a
+      named per-check output for finer-grained workflow gating.
+  check_trustline:
+    description: >-
+      Boolean string ('true'/'false') — whether the account holds a trustline
+      for the configured asset (asset_code + asset_issuer). Mirrors
+      trustline_exists; provided as a named per-check output.
+  check_xlm_reserve:
+    description: >-
+      Boolean string ('true'/'false') — whether the account's native XLM
+      balance meets or exceeds the min_xlm_reserve threshold. Not available
+      from legacy outputs; use this for reserve-specific gating.
 
 runs:
   using: 'node20'

@@ -4,6 +4,9 @@ export interface ActionOutputs {
     xlm_balance: string;
     account_funded: string;
     comment_url: string;
+    check_account_funded: string;
+    check_trustline: string;
+    check_xlm_reserve: string;
 }
 export declare function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs;
 export declare function setValidationOutputs(result: ValidationResult, commentUrl?: string): void;

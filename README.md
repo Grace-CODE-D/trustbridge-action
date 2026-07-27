@@ -108,6 +108,9 @@ Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
 | `xlm_balance` | string | Native XLM balance from Horizon (or `0` / `unknown`) |
 | `account_funded` | boolean (string) | `true` if Horizon returned an active account |
 | `comment_url` | string | URL to the created issue comment when run in issue context |
+| `check_account_funded` | boolean (string) | Named per-check output — mirrors `account_funded` |
+| `check_trustline` | boolean (string) | Named per-check output — mirrors `trustline_exists` |
+| `check_xlm_reserve` | boolean (string) | Named per-check output — `true` if native XLM ≥ `min_xlm_reserve` |
 
 Use outputs in downstream steps:
 

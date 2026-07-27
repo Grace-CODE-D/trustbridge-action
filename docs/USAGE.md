@@ -240,6 +240,72 @@ Fetch a custom field or org profile via your own API step, then pass the result 
 
 ---
 
+## Per-check named outputs (fine-grained gating)
+
+In addition to the legacy `account_funded` and `trustline_exists` outputs,
+TrustBridge exposes three named per-check outputs that map one-to-one onto
+the internal validation checks:
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `check_account_funded` | `'true'`/`'false'` | Account exists and is funded on Stellar |
+| `check_trustline` | `'true'`/`'false'` | Trustline for `asset_code`/`asset_issuer` is present |
+| `check_xlm_reserve` | `'true'`/`'false'` | Native XLM ≥ `min_xlm_reserve` |
+
+These are backward-compatible additions — all existing `account_funded`,
+`trustline_exists`, and `xlm_balance` outputs continue to work unchanged.
+
+### Branching workflow: allow funded-but-trustline-pending path
+
+A common pattern is to let contributors proceed when the account is funded
+even if the trustline is not yet set up (e.g. to unblock an issue assignment
+while the contributor completes wallet configuration):
+
+```yaml
+- name: TrustBridge check
+  id: tb
+  uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.addr.outputs.value }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    fail_on_missing: false   # don't hard-fail; we branch on outputs below
+
+- name: Full payout path — all checks passed
+  if: >
+    steps.tb.outputs.check_account_funded == 'true' &&
+    steps.tb.outputs.check_trustline == 'true' &&
+    steps.tb.outputs.check_xlm_reserve == 'true'
+  run: echo "Ready for immediate payout"
+
+- name: Funded but trustline or reserve pending — assign but hold payment
+  if: >
+    steps.tb.outputs.check_account_funded == 'true' &&
+    (steps.tb.outputs.check_trustline != 'true' ||
+     steps.tb.outputs.check_xlm_reserve != 'true')
+  run: echo "Account active — awaiting trustline/reserve setup before payout"
+
+- name: Account not funded — block assignment
+  if: steps.tb.outputs.check_account_funded != 'true'
+  run: |
+    echo "Contributor wallet not yet funded — blocking assignment"
+    exit 1
+```
+
+### Reserve-only gating
+
+Gate a step purely on whether the XLM reserve is met, independent of the
+trustline check:
+
+```yaml
+- name: Assert reserve met
+  if: steps.tb.outputs.check_xlm_reserve != 'true'
+  run: |
+    echo "XLM reserve not met (balance: ${{ steps.tb.outputs.xlm_balance }})"
+    exit 1
+```
+
+---
+
 ## Outputs in downstream jobs
 
 ```yaml
