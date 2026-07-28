@@ -1,0 +1,59 @@
+# Example consumer workflow that calls the shared reusable workflow in
+# trustbridge-reusable.yml instead of duplicating the trustbridge-action
+# step directly. Copy this into any repo's `.github/workflows/` and adjust
+# the `uses:` ref to point at wherever your org publishes
+# trustbridge-reusable.yml (a shared workflows repo, or this same repo).
+#
+# See docs/USAGE.md#workflow_call-reusable-workflow for details.
+
+name: Verify Stellar wallet (via reusable workflow)
+
+on:
+  issues:
+    types: [assigned]
+  workflow_dispatch:
+    inputs:
+      stellar_address:
+        description: 'Stellar G-address to validate'
+        required: true
+
+jobs:
+  resolve-address:
+    runs-on: ubuntu-latest
+    outputs:
+      address: ${{ steps.addr.outputs.value }}
+    steps:
+      - name: Resolve address
+        id: addr
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.stellar_address }}" >> "$GITHUB_OUTPUT"
+          else
+            # See docs/USAGE.md#extracting-stellar-addresses-from-issues for
+            # a robust issue-form extraction example.
+            echo "value=GYOURCONTRIBUTORADDRESSHERE" >> "$GITHUB_OUTPUT"
+          fi
+
+  trustbridge:
+    needs: resolve-address
+    # Replace `Stellar-TrustBridge/trustbridge-action` with your org's
+    # shared-workflows repo if trustbridge-reusable.yml lives elsewhere, and
+    # pin to a release tag/SHA the same way you would for the action itself.
+    uses: Stellar-TrustBridge/trustbridge-action/.github/workflows/trustbridge-reusable.yml@main
+    # `secrets: inherit` forwards every secret available to this caller
+    # workflow (including GITHUB_TOKEN) to the called workflow under the
+    # same names — the reusable workflow reads it as `secrets.github_token`.
+    # Use an explicit `secrets:` block instead if you only want to pass one.
+    secrets: inherit
+    with:
+      stellar_address_input: ${{ needs.resolve-address.outputs.address }}
+      fail_on_missing: true
+      sticky_comment: true
+
+  use-outputs:
+    needs: trustbridge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Continue only if funded
+        if: needs.trustbridge.outputs.account_funded == 'true'
+        run: echo "Account is active, trustline_exists=${{ needs.trustbridge.outputs.trustline_exists }}"
