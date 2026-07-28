@@ -309,72 +309,69 @@ Fetch a custom field or org profile via your own API step, then pass the result 
 
 ---
 
-## Extracting Stellar addresses from Issue Forms
+## Per-check named outputs (fine-grained gating)
 
-Most bounty/grant programs collect wallets via a structured **GitHub Issue Form** (a `.github/ISSUE_TEMPLATE/*.yml` file using `body:` fields) rather than a free-form Markdown template, since forms give contributors input validation and a consistent layout. This section documents the recommended field setup and a parser that survives harmless form edits.
+In addition to the legacy `account_funded` and `trustline_exists` outputs,
+TrustBridge exposes three named per-check outputs that map one-to-one onto
+the internal validation checks:
 
-Copy-paste starting points (validated as YAML):
+| Output | Type | Description |
+|--------|------|-------------|
+| `check_account_funded` | `'true'`/`'false'` | Account exists and is funded on Stellar |
+| `check_trustline` | `'true'`/`'false'` | Trustline for `asset_code`/`asset_issuer` is present |
+| `check_xlm_reserve` | `'true'`/`'false'` | Native XLM ≥ `min_xlm_reserve` |
 
-- [docs/examples/wallet-issue-form.yml](examples/wallet-issue-form.yml) — an Issue Form with a `stellar_address` field, meant for `.github/ISSUE_TEMPLATE/`.
-- [docs/examples/extract-stellar-address.yml](examples/extract-stellar-address.yml) — a full `issues: [assigned]` workflow that extracts the address and runs TrustBridge.
+These are backward-compatible additions — all existing `account_funded`,
+`trustline_exists`, and `xlm_balance` outputs continue to work unchanged.
 
-### Recommended field setup
+### Branching workflow: allow funded-but-trustline-pending path
 
-Use an `input` field with a stable `id` and a human-readable `label`:
-
-```yaml
-- type: input
-  id: stellar_address
-  attributes:
-    label: Stellar wallet address
-    description: Your Stellar public key (G-address, 56 characters, starts with "G").
-    placeholder: GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWX
-  validations:
-    required: true
-```
-
-### Why extraction matches on the label, not the field `id`
-
-GitHub does not expose Issue Form answers as structured JSON via the REST or GraphQL API — it renders the whole form into one composited **Markdown** issue body at creation time, where each field becomes a `### <label>` heading followed by a blank line and the answer (or the literal string `_No response_` for an unanswered optional field). The form's `id:` (`stellar_address`) is a template-authoring identifier only — it never appears in the rendered body — so any extraction step must match on the **label text**, and stays working across template edits that don't rename the label:
+A common pattern is to let contributors proceed when the account is funded
+even if the trustline is not yet set up (e.g. to unblock an issue assignment
+while the contributor completes wallet configuration):
 
 ```yaml
-script: |
-  const body = context.payload.issue?.body ?? '';
-  const FIELD_LABEL = 'Stellar wallet address';
-  const headingRe = new RegExp(`### ${FIELD_LABEL}\\s*\\n+([\\s\\S]*?)(?:\\n### |$)`);
-  const match = body.match(headingRe);
-  const raw = match ? match[1].trim() : '';
+- name: TrustBridge check
+  id: tb
+  uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.addr.outputs.value }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    fail_on_missing: false   # don't hard-fail; we branch on outputs below
 
-  if (!raw || raw === '_No response_') {
-    core.setFailed(`Could not find a "${FIELD_LABEL}" answer in the issue body.`);
-    return;
-  }
+- name: Full payout path — all checks passed
+  if: >
+    steps.tb.outputs.check_account_funded == 'true' &&
+    steps.tb.outputs.check_trustline == 'true' &&
+    steps.tb.outputs.check_xlm_reserve == 'true'
+  run: echo "Ready for immediate payout"
 
-  const addressMatch = raw.match(/^(G[A-Z2-7]{55})$/);
-  if (!addressMatch) {
-    core.setFailed(`The "${FIELD_LABEL}" value does not look like a Stellar G-address: "${raw}"`);
-    return;
-  }
+- name: Funded but trustline or reserve pending — assign but hold payment
+  if: >
+    steps.tb.outputs.check_account_funded == 'true' &&
+    (steps.tb.outputs.check_trustline != 'true' ||
+     steps.tb.outputs.check_xlm_reserve != 'true')
+  run: echo "Account active — awaiting trustline/reserve setup before payout"
 
-  core.setOutput('address', addressMatch[1]);
+- name: Account not funded — block assignment
+  if: steps.tb.outputs.check_account_funded != 'true'
+  run: |
+    echo "Contributor wallet not yet funded — blocking assignment"
+    exit 1
 ```
 
-The full version with commentary lives in [docs/examples/extract-stellar-address.yml](examples/extract-stellar-address.yml).
+### Reserve-only gating
 
-### CI caveats
+Gate a step purely on whether the XLM reserve is met, independent of the
+trustline check:
 
-- **Markdown, not HTML, and not YAML.** The issue body you receive in `context.payload.issue.body` is the same Markdown a human sees on github.com — there's no separate "raw form answers" payload to parse instead.
-- **`_No response_` placeholder.** An optional field left blank renders as the literal text `_No response_`, not an empty string — check for both.
-- **Required fields still need shape validation.** A form's `required: true` only guarantees *some* non-empty answer was submitted, not that it looks like a Stellar address — validate the shape yourself (see the regex above) so a typo fails with a clear message instead of reaching Horizon.
-- **Template edits can break label matching.** Renaming the field's `label:` (not its `id:`) will break a label-matching extractor. Keep the label text in the extraction script and the form template in sync, or add a short comment in the form file pointing at the workflow that depends on it (as `wallet-issue-form.yml` does).
-
-### Failure mode when the field is missing
-
-The example step calls `core.setFailed()` with a specific message the moment the label isn't found or the value doesn't match the G-address shape, so the run stops with a clear error (visible in the Actions log and the failed check) instead of silently passing an empty or garbage string into `stellar_address_input` — which would otherwise surface as a confusing "invalid address" failure from `validateStellarAddress` deeper in the action, with no indication that the real cause was upstream parsing.
-
-### Works with `issues.assigned`
-
-Issue Forms are just a creation-time authoring convenience — once the issue exists, its body is a normal issue body available on every subsequent event, including `issues: assigned`. The example workflow above triggers on `assigned` exactly like the rest of this guide's recipes.
+```yaml
+- name: Assert reserve met
+  if: steps.tb.outputs.check_xlm_reserve != 'true'
+  run: |
+    echo "XLM reserve not met (balance: ${{ steps.tb.outputs.xlm_balance }})"
+    exit 1
+```
 
 ---
 

@@ -35083,30 +35083,6 @@ function parseRetryAfterMs(response) {
 async function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
-/**
- * Sleep for `ms` milliseconds, but resolve immediately (without throwing) if
- * `signal` is aborted before the timer fires.  The caller is responsible for
- * checking `signal.aborted` after the await if it needs to stop on cancellation.
- */
-function cancellableSleep(ms, signal) {
-    if (!signal) {
-        return sleep(ms);
-    }
-    if (signal.aborted) {
-        return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-            signal.removeEventListener('abort', onAbort);
-            resolve();
-        }, ms);
-        const onAbort = () => {
-            clearTimeout(timer);
-            resolve();
-        };
-        signal.addEventListener('abort', onAbort, { once: true });
-    });
-}
 function buildCacheKey(normalizedHorizonUrl, stellarAddress) {
     return `horizon:account:${normalizedHorizonUrl}:${stellarAddress}`;
 }
@@ -35143,26 +35119,16 @@ function safeAccountSummary(account) {
         subentryCount: account.subentry_count,
     };
 }
-async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, parentSignal) {
+async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind) {
     const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
     const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
     const safeUrlForLog = (0, logger_1.redactHorizonUrl)(url);
     let attempt = 0;
     let lastError;
     while (attempt <= maxRetries) {
-        // Bail out immediately if the job was cancelled before this attempt.
-        if (parentSignal?.aborted) {
-            throw new HorizonError('Horizon request aborted (job cancelled).', 0, false);
-        }
         const requestStartedAt = Date.now();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
-        // Propagate the parent cancellation signal to the per-request controller.
-        let parentAbortHandler;
-        if (parentSignal) {
-            parentAbortHandler = () => controller.abort();
-            parentSignal.addEventListener('abort', parentAbortHandler);
-        }
         logger_1.logger.debug('Horizon fetch start', safeHorizonContext({
             component: 'horizon',
             stellarAddress,
@@ -35246,9 +35212,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                         retryAfterFromHeader: retryAfterHeader !== null,
                         nextAttempt: attempt + 1,
                     }));
-                    await cancellableSleep(retryAfter, parentSignal);
-                    // If the job was cancelled during the sleep, bail out on the next
-                    // iteration's pre-flight check rather than issuing another request.
+                    await sleep(retryAfter);
                     attempt += 1;
                     continue;
                 }
@@ -35288,31 +35252,23 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                 throw error;
             }
             const isAbort = error instanceof Error && error.name === 'AbortError';
-            // If the parent job signal fired, propagate as a non-retryable cancellation.
-            const isJobCancelled = isAbort && parentSignal?.aborted;
-            const message = isJobCancelled
-                ? 'Horizon request aborted (job cancelled).'
-                : isAbort
-                    ? `Horizon request timed out after ${timeoutMs}ms`
-                    : error instanceof Error
-                        ? error.message
-                        : 'Unknown Horizon error';
+            const message = isAbort
+                ? `Horizon request timed out after ${timeoutMs}ms`
+                : error instanceof Error
+                    ? error.message
+                    : 'Unknown Horizon error';
             const latencyMs = Date.now() - requestStartedAt;
             logger_1.logger.debug('Horizon transport error', safeHorizonContext({
                 component: 'horizon',
                 stellarAddress,
                 horizonUrl: targetHorizonUrl,
                 endpointKind,
-                kind: isJobCancelled ? 'cancelled' : isAbort ? 'timeout' : 'network',
+                kind: isAbort ? 'timeout' : 'network',
                 latencyMs,
                 attempt,
                 timeoutMs,
                 errorMessage: (0, logger_1.redactString)(message),
             }));
-            // Job cancellation is non-retryable — throw immediately.
-            if (isJobCancelled) {
-                throw new HorizonError(message, 0, false);
-            }
             lastError = new HorizonError(message, isAbort ? 408 : 0, true);
             if (attempt < maxRetries) {
                 const backoffMs = 1000 * 2 ** attempt;
@@ -35327,9 +35283,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                     retryAfterMs: backoffMs,
                     nextAttempt: attempt + 1,
                 }));
-                await cancellableSleep(backoffMs, parentSignal);
-                // If the job was cancelled during the backoff sleep, bail out on the
-                // next iteration's pre-flight check rather than issuing another request.
+                await sleep(backoffMs);
                 attempt += 1;
                 continue;
             }
@@ -35367,7 +35321,6 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     const cache = options.cache ?? cache_1.defaultCache;
-    const signal = options.signal;
     const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
     const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
     const normalizedFallbackUrl = fallbackCandidate
@@ -35375,10 +35328,6 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         : '';
     if (!normalizedHorizonUrl) {
         throw new HorizonError('horizon_url is required.', 0, false);
-    }
-    // Bail out immediately if the job was already cancelled before we start.
-    if (signal?.aborted) {
-        throw new HorizonError('Horizon request aborted (job cancelled).', 0, false);
     }
     const cachingEnabled = cacheTtlMs > 0;
     const cacheKey = cachingEnabled
@@ -35429,7 +35378,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     }
     let primaryError;
     try {
-        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', signal);
+        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary');
         if (cachingEnabled) {
             cache.set(cacheKey, result.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35473,7 +35422,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
     }));
     try {
-        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', signal);
+        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback');
         if (cachingEnabled) {
             cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35746,73 +35695,37 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Load and apply optional consumer config file (Issue #45).
-    // readTrustbridgeConfig fails fast (throws) if the file exists but is invalid.
-    // When the file is absent it returns config:null and found:false — no-op.
-    const { config: consumerConfig, validation: configValidation, found: configFound, resolvedPath: configResolvedPath } = (0, configReader_1.readTrustbridgeConfig)(trustbridgeConfigPath);
-    if (!configValidation.valid) {
-        // Surface every error so the workflow author can fix them all in one pass.
-        throw new Error(`trustbridge_config_path "${configResolvedPath}" failed validation:\n${configValidation.errors.join('\n')}`);
-    }
-    if (configFound && consumerConfig) {
-        logger_1.logger.debug('Consumer config loaded', {
-            component: 'index',
-            configPath: configResolvedPath,
-            keys: Object.keys(consumerConfig),
-        });
-    }
-    // Build the set of inputs that were explicitly provided by the workflow
-    // author so mergeConsumerConfig knows which action inputs take precedence.
-    const explicitInputs = new Set([
-        core.getInput('horizon_url') ? 'horizonUrl' : null,
-        core.getInput('horizon_url_fallback') ? 'horizonUrlFallback' : null,
-        core.getInput('rpc_fallback_url') ? 'rpcFallbackUrl' : null,
-        core.getInput('asset_code') ? 'assetCode' : null,
-        core.getInput('asset_issuer') ? 'assetIssuer' : null,
-        core.getInput('min_xlm_reserve') ? 'minXlmReserveRaw' : null,
-        core.getInput('fail_on_missing') ? 'failOnMissing' : null,
-    ].filter((v) => v !== null));
-    // Merge consumer config defaults under explicit action inputs.
-    const mergedInputs = (0, configReader_1.mergeConsumerConfig)({ horizonUrl, horizonUrlFallback, rpcFallbackUrl: rpcFallbackUrlRaw, assetCode, assetIssuer, minXlmReserveRaw, failOnMissing }, consumerConfig, explicitInputs);
-    // Re-bind the merged values so the rest of the run uses them.
-    const effectiveHorizonUrl = typeof mergedInputs.horizonUrl === 'string' ? mergedInputs.horizonUrl : horizonUrl;
-    const effectiveHorizonUrlFallback = typeof mergedInputs.horizonUrlFallback === 'string' ? mergedInputs.horizonUrlFallback : horizonUrlFallback;
-    const effectiveRpcFallbackUrl = typeof mergedInputs.rpcFallbackUrl === 'string' ? mergedInputs.rpcFallbackUrl : rpcFallbackUrlRaw;
-    const effectiveAssetCode = typeof mergedInputs.assetCode === 'string' ? mergedInputs.assetCode : assetCode;
-    const effectiveAssetIssuer = typeof mergedInputs.assetIssuer === 'string' ? mergedInputs.assetIssuer : assetIssuer;
-    const effectiveMinXlmReserveRaw = typeof mergedInputs.minXlmReserveRaw === 'string' ? mergedInputs.minXlmReserveRaw : minXlmReserveRaw;
-    const effectiveFailOnMissing = typeof mergedInputs.failOnMissing === 'boolean' ? mergedInputs.failOnMissing : failOnMissing;
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
     logger_1.logger.debug('Action inputs loaded', {
         component: 'index',
-        horizonUrl: effectiveHorizonUrl,
-        horizonUrlFallback: effectiveHorizonUrlFallback,
+        horizonUrl,
+        horizonUrlFallback,
         horizonCacheTtlMs,
-        assetCode: effectiveAssetCode,
-        assetIssuer: effectiveAssetIssuer,
-        minXlmReserveRaw: effectiveMinXlmReserveRaw,
+        assetCode,
+        assetIssuer,
+        minXlmReserveRaw,
         debugMode,
         horizonTimeoutMs,
         stickyComment,
         waitUntilFunded,
         waitUntilFundedTimeoutMs,
         waitUntilFundedIntervalMs,
-        rpcFallbackUrl: effectiveRpcFallbackUrl,
+        rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
         sep0007DeepLinks,
     });
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
-            horizonUrl: effectiveHorizonUrl,
-            horizonUrlFallback: effectiveHorizonUrlFallback,
-            rpcFallbackUrl: effectiveRpcFallbackUrl,
-            assetCode: effectiveAssetCode,
-            assetIssuer: effectiveAssetIssuer,
-            minXlmReserve: effectiveMinXlmReserveRaw,
+            horizonUrl,
+            horizonUrlFallback,
+            rpcFallbackUrl: rpcFallbackUrlRaw,
+            assetCode,
+            assetIssuer,
+            minXlmReserve: minXlmReserveRaw,
             stellarAddress,
-            failOnMissing: effectiveFailOnMissing,
+            failOnMissing,
             debugMode,
             horizonTimeoutMs,
             stickyComment,
@@ -35844,29 +35757,19 @@ async function run() {
     const checkConfig = {
         ...normalizedAsset,
         minXlmReserve,
-        horizonUrl: effectiveHorizonUrl,
+        horizonUrl,
     };
     core.info(`Checking Stellar account ${stellarAddress} via ${effectiveHorizonUrl}`);
     if (waitUntilFunded) {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
     }
     let result;
-    // Create a job-level AbortController so Horizon fetches and polling loops
-    // stop promptly when the GitHub Actions runner cancels the workflow.
-    const jobController = new AbortController();
-    // Rebuild fallbackUrls from the effective (possibly config-merged) values.
-    const effectiveFallbackUrls = effectiveRpcFallbackUrl
-        ? effectiveRpcFallbackUrl.split(',').map((u) => u.trim()).filter(Boolean)
-        : effectiveHorizonUrlFallback
-            ? [effectiveHorizonUrlFallback]
-            : fallbackUrls;
     const horizonOptions = {
         timeoutMs: horizonTimeoutMs,
-        horizonUrlFallback: effectiveHorizonUrlFallback || undefined,
-        fallbackUrls: effectiveFallbackUrls,
+        horizonUrlFallback: horizonUrlFallback || undefined,
+        fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
-        signal: jobController.signal,
     };
     try {
         const account = waitUntilFunded
@@ -35881,7 +35784,7 @@ async function run() {
                     elapsedMs,
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
-            : await (0, horizon_1.fetchAccount)(effectiveHorizonUrl, stellarAddress, horizonOptions);
+            : await (0, horizon_1.fetchAccount)(horizonUrl, stellarAddress, horizonOptions);
         result = (0, checks_1.runAccountChecks)(account, checkConfig);
     }
     catch (error) {
@@ -35915,8 +35818,8 @@ async function run() {
     const commentBody = (0, comment_1.formatCommentBody)(result, {
         ...checkConfig,
         stellarAddress,
-        horizonUrl: effectiveHorizonUrl,
-        failOnMissing: effectiveFailOnMissing,
+        horizonUrl,
+        failOnMissing,
         stickyComment,
         waitUntilFunded,
         waitUntilFundedTimeoutMs,
@@ -36715,12 +36618,15 @@ exports.setValidationOutputs = setValidationOutputs;
 const core = __importStar(__nccwpck_require__(7484));
 function toActionOutputs(result, commentUrl) {
     return {
+        // Legacy outputs
         trustline_exists: String(result.trustlineExists),
         xlm_balance: result.xlmBalance,
         account_funded: String(result.accountFunded),
         comment_url: commentUrl ?? '',
-        asset_balance: result.assetBalance,
-        asset_balance_met: String(result.assetBalanceMet),
+        // Per-check named outputs — match ValidationResult fields exactly
+        check_account_funded: String(result.accountFunded),
+        check_trustline: String(result.trustlineExists),
+        check_xlm_reserve: String(result.xlmReserveMet),
     };
 }
 function setValidationOutputs(result, commentUrl) {

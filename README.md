@@ -120,6 +120,9 @@ Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
 | `asset_balance` | string | Current configured asset (e.g. USDC) balance as reported by Horizon, or `0` / `unknown` |
 | `asset_balance_met` | boolean (string) | `true` when `min_asset_balance` is not set or the balance meets or exceeds the floor, otherwise `false` |
 | `comment_url` | string | URL to the created issue comment when run in issue context |
+| `check_account_funded` | boolean (string) | Named per-check output — mirrors `account_funded` |
+| `check_trustline` | boolean (string) | Named per-check output — mirrors `trustline_exists` |
+| `check_xlm_reserve` | boolean (string) | Named per-check output — `true` if native XLM ≥ `min_xlm_reserve` |
 
 Use outputs in downstream steps:
 

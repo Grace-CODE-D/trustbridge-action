@@ -3,22 +3,28 @@ import * as core from '@actions/core';
 import { ValidationResult } from './checks';
 
 export interface ActionOutputs {
+  // Legacy outputs — kept for backward compatibility
   trustline_exists: string;
   xlm_balance: string;
   account_funded: string;
   comment_url: string;
-  asset_balance: string;
-  asset_balance_met: string;
+  // Per-check named outputs (Issue #106)
+  check_account_funded: string;
+  check_trustline: string;
+  check_xlm_reserve: string;
 }
 
 export function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs {
   return {
+    // Legacy outputs
     trustline_exists: String(result.trustlineExists),
     xlm_balance: result.xlmBalance,
     account_funded: String(result.accountFunded),
     comment_url: commentUrl ?? '',
-    asset_balance: result.assetBalance,
-    asset_balance_met: String(result.assetBalanceMet),
+    // Per-check named outputs — match ValidationResult fields exactly
+    check_account_funded: String(result.accountFunded),
+    check_trustline: String(result.trustlineExists),
+    check_xlm_reserve: String(result.xlmReserveMet),
   };
 }
 
