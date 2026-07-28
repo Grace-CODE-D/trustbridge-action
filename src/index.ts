@@ -26,13 +26,9 @@ import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { runIssuesPreflight, PreflightError } from './preflight';
 
-async function run(): Promise<void> {
-  // #147 — helper to resolve each input with TRUSTBRIDGE_* env fallback
-  const getInput = (name: string, opts?: Parameters<typeof core.getInput>[1]) =>
-    resolveInput(name, core.getInput(name, opts));
-
-  const horizonUrl = getInput('horizon_url') || 'https://horizon.stellar.org';
-  const assetCode = getInput('asset_code') || 'USDC';
+export async function run(): Promise<void> {
+  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
+  const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
     getInput('asset_issuer') ||
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
@@ -120,8 +116,7 @@ async function run(): Promise<void> {
     rpcFallbackUrl: effectiveRpcFallbackUrl,
     useCache,
     sep0007DeepLinks,
-    dynamicReserve,
-    reserveBufferXlm,
+    trustbridgeConfigPath,
   });
 
   // Wave #28: auto-extract Stellar address from the issue body when
@@ -447,6 +442,9 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((error) => {
-  core.setFailed(getErrorMessage(error));
-});
+// Skip auto-run under Jest so performance / integration tests can import `run`.
+if (process.env.JEST_WORKER_ID === undefined) {
+  run().catch((error) => {
+    core.setFailed(getErrorMessage(error));
+  });
+}

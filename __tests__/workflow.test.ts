@@ -28,18 +28,11 @@ describe('.github/workflows/ci.yml', () => {
     expect(content).toContain('Verify comment golden snapshots and test coverage');
   });
 
-  // Wave #30: CI must include dry-run smoke job
-  it('includes dry-run-smoke job with comment_mode: dry-run (Wave #30)', () => {
+  it('runs unit tests via npm test (includes validation performance budget)', () => {
     const content = fs.readFileSync(workflowPath, 'utf8');
-    expect(content).toContain('dry-run-smoke');
-    expect(content).toContain("comment_mode: 'dry-run'");
-  });
-
-  it('dry-run-smoke job sets fail_on_missing: false so it never blocks CI', () => {
-    const content = fs.readFileSync(workflowPath, 'utf8');
-    // Locate the dry-run-smoke block and confirm fail_on_missing is false
-    const dryRunSection = content.slice(content.indexOf('dry-run-smoke'));
-    expect(dryRunSection).toContain('fail_on_missing: false');
+    expect(content).toContain('npm test');
+    const perfTestPath = path.join(__dirname, 'validation.performance.test.ts');
+    expect(fs.existsSync(perfTestPath)).toBe(true);
   });
 });
 

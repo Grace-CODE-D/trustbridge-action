@@ -34350,6 +34350,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -34866,7 +34929,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MAX_METRICS_JSON_BYTES = exports.MAX_COMMENT_LENGTH = exports.STICKY_COMMENT_MARKER = exports.STICKY_COMMENT_MARKER_LEGACY = exports.TRUSTBRIDGE_FOOTER = exports.COMMENT_SCHEMA_VERSION = void 0;
+exports.MAX_METRICS_JSON_BYTES = exports.STICKY_COMMENT_MARKER = exports.STICKY_COMMENT_MARKER_LEGACY = exports.TRUSTBRIDGE_FOOTER = exports.COMMENT_SCHEMA_VERSION = void 0;
 exports.formatCommentBody = formatCommentBody;
 exports.buildHardenedMetricsJson = buildHardenedMetricsJson;
 exports.isTrustBridgeComment = isTrustBridgeComment;
@@ -34906,132 +34969,52 @@ const TRUNCATION_NOTICE = '\n\n_... [Truncated due to GitHub length limits. See 
 function formatCommentBody(result, config) {
     const stellarLabNetwork = (0, links_1.inferStellarNetwork)(config.horizonUrl);
     const gate = (0, checks_1.buildValidationGate)(result);
-    const buildWithRemediation = (remediationText) => {
-        const lines = [
-            exports.STICKY_COMMENT_MARKER,
-            `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
-            '## TrustBridge — Stellar Account Check',
-            '',
-            `Checked account: ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
-            `Horizon: ${(0, markdown_1.inlineCode)(config.horizonUrl)}`,
-            `Asset: **${config.assetCode}** · Issuer: ${(0, markdown_1.inlineCode)(config.assetIssuer)}`,
-            '',
-            '### Results',
-            '',
-        ];
-        for (const check of result.checks) {
-            lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
-        }
-        lines.push('', '### Validation gate', '', gate.ready
-            ? '- Ready to proceed: all checks passed.'
-            : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
-        // SEP-0007 wallet deep links (Issue #44)
-        if (config.sep0007DeepLinks) {
-            const payLink = (0, links_1.buildSep0007PayLink)({
-                destination: config.stellarAddress,
-                amount: String(checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM),
-                msg: `Activate Stellar account for ${config.assetCode} trustline`,
-                network: stellarLabNetwork,
-                originDomain: config.sep0007OriginDomain || undefined,
-            });
-            lines.push('', '### Quick wallet actions (SEP-0007)', '', '_Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup._', '', `- [Send ${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM to activate account](${payLink})`);
-        }
-        if (remediationText) {
-            lines.push('', '### Remediation', '', remediationText);
-        }
-        lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
-        if (config.waitUntilFunded) {
-            const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
-            const interval = config.waitUntilFundedIntervalMs ?? 5000;
-            lines.push(`| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`, `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`);
-        }
-        lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
-        // Hardened metrics JSON export (Issue #33)
-        if (config.metricsSnapshot) {
-            const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
-            lines.push('', '### Metrics', '', '_Machine-readable run metrics. Values are structural counts only — no account addresses or balances._', '', '```json', metricsJson, '```');
-        }
-        lines.push('', '---', exports.TRUSTBRIDGE_FOOTER);
-        return lines.join('\n');
-    };
-    let fullBody = buildWithRemediation(result.remediation);
-    if (fullBody.length > exports.MAX_COMMENT_LENGTH && result.remediation) {
-        const excess = fullBody.length - exports.MAX_COMMENT_LENGTH;
-        const availableForRemediation = result.remediation.length - excess - TRUNCATION_NOTICE.length;
-        let truncatedRemediation;
-        if (availableForRemediation > 0) {
-            truncatedRemediation = result.remediation.slice(0, availableForRemediation) + TRUNCATION_NOTICE;
-        }
-        else {
-            truncatedRemediation = TRUNCATION_NOTICE.trimStart();
-        }
-        fullBody = buildWithRemediation(truncatedRemediation);
+    const lines = [
+        exports.STICKY_COMMENT_MARKER,
+        `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
+        '## TrustBridge — Stellar Account Check',
+        '',
+        `Checked account: ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
+        `Horizon: ${(0, markdown_1.inlineCode)(config.horizonUrl)}`,
+        `Asset: **${config.assetCode}** · Issuer: ${(0, markdown_1.inlineCode)(config.assetIssuer)}`,
+        '',
+        '### Results',
+        '',
+    ];
+    for (const check of result.checks) {
+        lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
-    return fullBody;
-}
-/**
- * Build a hardened metrics JSON string safe for embedding in a GitHub issue
- * comment.
- *
- * "Hardened" means:
- *   1. Only structural/aggregate fields are included (no raw balances, no
- *      account addresses, no Horizon URLs).
- *   2. The JSON is produced via `JSON.stringify` with a replacer so
- *      unintended fields cannot sneak in via future `MetricsCollector`
- *      additions.
- *   3. The output is size-capped at `MAX_METRICS_JSON_BYTES`; if exceeded,
- *      a truncation notice replaces the body so the comment never exceeds
- *      GitHub's comment size limit.
- *
- * @internal Exported for testing.
- */
-exports.MAX_METRICS_JSON_BYTES = 4096;
-function buildHardenedMetricsJson(metrics) {
-    const summary = metrics.getSummary();
-    // Strip metric tags entirely — tags may contain contract addresses.
-    const safeSummary = {
-        totalMetrics: summary.totalMetrics,
-        counters: summary.counters,
-        metrics: summary.metrics.map((m) => ({
-            name: m.name,
-            value: m.value,
-            unit: m.unit,
-            timestamp: m.timestamp,
-            // tags deliberately omitted
-        })),
-    };
-    let json;
-    try {
-        json = JSON.stringify(safeSummary, null, 2);
+    lines.push('', '### Validation gate', '', gate.ready
+        ? '- Ready to proceed: all checks passed.'
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+    // SEP-0007 wallet deep links (Issue #44)
+    if (config.sep0007DeepLinks) {
+        const payLink = (0, links_1.buildSep0007PayLink)({
+            destination: config.stellarAddress,
+            amount: String(checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM),
+            msg: `Activate Stellar account for ${config.assetCode} trustline`,
+            network: stellarLabNetwork,
+            originDomain: config.sep0007OriginDomain || undefined,
+        });
+        lines.push('', '### Quick wallet actions (SEP-0007)', '', '_Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup._', '', `- [Send ${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM to activate account](${payLink})`);
     }
-    catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return JSON.stringify({ error: `metrics serialisation failed: ${message}` });
+    if (result.remediation) {
+        lines.push('', '### Remediation', '', result.remediation);
     }
-    if (Buffer.byteLength(json, 'utf8') > exports.MAX_METRICS_JSON_BYTES) {
-        const truncated = {
-            totalMetrics: safeSummary.totalMetrics,
-            counters: safeSummary.counters,
-            truncated: true,
-            note: `Metrics body exceeded ${exports.MAX_METRICS_JSON_BYTES} bytes and was omitted.`,
-        };
-        return JSON.stringify(truncated, null, 2);
+    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
+    if (config.waitUntilFunded) {
+        const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
+        const interval = config.waitUntilFundedIntervalMs ?? 5000;
+        lines.push(`| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`, `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`);
     }
-    return json;
-}
-/**
- * Returns true when a comment body matches any of the TrustBridge
- * identifiers: the current versioned sticky marker, the legacy marker
- * (pre-schema-version), or the TrustBridge footer. Matching on any of
- * these provides defense-in-depth across upgrades and accidental
- * marker drift.
- */
-function isTrustBridgeComment(body) {
-    if (!body)
-        return false;
-    return (body.includes(exports.STICKY_COMMENT_MARKER) ||
-        body.includes(exports.STICKY_COMMENT_MARKER_LEGACY) ||
-        body.includes(exports.TRUSTBRIDGE_FOOTER));
+    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
+    // Hardened metrics JSON export (Issue #33)
+    if (config.metricsSnapshot) {
+        const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
+        lines.push('', '### Metrics', '', '_Machine-readable run metrics. Values are structural counts only — no account addresses or balances._', '', '```json', metricsJson, '```');
+    }
+    lines.push('', '---', exports.TRUSTBRIDGE_FOOTER);
+    return lines.join('\n');
 }
 /**
  * Build a hardened metrics JSON string safe for embedding in a GitHub issue
@@ -36049,6 +36032,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.run = run;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
@@ -36124,6 +36108,7 @@ async function run() {
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
         sep0007DeepLinks,
+        trustbridgeConfigPath,
     });
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
@@ -36304,9 +36289,12 @@ async function run() {
         core.warning(failureMessage);
     }
 }
-run().catch((error) => {
-    core.setFailed((0, inputs_1.getErrorMessage)(error));
-});
+// Skip auto-run under Jest so performance / integration tests can import `run`.
+if (process.env.JEST_WORKER_ID === undefined) {
+    run().catch((error) => {
+        core.setFailed((0, inputs_1.getErrorMessage)(error));
+    });
+}
 
 
 /***/ }),
