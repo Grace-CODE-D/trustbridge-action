@@ -2,7 +2,7 @@
 
 Thank you for helping improve **trustbridge-action**! This guide covers local setup, coding standards, and the pull request process.
 
-Related docs: [README](README.md) · [Structure](docs/STRUCTURE.md) · [Architecture](docs/ARCHITECTURE.md)
+Related docs: [README](README.md) · [Structure](docs/STRUCTURE.md) · [Architecture](docs/ARCHITECTURE.md) · [Breaking Changes](docs/BREAKING_CHANGES.md) · [License Report](docs/LICENSE_REPORT.md)
 
 ---
 
@@ -102,7 +102,9 @@ Do not import `@actions/github` outside `comment.ts` / `index.ts`.
 - [ ] Build succeeds (`npm run build`)
 - [ ] `dist/` updated if runtime code changed (commit compiled output for releases)
 - [ ] README / docs updated if behavior or inputs changed
+- [ ] `docs/BREAKING_CHANGES.md` consulted — change classified as breaking or non-breaking and version bump applied accordingly
 - [ ] No secrets or real contributor addresses in commits
+- [ ] If a new **runtime** dependency was added to `dependencies` (not `devDependencies`), its SPDX license identifier has been checked against the compatibility table in [docs/LICENSE_REPORT.md](docs/LICENSE_REPORT.md)
 
 ---
 
@@ -134,6 +136,22 @@ test: cover zero-trustline account path
 
 - **Do not** commit API keys, tokens, or `.env` files
 - Report security issues privately to repository maintainers before public disclosure
+
+---
+
+## License compliance
+
+TrustBridge Action is published under the **MIT License**. All runtime dependencies (packages in `dependencies`, not `devDependencies`) must carry a compatible license.
+
+**Safe to add:** MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apache-2.0, 0BSD, CC0-1.0.
+
+**Requires maintainer review:** LGPL-2.1, LGPL-3.0, MPL-2.0.
+
+**Do not add without explicit approval:** GPL-2.0, GPL-3.0, AGPL-3.0, SSPL-1.0, BUSL-1.1, or any `UNLICENSED`/`UNKNOWN` package.
+
+The full compatibility table, the local generation command (`npm run license:report`), and instructions for finding the report in GitHub Release assets are documented in [docs/LICENSE_REPORT.md](docs/LICENSE_REPORT.md).
+
+A license report (`licenses-report.json` + `licenses-report.md`) is generated automatically by the release workflow and attached to every GitHub Release — no manual step is needed.
 
 ---
 
