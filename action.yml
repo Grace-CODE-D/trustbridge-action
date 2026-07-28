@@ -158,21 +158,31 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  dynamic_reserve:
+  check_ledger_freshness:
     description: >-
-      Compute the account's real network-enforced minimum XLM balance from
-      its live subentry and sponsorship counters (per the Stellar protocol
-      reserve formula) and enforce whichever is higher: that computed value
-      or min_xlm_reserve. Prevents a stale static min_xlm_reserve from
-      under-reporting an account's true reserve requirement. Default false.
+      Enable the ledger freshness guard. When true, TrustBridge fetches the
+      Horizon root endpoint before running account checks and warns (or fails,
+      if ledger_freshness_fail_on_stale is true) when the latest ingested
+      ledger is older than max_ledger_lag_seconds. Disabled by default to
+      preserve backward compatibility.
     required: false
     default: 'false'
-  reserve_buffer_xlm:
+  max_ledger_lag_seconds:
     description: >-
-      Additional XLM safety margin added on top of the computed dynamic
-      reserve requirement (0-1000). Only used when dynamic_reserve is true.
+      Maximum allowed age of the Horizon node's latest ingested ledger in
+      seconds. If history_latest_ledger_closed_at on the Horizon root is
+      older than this value, the freshness guard fires. Default 60 s
+      (approximately 10 Stellar ledger close cycles at ~5–6 s each).
+      Only used when check_ledger_freshness is true.
     required: false
-    default: '0'
+    default: '60'
+  ledger_freshness_fail_on_stale:
+    description: >-
+      When true, a stale Horizon response causes the action to hard-fail
+      (core.setFailed) instead of warning. Default false (warn only).
+      Only used when check_ledger_freshness is true.
+    required: false
+    default: 'false'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

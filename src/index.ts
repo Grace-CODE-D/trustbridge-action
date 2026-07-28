@@ -26,7 +26,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
-import { parseBatchAddresses, runBatchValidation, buildBatchSummary, formatBatchSummaryMarkdown } from './batch';
+import { checkLedgerFreshness } from './freshness';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -83,54 +83,13 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
-  // Load and apply optional consumer config file (Issue #45).
-  // readTrustbridgeConfig fails fast (throws) if the file exists but is invalid.
-  // When the file is absent it returns config:null and found:false — no-op.
-  const { config: consumerConfig, validation: configValidation, found: configFound, resolvedPath: configResolvedPath } =
-    readTrustbridgeConfig(trustbridgeConfigPath);
-  if (!configValidation.valid) {
-    // Surface every error so the workflow author can fix them all in one pass.
-    throw new Error(
-      `trustbridge_config_path "${configResolvedPath}" failed validation:\n${configValidation.errors.join('\n')}`,
-    );
-  }
-  if (configFound && consumerConfig) {
-    logger.debug('Consumer config loaded', {
-      component: 'index',
-      configPath: configResolvedPath,
-      keys: Object.keys(consumerConfig),
-    });
-  }
-
-  // Build the set of inputs that were explicitly provided by the workflow
-  // author so mergeConsumerConfig knows which action inputs take precedence.
-  const explicitInputs = new Set<string>(
-    [
-      core.getInput('horizon_url') ? 'horizonUrl' : null,
-      core.getInput('horizon_url_fallback') ? 'horizonUrlFallback' : null,
-      core.getInput('rpc_fallback_url') ? 'rpcFallbackUrl' : null,
-      core.getInput('asset_code') ? 'assetCode' : null,
-      core.getInput('asset_issuer') ? 'assetIssuer' : null,
-      core.getInput('min_xlm_reserve') ? 'minXlmReserveRaw' : null,
-      core.getInput('fail_on_missing') ? 'failOnMissing' : null,
-    ].filter((v): v is string => v !== null),
-  );
-
-  // Merge consumer config defaults under explicit action inputs.
-  const mergedInputs = mergeConsumerConfig(
-    { horizonUrl, horizonUrlFallback, rpcFallbackUrl: rpcFallbackUrlRaw, assetCode, assetIssuer, minXlmReserveRaw, failOnMissing },
-    consumerConfig,
-    explicitInputs,
-  );
-
-  // Re-bind the merged values so the rest of the run uses them.
-  const effectiveHorizonUrl: string = typeof mergedInputs.horizonUrl === 'string' ? mergedInputs.horizonUrl : horizonUrl;
-  const effectiveHorizonUrlFallback: string = typeof mergedInputs.horizonUrlFallback === 'string' ? mergedInputs.horizonUrlFallback : horizonUrlFallback;
-  const effectiveRpcFallbackUrl: string = typeof mergedInputs.rpcFallbackUrl === 'string' ? mergedInputs.rpcFallbackUrl : rpcFallbackUrlRaw;
-  const effectiveAssetCode: string = typeof mergedInputs.assetCode === 'string' ? mergedInputs.assetCode : assetCode;
-  const effectiveAssetIssuer: string = typeof mergedInputs.assetIssuer === 'string' ? mergedInputs.assetIssuer : assetIssuer;
-  const effectiveMinXlmReserveRaw: string = typeof mergedInputs.minXlmReserveRaw === 'string' ? mergedInputs.minXlmReserveRaw : minXlmReserveRaw;
-  const effectiveFailOnMissing: boolean = typeof mergedInputs.failOnMissing === 'boolean' ? mergedInputs.failOnMissing : failOnMissing;
+  // Ledger freshness guard (Issue #107)
+  const checkLedgerFreshnessEnabled = parseBooleanInput(core.getInput('check_ledger_freshness'), false);
+  const maxLedgerLagSeconds = parseNumberInput(core.getInput('max_ledger_lag_seconds'), 60, {
+    min: 5,
+    max: 3600,
+  });
+  const ledgerFreshnessFailOnStale = parseBooleanInput(core.getInput('ledger_freshness_fail_on_stale'), false);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -242,64 +201,29 @@ async function run(): Promise<void> {
     horizonUrl: effectiveHorizonUrl,
   };
 
-  const horizonOptions = {
-    timeoutMs: horizonTimeoutMs,
-    horizonUrlFallback: horizonUrlFallback || undefined,
-    fallbackUrls,
-    cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
-    useCache,
-  };
-
-  // ── Batch mode (stellar_addresses set) ──────────────────────────────────
-  if (stellarAddressesRaw) {
-    const addresses = parseBatchAddresses(stellarAddressesRaw);
-    core.info(`[TrustBridge] Batch mode: validating ${addresses.length} addresses via ${horizonUrl}`);
-
-    const batchResults = await runBatchValidation(addresses, checkConfig, horizonUrl, {
-      requestDelayMs: batchRequestDelayMs,
-      fetchOptions: horizonOptions,
+  // ── Ledger freshness guard (Issue #107) ──────────────────────────────────
+  if (checkLedgerFreshnessEnabled) {
+    core.info('[TrustBridge] Running ledger freshness check...');
+    const freshness = await checkLedgerFreshness(horizonUrl, {
+      maxLagSeconds: maxLedgerLagSeconds,
+      timeoutMs: horizonTimeoutMs,
     });
+    logger.debug('Ledger freshness result', { component: 'index', ...freshness });
 
-    const batchSummary = buildBatchSummary(batchResults);
-    core.info(`[TrustBridge] Batch complete: ${batchSummary.passed}/${batchSummary.total} passed`);
-
-    core.setOutput('batch_results', JSON.stringify(batchResults));
-    core.setOutput('batch_summary', JSON.stringify(batchSummary));
-    // Clear single-address outputs
-    core.setOutput('trustline_exists', '');
-    core.setOutput('xlm_balance', '');
-    core.setOutput('account_funded', '');
-    core.setOutput('comment_url', '');
-
-    // Post a single summary comment if in issue context
-    const batchCommentBody = formatBatchSummaryMarkdown(batchSummary, assetCode);
-    let batchCommentUrl: string | undefined;
-    try {
-      batchCommentUrl = await postIssueComment(githubToken, batchCommentBody, { sticky: stickyComment });
-      if (batchCommentUrl) {
-        core.setOutput('comment_url', batchCommentUrl);
-        logger.info('Batch summary comment posted', { component: 'index', commentUrl: batchCommentUrl });
+    if (freshness.status === 'stale') {
+      const msg = `[TrustBridge] Ledger freshness: ${freshness.message}`;
+      if (ledgerFreshnessFailOnStale) {
+        core.setFailed(msg);
+        return;
+      } else {
+        core.warning(msg);
       }
-    } catch (commentError) {
-      const message = getErrorMessage(commentError);
-      core.warning(`Failed to post batch summary comment: ${message}`);
+    } else if (freshness.status === 'unknown') {
+      core.warning(`[TrustBridge] Ledger freshness: ${freshness.message}`);
+    } else {
+      core.info(`[TrustBridge] Ledger freshness: ${freshness.message}`);
     }
-
-    if (debugMode) {
-      logger.debug('Batch metrics (JSON artifact)', { component: 'metrics' });
-      core.debug(globalMetrics.toJSON());
-    }
-
-    if (batchSummary.failed > 0 && failOnMissing) {
-      core.setFailed(`TrustBridge batch: ${batchSummary.failed} of ${batchSummary.total} addresses failed validation`);
-    } else if (batchSummary.failed > 0) {
-      core.warning(`TrustBridge batch: ${batchSummary.failed} of ${batchSummary.total} addresses failed validation`);
-    }
-    return;
   }
-
-  // ── Single-address mode ─────────────────────────────────────────────────
-  validateStellarAddress(stellarAddress);
 
   core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
 

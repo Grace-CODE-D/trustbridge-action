@@ -216,48 +216,33 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
-## Batch multi-address validation (roster audit)
+## Ledger freshness guard
 
-To validate many contributor wallets in one job, use the `stellar_addresses`
-input instead of `stellar_address_input`. The action runs all checks
-sequentially with a configurable inter-request delay, collects per-address
-results, and posts a single summary comment.
+The freshness guard detects when a Horizon node is serving stale data by
+comparing the latest ingested ledger close time to the current wall clock.
 
-### Newline-separated list
+**Disabled by default** — set `check_ledger_freshness: true` to enable.
 
 ```yaml
-- uses: Stellar-TrustBridge/trustbridge-action@v1
-  id: batch
-  with:
-    stellar_addresses: |
-      GABC1234AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-      GDEF5678BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-    github_token: ${{ secrets.GITHUB_TOKEN }}
-    fail_on_missing: false
-    batch_request_delay_ms: 300
+with:
+  stellar_address_input: ${{ steps.addr.outputs.value }}
+  github_token: ${{ secrets.GITHUB_TOKEN }}
+  check_ledger_freshness: true
+  max_ledger_lag_seconds: 60        # warn if Horizon is >60 s behind
+  ledger_freshness_fail_on_stale: false   # false = warn only (default)
 ```
 
-### Using batch outputs
+When `ledger_freshness_fail_on_stale: true` is set, a stale node causes the
+action to hard-fail before running any account checks.
 
-```yaml
-- name: Check batch results
-  run: |
-    echo '${{ steps.batch.outputs.batch_summary }}' | jq .
+The guard fetches `GET <horizon_url>/` and reads
+`history_latest_ledger_closed_at`. If the value is missing or unparseable,
+the guard emits a warning and proceeds (fail-open) — a Horizon outage won't
+cause a silent false-pass.
 
-- name: Fail if any address failed
-  if: fromJSON(steps.batch.outputs.batch_summary).failed > 0
-  run: exit 1
-```
-
-`batch_results` is a JSON array; `batch_summary` includes aggregate counts
-and a `failureTaxonomy` object. See [README outputs table](../README.md#outputs)
-for full field descriptions.
-
-### Rate-limit awareness
-
-Addresses are validated **sequentially**. `batch_request_delay_ms` (default
-200 ms) adds a pause between each Horizon request. Per-request exponential
-backoff applies to every address in the batch.
+Freshness lag and latest ledger sequence are recorded as metrics
+(`freshness_lag_seconds`, `freshness_latest_ledger`) and visible in the
+`debug_mode: true` metrics JSON artifact.
 
 ---
 

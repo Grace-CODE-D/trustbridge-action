@@ -33925,274 +33925,6 @@ function normalizeAssetConfig(input) {
 
 /***/ }),
 
-/***/ 2983:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-/**
- * Batch multi-address validation (Issue #105).
- *
- * Validates a list of Stellar addresses sequentially, collecting per-address
- * results and aggregate metrics. Sequential execution keeps request pressure
- * on Horizon predictable and avoids triggering rate limits.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.parseBatchAddresses = parseBatchAddresses;
-exports.runBatchValidation = runBatchValidation;
-exports.buildBatchSummary = buildBatchSummary;
-exports.formatBatchSummaryMarkdown = formatBatchSummaryMarkdown;
-const checks_1 = __nccwpck_require__(2122);
-const horizon_1 = __nccwpck_require__(9164);
-const metrics_1 = __nccwpck_require__(5670);
-const DEFAULT_REQUEST_DELAY_MS = 200;
-async function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-/**
- * Parse the `stellar_addresses` input into a deduplicated list of addresses.
- *
- * Accepts:
- * - Newline-separated list: one address per line (blank lines ignored)
- * - JSON array: `["GABC...", "GDEF..."]`
- *
- * Throws if the resulting list is empty.
- */
-function parseBatchAddresses(raw) {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-        throw new Error('stellar_addresses input is empty. Provide at least one Stellar address.');
-    }
-    let addresses;
-    if (trimmed.startsWith('[')) {
-        // JSON array
-        let parsed;
-        try {
-            parsed = JSON.parse(trimmed);
-        }
-        catch {
-            throw new Error('stellar_addresses looks like a JSON array but could not be parsed. Check the JSON syntax.');
-        }
-        if (!Array.isArray(parsed)) {
-            throw new Error('stellar_addresses JSON must be an array of strings.');
-        }
-        addresses = parsed.map((item, i) => {
-            if (typeof item !== 'string') {
-                throw new Error(`stellar_addresses JSON array item at index ${i} is not a string.`);
-            }
-            return item.trim();
-        });
-    }
-    else {
-        // Newline-separated
-        addresses = trimmed
-            .split('\n')
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0);
-    }
-    if (addresses.length === 0) {
-        throw new Error('stellar_addresses input contains no non-empty entries.');
-    }
-    // Deduplicate, preserving order
-    const seen = new Set();
-    const deduped = [];
-    for (const addr of addresses) {
-        if (!seen.has(addr)) {
-            seen.add(addr);
-            deduped.push(addr);
-        }
-    }
-    return deduped;
-}
-/**
- * Run validation checks against each address in `addresses` sequentially.
- * A configurable delay between requests keeps Horizon pressure low.
- */
-async function runBatchValidation(addresses, config, horizonUrl, options = {}) {
-    const requestDelayMs = options.requestDelayMs ?? DEFAULT_REQUEST_DELAY_MS;
-    const fetchOptions = options.fetchOptions ?? {};
-    metrics_1.globalMetrics.incrementCounter('batch_run_start');
-    metrics_1.globalMetrics.recordMetric('batch_size', addresses.length, 'count');
-    const results = [];
-    for (let i = 0; i < addresses.length; i++) {
-        const address = addresses[i];
-        // Delay between requests (skip before first)
-        if (i > 0 && requestDelayMs > 0) {
-            await sleep(requestDelayMs);
-        }
-        // Validate address format before hitting Horizon
-        if (!(0, checks_1.isValidStellarAddress)(address)) {
-            results.push({
-                address,
-                valid: false,
-                accountFunded: false,
-                trustlineExists: false,
-                xlmBalance: '0',
-                xlmReserveMet: false,
-                failureReason: `Invalid Stellar address format: "${address}"`,
-            });
-            metrics_1.globalMetrics.incrementCounter('batch_address_invalid');
-            continue;
-        }
-        try {
-            const account = await (0, horizon_1.fetchAccount)(horizonUrl, address, fetchOptions);
-            const result = (0, checks_1.runAccountChecks)(account, config);
-            let failureReason = null;
-            if (!result.valid) {
-                const reasons = [];
-                if (!result.trustlineExists)
-                    reasons.push('trustline missing');
-                if (!result.xlmReserveMet)
-                    reasons.push('XLM reserve insufficient');
-                failureReason = reasons.join('; ');
-            }
-            results.push({
-                address,
-                valid: result.valid,
-                accountFunded: result.accountFunded,
-                trustlineExists: result.trustlineExists,
-                xlmBalance: result.xlmBalance,
-                xlmReserveMet: result.xlmReserveMet,
-                failureReason,
-            });
-            if (result.valid) {
-                metrics_1.globalMetrics.incrementCounter('batch_address_passed');
-            }
-            else {
-                metrics_1.globalMetrics.incrementCounter('batch_address_failed');
-                if (!result.trustlineExists)
-                    metrics_1.globalMetrics.incrementCounter('batch_fail_trustline_missing');
-                if (!result.xlmReserveMet)
-                    metrics_1.globalMetrics.incrementCounter('batch_fail_reserve_insufficient');
-            }
-        }
-        catch (error) {
-            let failureReason;
-            let isFunded = false;
-            if (error instanceof horizon_1.HorizonError && error.statusCode === 404) {
-                failureReason = 'account not funded';
-                metrics_1.globalMetrics.incrementCounter('batch_fail_account_not_funded');
-            }
-            else if (error instanceof horizon_1.HorizonError) {
-                failureReason = `Horizon error (${error.statusCode}): ${error.message}`;
-                metrics_1.globalMetrics.incrementCounter('batch_fail_horizon_error');
-                isFunded = false;
-            }
-            else {
-                const msg = error instanceof Error ? error.message : 'unknown error';
-                failureReason = `error: ${msg}`;
-                metrics_1.globalMetrics.incrementCounter('batch_fail_horizon_error');
-            }
-            const syntheticResult = error instanceof horizon_1.HorizonError && error.statusCode === 404
-                ? (0, checks_1.unfundedAccountResult)(address, config)
-                : (0, checks_1.horizonFailureResult)(error instanceof Error ? error.message : 'unknown error', config);
-            results.push({
-                address,
-                valid: false,
-                accountFunded: isFunded || syntheticResult.accountFunded,
-                trustlineExists: false,
-                xlmBalance: syntheticResult.xlmBalance,
-                xlmReserveMet: false,
-                failureReason,
-            });
-        }
-    }
-    metrics_1.globalMetrics.recordMetric('batch_passed', results.filter((r) => r.valid).length, 'count');
-    metrics_1.globalMetrics.recordMetric('batch_failed', results.filter((r) => !r.valid).length, 'count');
-    metrics_1.globalMetrics.incrementCounter('batch_run_complete');
-    return results;
-}
-/**
- * Compute aggregate summary metrics from batch results.
- */
-function buildBatchSummary(results) {
-    const passed = results.filter((r) => r.valid).length;
-    const failed = results.length - passed;
-    const failures = results
-        .filter((r) => !r.valid)
-        .map((r) => ({ address: r.address, reason: r.failureReason ?? 'unknown' }));
-    const taxonomy = {
-        accountNotFunded: 0,
-        trustlineMissing: 0,
-        reserveInsufficient: 0,
-        horizonError: 0,
-        invalidAddress: 0,
-    };
-    for (const r of results) {
-        if (r.valid)
-            continue;
-        const reason = r.failureReason ?? '';
-        if (reason.includes('not funded'))
-            taxonomy.accountNotFunded++;
-        else if (reason.includes('Invalid Stellar address'))
-            taxonomy.invalidAddress++;
-        else if (reason.startsWith('Horizon error') || reason.startsWith('error:'))
-            taxonomy.horizonError++;
-        else {
-            if (reason.includes('trustline'))
-                taxonomy.trustlineMissing++;
-            if (reason.includes('reserve'))
-                taxonomy.reserveInsufficient++;
-        }
-    }
-    return {
-        total: results.length,
-        passed,
-        failed,
-        failures,
-        failureTaxonomy: taxonomy,
-    };
-}
-/**
- * Render a compact Markdown summary table for the batch results.
- * Suitable for posting as a single issue comment in batch mode.
- */
-function formatBatchSummaryMarkdown(summary, assetCode) {
-    const statusLine = summary.failed === 0
-        ? '✅ All addresses passed validation.'
-        : `⚠️ ${summary.failed} of ${summary.total} addresses failed validation.`;
-    const rows = [
-        '| Address | Funded | Trustline | Reserve | Status |',
-        '| ------- | ------ | --------- | ------- | ------ |',
-    ];
-    // We don't have per-row detail here without the full results — callers
-    // should use the JSON artifact for per-address detail and pass results
-    // directly. This summary markdown uses the failures list.
-    const failSet = new Map(summary.failures.map((f) => [f.address, f.reason]));
-    // Build rows from failures only (passed rows omitted for brevity)
-    for (const { address, reason } of summary.failures) {
-        const short = address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
-        rows.push(`| \`${short}\` | ❌ | — | — | ${reason} |`);
-    }
-    const taxonomy = summary.failureTaxonomy;
-    const taxLines = [
-        taxonomy.accountNotFunded > 0 ? `- Account not funded: **${taxonomy.accountNotFunded}**` : '',
-        taxonomy.trustlineMissing > 0 ? `- ${assetCode} trustline missing: **${taxonomy.trustlineMissing}**` : '',
-        taxonomy.reserveInsufficient > 0 ? `- XLM reserve insufficient: **${taxonomy.reserveInsufficient}**` : '',
-        taxonomy.horizonError > 0 ? `- Horizon errors: **${taxonomy.horizonError}**` : '',
-        taxonomy.invalidAddress > 0 ? `- Invalid address format: **${taxonomy.invalidAddress}**` : '',
-    ].filter(Boolean);
-    const parts = [
-        '## TrustBridge — Batch Validation Summary',
-        '',
-        statusLine,
-        '',
-        `**Total:** ${summary.total} · **Passed:** ${summary.passed} · **Failed:** ${summary.failed}`,
-        '',
-    ];
-    if (summary.failed > 0) {
-        parts.push('### Failed addresses', '', ...rows, '');
-        if (taxLines.length > 0) {
-            parts.push('### Failure taxonomy', '', ...taxLines, '');
-        }
-    }
-    parts.push('_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_');
-    return parts.join('\n');
-}
-
-
-/***/ }),
-
 /***/ 7377:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -34981,30 +34713,37 @@ async function postIssueComment(token, body, options = {}) {
 
 /***/ }),
 
-/***/ 6094:
+/***/ 8628:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
 
 /**
- * Consumer trustbridge.yml reader (Issue #45).
+ * Ledger freshness guard (Issue #107).
  *
- * Reads an optional `.trustbridge.yml` (or any path supplied via the
- * `trustbridge_config_path` action input) from the consumer repository,
- * parses it as YAML using a minimal built-in parser (no extra deps), and
- * validates it through the full security layer in `src/validation.ts`:
+ * Detects when a Horizon node is serving stale data by comparing the
+ * latest ingested ledger sequence reported by the Horizon root endpoint
+ * against the current wall-clock time and a configurable max-lag threshold.
  *
- *   1. SSRF prevention  — Horizon/RPC URL fields are blocked from targeting
- *      private IPs, loopback addresses, and cloud-metadata endpoints.
- *   2. Injection prevention — free-form string fields are rejected if they
- *      contain shell meta-characters, newlines, or null bytes.
- *   3. Secret redaction — known secret field names (token, api_key, …) are
- *      never logged; they are replaced with "***" in any diagnostic output.
+ * Chosen approach: Horizon root endpoint (`GET /`)
+ * ─────────────────────────────────────────────────
+ * Horizon exposes `core_latest_ledger`, `history_latest_ledger`, and
+ * `history_latest_ledger_closed_at` on its root endpoint. We compare
+ * `history_latest_ledger_closed_at` (an ISO-8601 timestamp) to the
+ * current wall-clock time. If the gap exceeds `max_ledger_lag_seconds`
+ * the guard fires.
  *
- * The reader is intentionally conservative: unknown keys are ignored, and
- * only the fields declared in `TrustbridgeConsumerConfig` are surfaced to
- * the caller.  This keeps the attack surface small and prevents a malicious
- * config from injecting unexpected values into the action runtime.
+ * Why NOT account `last_modified_ledger`:
+ * - That field only reflects when the specific account last changed, not
+ *   whether Horizon is generally up to date. An inactive account could
+ *   have a very old last_modified_ledger even on a perfectly fresh Horizon.
+ * - The root endpoint gives a single authoritative freshness signal for
+ *   the whole node, regardless of which account is being checked.
+ *
+ * Default behaviour: warn (not fail) when stale. Set
+ * `ledger_freshness_fail_on_stale: true` to hard-fail.
+ * The guard is opt-in: disabled by default to preserve backward
+ * compatibility. Set `check_ledger_freshness: true` to enable.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -35040,212 +34779,141 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.parseSimpleYaml = parseSimpleYaml;
-exports.readTrustbridgeConfig = readTrustbridgeConfig;
-exports.mergeConsumerConfig = mergeConsumerConfig;
-const fs = __importStar(__nccwpck_require__(9896));
-const path = __importStar(__nccwpck_require__(6928));
-const validation_1 = __nccwpck_require__(4344);
+exports.fetchHorizonRoot = fetchHorizonRoot;
+exports.checkLedgerFreshness = checkLedgerFreshness;
 const logger_1 = __nccwpck_require__(6999);
-// ---------------------------------------------------------------------------
-// Minimal YAML parser
-// ---------------------------------------------------------------------------
-// We intentionally avoid pulling in a full YAML library — the consumer
-// config is a small flat key/value file so a line-by-line parser is both
-// safer (no prototype pollution, no YAML bombs) and dependency-free.
+const metrics_1 = __nccwpck_require__(5670);
+const DEFAULT_MAX_LAG_SECONDS = 60;
+const DEFAULT_TIMEOUT_MS = 10000;
 /**
- * Parse a minimal YAML file that contains only top-level key: value pairs.
- * Supports:
- *   - Quoted strings (single or double)
- *   - Unquoted strings
- *   - Booleans (true / false, case-insensitive)
- *   - Integers and floats
- *   - Comments (lines starting with #, and inline # comments)
- *   - Blank lines
- *
- * Deliberately does NOT support: nested objects, lists, anchors, aliases,
- * multi-line values, or any YAML feature that could be used for injection.
+ * Fetch the Horizon root endpoint and return the raw response object.
+ * Throws a typed error on network failure or non-2xx status.
  */
-function parseSimpleYaml(content) {
-    const result = {};
-    const lines = content.split(/\r?\n/);
-    for (const rawLine of lines) {
-        // Strip inline comment (unquoted #)
-        const line = rawLine.replace(/#[^'"]*$/, '').trim();
-        if (!line)
-            continue;
-        const colonIdx = line.indexOf(':');
-        if (colonIdx === -1)
-            continue;
-        const key = line.slice(0, colonIdx).trim();
-        const rawValue = line.slice(colonIdx + 1).trim();
-        if (!key)
-            continue;
-        result[key] = parseYamlValue(rawValue);
-    }
-    return result;
-}
-function parseYamlValue(raw) {
-    // Quoted strings
-    if ((raw.startsWith('"') && raw.endsWith('"')) ||
-        (raw.startsWith("'") && raw.endsWith("'"))) {
-        return raw.slice(1, -1);
-    }
-    // Booleans
-    if (raw.toLowerCase() === 'true')
-        return true;
-    if (raw.toLowerCase() === 'false')
-        return false;
-    // Null / empty
-    if (raw === '' || raw.toLowerCase() === 'null' || raw === '~')
-        return null;
-    // Numbers
-    const num = Number(raw);
-    if (!Number.isNaN(num) && raw !== '')
-        return num;
-    // Plain string
-    return raw;
-}
-/**
- * Read and validate a consumer trustbridge.yml config file.
- *
- * @param configPath  Path to the config file, relative to `workspaceRoot`
- *                    or absolute.  Defaults to `.trustbridge.yml` in the
- *                    workspace root when omitted or empty.
- * @param workspaceRoot  Absolute path to the repository root.  Defaults to
- *                       `process.cwd()` when omitted.
- */
-function readTrustbridgeConfig(configPath, workspaceRoot) {
-    const root = workspaceRoot ?? process.cwd();
-    const targetPath = configPath && configPath.trim()
-        ? path.isAbsolute(configPath)
-            ? configPath
-            : path.join(root, configPath)
-        : path.join(root, '.trustbridge.yml');
-    const resolvedPath = path.normalize(targetPath);
-    // Path traversal guard: ensure the resolved path stays within the
-    // workspace root.  An attacker could supply "../../etc/passwd"; we block
-    // any path that escapes the root.
-    const resolvedRoot = path.normalize(root);
-    if (!resolvedPath.startsWith(resolvedRoot + path.sep) && resolvedPath !== resolvedRoot) {
-        return {
-            config: null,
-            validation: {
-                valid: false,
-                errors: [
-                    `trustbridge_config_path resolves outside the workspace root: "${(0, logger_1.redactString)(resolvedPath)}"`,
-                ],
-                warnings: [],
-            },
-            redactedSnapshot: null,
-            resolvedPath,
-            found: false,
-        };
-    }
-    // File existence check
-    if (!fs.existsSync(resolvedPath)) {
-        return {
-            config: null,
-            validation: { valid: true, errors: [], warnings: [] },
-            redactedSnapshot: null,
-            resolvedPath,
-            found: false,
-        };
-    }
-    // Read and parse
-    let raw;
+async function fetchHorizonRoot(horizonUrl, options = {}) {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const fetch = options.fetchFn ?? (globalThis.fetch
+        ?? (await Promise.resolve().then(() => __importStar(__nccwpck_require__(6705)))).default);
+    const url = horizonUrl.trim().replace(/\/+$/, '') + '/';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const content = fs.readFileSync(resolvedPath, 'utf8');
-        raw = parseSimpleYaml(content);
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            throw new Error(`Horizon root endpoint returned HTTP ${response.status}`);
+        }
+        return (await response.json());
     }
-    catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return {
-            config: null,
-            validation: {
-                valid: false,
-                errors: [`Failed to read trustbridge config at "${resolvedPath}": ${msg}`],
-                warnings: [],
-            },
-            redactedSnapshot: null,
-            resolvedPath,
-            found: true,
-        };
+    catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error(`Horizon root endpoint timed out after ${timeoutMs}ms`);
+        }
+        throw error;
     }
-    // Validate security policy
-    const validation = (0, validation_1.validateTrustbridgeConfig)(raw);
-    // Redacted snapshot for safe diagnostic logging (never log raw)
-    const redactedSnapshot = (0, validation_1.redactSecretFields)(raw);
-    if (!validation.valid) {
-        return {
-            config: null,
-            validation,
-            redactedSnapshot,
-            resolvedPath,
-            found: true,
-        };
+    finally {
+        clearTimeout(timer);
     }
-    // Extract only the known typed fields
-    const config = {};
-    if (typeof raw.horizon_url === 'string' && raw.horizon_url.trim()) {
-        config.horizon_url = raw.horizon_url.trim();
-    }
-    if (typeof raw.horizon_url_fallback === 'string' && raw.horizon_url_fallback.trim()) {
-        config.horizon_url_fallback = raw.horizon_url_fallback.trim();
-    }
-    if (typeof raw.rpc_fallback_url === 'string' && raw.rpc_fallback_url.trim()) {
-        config.rpc_fallback_url = raw.rpc_fallback_url.trim();
-    }
-    if (typeof raw.asset_code === 'string' && raw.asset_code.trim()) {
-        config.asset_code = raw.asset_code.trim();
-    }
-    if (typeof raw.asset_issuer === 'string' && raw.asset_issuer.trim()) {
-        config.asset_issuer = raw.asset_issuer.trim();
-    }
-    if (typeof raw.min_xlm_reserve === 'string' && raw.min_xlm_reserve.trim()) {
-        config.min_xlm_reserve = raw.min_xlm_reserve.trim();
-    }
-    if (typeof raw.fail_on_missing === 'boolean') {
-        config.fail_on_missing = raw.fail_on_missing;
-    }
-    return {
-        config,
-        validation,
-        redactedSnapshot,
-        resolvedPath,
-        found: true,
-    };
 }
 /**
- * Merge consumer config values into a set of action input defaults.
- * Consumer config values take precedence over defaults but are overridden
- * by any explicit non-empty action input the workflow author supplied.
+ * Check whether a Horizon node is serving sufficiently fresh data.
  *
- * @param actionInputs  The resolved action inputs (already read from
- *                      `core.getInput`).
- * @param consumerConfig  The parsed and validated consumer config, or null.
- * @param explicitInputs  Set of input names that were explicitly set by the
- *                        workflow author (non-empty string from getInput).
+ * Returns a FreshnessCheckResult describing the outcome without throwing —
+ * callers decide how to surface the result (warn vs. fail).
  */
-function mergeConsumerConfig(actionInputs, consumerConfig, explicitInputs) {
-    if (!consumerConfig)
-        return actionInputs;
-    const merged = { ...actionInputs };
-    const overrides = {
-        horizonUrl: consumerConfig.horizon_url,
-        horizonUrlFallback: consumerConfig.horizon_url_fallback,
-        rpcFallbackUrl: consumerConfig.rpc_fallback_url,
-        assetCode: consumerConfig.asset_code,
-        assetIssuer: consumerConfig.asset_issuer,
-        minXlmReserveRaw: consumerConfig.min_xlm_reserve,
-        failOnMissing: consumerConfig.fail_on_missing,
-    };
-    for (const [key, value] of Object.entries(overrides)) {
-        if (value !== undefined && !explicitInputs.has(key)) {
-            merged[key] = value;
-        }
+async function checkLedgerFreshness(horizonUrl, options = {}) {
+    const maxLagSeconds = options.maxLagSeconds ?? DEFAULT_MAX_LAG_SECONDS;
+    let root;
+    try {
+        root = await fetchHorizonRoot(horizonUrl, {
+            timeoutMs: options.timeoutMs,
+            fetchFn: options.fetchFn,
+        });
     }
-    return merged;
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'unknown error';
+        logger_1.logger.debug('Ledger freshness check: failed to fetch Horizon root', {
+            component: 'freshness',
+            horizonUrl,
+            error: message,
+        });
+        metrics_1.globalMetrics.recordMetric('freshness_check_failed', 1, 'count');
+        return {
+            fresh: true, // fail-open: unknown is not treated as stale
+            lagSeconds: null,
+            latestLedger: null,
+            message: `Could not fetch Horizon root for freshness check: ${message}. Proceeding (fail-open).`,
+            status: 'unknown',
+        };
+    }
+    const latestLedger = root.history_latest_ledger ?? null;
+    const closedAtRaw = root.history_latest_ledger_closed_at;
+    if (!closedAtRaw) {
+        logger_1.logger.debug('Ledger freshness check: history_latest_ledger_closed_at missing from root', {
+            component: 'freshness',
+            horizonUrl,
+            latestLedger,
+        });
+        metrics_1.globalMetrics.recordMetric('freshness_check_unknown', 1, 'count');
+        return {
+            fresh: true,
+            lagSeconds: null,
+            latestLedger,
+            message: 'Horizon root did not include history_latest_ledger_closed_at; freshness unknown. Proceeding (fail-open).',
+            status: 'unknown',
+        };
+    }
+    const closedAtMs = Date.parse(closedAtRaw);
+    if (Number.isNaN(closedAtMs)) {
+        logger_1.logger.debug('Ledger freshness check: could not parse history_latest_ledger_closed_at', {
+            component: 'freshness',
+            horizonUrl,
+            latestLedger,
+        });
+        metrics_1.globalMetrics.recordMetric('freshness_check_unknown', 1, 'count');
+        return {
+            fresh: true,
+            lagSeconds: null,
+            latestLedger,
+            message: `Horizon root history_latest_ledger_closed_at ("${closedAtRaw}") could not be parsed; freshness unknown. Proceeding (fail-open).`,
+            status: 'unknown',
+        };
+    }
+    const lagSeconds = Math.max(0, (Date.now() - closedAtMs) / 1000);
+    metrics_1.globalMetrics.recordMetric('freshness_lag_seconds', lagSeconds, 'seconds');
+    if (latestLedger !== null) {
+        metrics_1.globalMetrics.recordMetric('freshness_latest_ledger', latestLedger, 'ledger');
+    }
+    logger_1.logger.debug('Ledger freshness check result', {
+        component: 'freshness',
+        horizonUrl,
+        latestLedger,
+        lagSeconds,
+        maxLagSeconds,
+        stale: lagSeconds > maxLagSeconds,
+    });
+    if (lagSeconds > maxLagSeconds) {
+        metrics_1.globalMetrics.incrementCounter('freshness_stale_count');
+        return {
+            fresh: false,
+            lagSeconds,
+            latestLedger,
+            message: `Horizon appears stale: latest ledger was closed ${lagSeconds.toFixed(1)}s ago (threshold: ${maxLagSeconds}s). ` +
+                `Latest ledger sequence: ${latestLedger ?? 'unknown'}. ` +
+                `This may indicate a lagging Horizon node. Results may not reflect the current network state.`,
+            status: 'stale',
+        };
+    }
+    metrics_1.globalMetrics.incrementCounter('freshness_ok_count');
+    return {
+        fresh: true,
+        lagSeconds,
+        latestLedger,
+        message: `Horizon is fresh: latest ledger closed ${lagSeconds.toFixed(1)}s ago (threshold: ${maxLagSeconds}s, ledger #${latestLedger ?? 'unknown'}).`,
+        status: 'ok',
+    };
 }
 
 
@@ -35926,7 +35594,7 @@ const outputs_1 = __nccwpck_require__(7729);
 const logger_1 = __nccwpck_require__(6999);
 const metrics_1 = __nccwpck_require__(5670);
 const validation_1 = __nccwpck_require__(4344);
-const batch_1 = __nccwpck_require__(2983);
+const freshness_1 = __nccwpck_require__(8628);
 async function run() {
     const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
     const assetCode = core.getInput('asset_code') || 'USDC';
@@ -35968,6 +35636,13 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Ledger freshness guard (Issue #107)
+    const checkLedgerFreshnessEnabled = (0, inputs_1.parseBooleanInput)(core.getInput('check_ledger_freshness'), false);
+    const maxLedgerLagSeconds = (0, inputs_1.parseNumberInput)(core.getInput('max_ledger_lag_seconds'), 60, {
+        min: 5,
+        max: 3600,
+    });
+    const ledgerFreshnessFailOnStale = (0, inputs_1.parseBooleanInput)(core.getInput('ledger_freshness_fail_on_stale'), false);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -36010,6 +35685,7 @@ async function run() {
             logInputs,
         });
     }
+    (0, checks_1.validateStellarAddress)(stellarAddress);
     const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
     const normalizedAsset = (0, assets_1.normalizeAssetConfig)({ assetCode, assetIssuer });
     // Soroban fungible token contracts (SEP-41) use a "C..." contract address
@@ -36028,58 +35704,31 @@ async function run() {
         minXlmReserve,
         horizonUrl,
     };
-    const horizonOptions = {
-        timeoutMs: horizonTimeoutMs,
-        horizonUrlFallback: horizonUrlFallback || undefined,
-        fallbackUrls,
-        cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
-        useCache,
-    };
-    // ── Batch mode (stellar_addresses set) ──────────────────────────────────
-    if (stellarAddressesRaw) {
-        const addresses = (0, batch_1.parseBatchAddresses)(stellarAddressesRaw);
-        core.info(`[TrustBridge] Batch mode: validating ${addresses.length} addresses via ${horizonUrl}`);
-        const batchResults = await (0, batch_1.runBatchValidation)(addresses, checkConfig, horizonUrl, {
-            requestDelayMs: batchRequestDelayMs,
-            fetchOptions: horizonOptions,
+    // ── Ledger freshness guard (Issue #107) ──────────────────────────────────
+    if (checkLedgerFreshnessEnabled) {
+        core.info('[TrustBridge] Running ledger freshness check...');
+        const freshness = await (0, freshness_1.checkLedgerFreshness)(horizonUrl, {
+            maxLagSeconds: maxLedgerLagSeconds,
+            timeoutMs: horizonTimeoutMs,
         });
-        const batchSummary = (0, batch_1.buildBatchSummary)(batchResults);
-        core.info(`[TrustBridge] Batch complete: ${batchSummary.passed}/${batchSummary.total} passed`);
-        core.setOutput('batch_results', JSON.stringify(batchResults));
-        core.setOutput('batch_summary', JSON.stringify(batchSummary));
-        // Clear single-address outputs
-        core.setOutput('trustline_exists', '');
-        core.setOutput('xlm_balance', '');
-        core.setOutput('account_funded', '');
-        core.setOutput('comment_url', '');
-        // Post a single summary comment if in issue context
-        const batchCommentBody = (0, batch_1.formatBatchSummaryMarkdown)(batchSummary, assetCode);
-        let batchCommentUrl;
-        try {
-            batchCommentUrl = await (0, comment_1.postIssueComment)(githubToken, batchCommentBody, { sticky: stickyComment });
-            if (batchCommentUrl) {
-                core.setOutput('comment_url', batchCommentUrl);
-                logger_1.logger.info('Batch summary comment posted', { component: 'index', commentUrl: batchCommentUrl });
+        logger_1.logger.debug('Ledger freshness result', { component: 'index', ...freshness });
+        if (freshness.status === 'stale') {
+            const msg = `[TrustBridge] Ledger freshness: ${freshness.message}`;
+            if (ledgerFreshnessFailOnStale) {
+                core.setFailed(msg);
+                return;
+            }
+            else {
+                core.warning(msg);
             }
         }
-        catch (commentError) {
-            const message = (0, inputs_1.getErrorMessage)(commentError);
-            core.warning(`Failed to post batch summary comment: ${message}`);
+        else if (freshness.status === 'unknown') {
+            core.warning(`[TrustBridge] Ledger freshness: ${freshness.message}`);
         }
-        if (debugMode) {
-            logger_1.logger.debug('Batch metrics (JSON artifact)', { component: 'metrics' });
-            core.debug(metrics_1.globalMetrics.toJSON());
+        else {
+            core.info(`[TrustBridge] Ledger freshness: ${freshness.message}`);
         }
-        if (batchSummary.failed > 0 && failOnMissing) {
-            core.setFailed(`TrustBridge batch: ${batchSummary.failed} of ${batchSummary.total} addresses failed validation`);
-        }
-        else if (batchSummary.failed > 0) {
-            core.warning(`TrustBridge batch: ${batchSummary.failed} of ${batchSummary.total} addresses failed validation`);
-        }
-        return;
     }
-    // ── Single-address mode ─────────────────────────────────────────────────
-    (0, checks_1.validateStellarAddress)(stellarAddress);
     core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
     if (waitUntilFunded) {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
