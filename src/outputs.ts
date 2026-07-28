@@ -3,12 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { ValidationResult } from './checks';
-import {
-  BuildValidationArtifactOptions,
-  ValidationArtifact,
-  ValidationDelta,
-  buildValidationArtifact,
-} from './delta';
+import { generateBadgeSnippets } from './badge';
 
 export interface ActionOutputs {
   // Legacy outputs — kept for backward compatibility
@@ -16,33 +11,20 @@ export interface ActionOutputs {
   xlm_balance: string;
   account_funded: string;
   comment_url: string;
-  /** JSON array of per-asset trustline statuses when assets_json is used. */
-  assets_trustline_status: string;
-  /** "true" if all assets in assets_json have trustlines, "false" otherwise, "" when not used. */
-  trustlines_summary: string;
+  readiness_badge_markdown: string;
+  readiness_badge_url: string;
 }
 
-export function toActionOutputs(
-  result: ValidationResult,
-  commentUrl?: string,
-  multiAssetResults?: AssetTrustlineResult[],
-): ActionOutputs {
-  const assetsTrustlineStatus =
-    multiAssetResults && multiAssetResults.length > 0
-      ? JSON.stringify(multiAssetResults)
-      : '';
-  const trustlinesSummary =
-    multiAssetResults && multiAssetResults.length > 0
-      ? String(multiAssetResults.every((r) => r.trustlineExists))
-      : '';
+export function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs {
+  const badgeSnippets = generateBadgeSnippets(result);
   return {
     // Legacy outputs
     trustline_exists: String(result.trustlineExists),
     xlm_balance: result.xlmBalance,
     account_funded: String(result.accountFunded),
     comment_url: commentUrl ?? '',
-    assets_trustline_status: assetsTrustlineStatus,
-    trustlines_summary: trustlinesSummary,
+    readiness_badge_markdown: badgeSnippets.markdown,
+    readiness_badge_url: badgeSnippets.url,
   };
 }
 

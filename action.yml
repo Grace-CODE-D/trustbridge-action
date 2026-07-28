@@ -206,15 +206,10 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
-  assets_trustline_status:
-    description: >-
-      JSON array of per-asset trustline check results when `assets_json` is
-      used. Each element is `{assetCode, assetIssuer, trustlineExists}`.
-      Empty string when `assets_json` is not provided.
-  trustlines_summary:
-    description: >-
-      `true` if every asset in `assets_json` has a trustline, `false` if any
-      are missing. Empty string when `assets_json` is not provided.
+  readiness_badge_markdown:
+    description: 'Markdown-formatted readiness badge with link to TrustBridge repository'
+  readiness_badge_url:
+    description: 'Shields.io badge URL reflecting wallet-check readiness status (pass/fail)'
 
 runs:
   using: 'node20'
