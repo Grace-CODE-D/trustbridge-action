@@ -21,8 +21,7 @@ import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
 import { globalMetrics } from './metrics';
-import { validateContractAddress, clearSpans, getSpans } from './validation';
-import { lookupAddressFromContract, ContractLookupError } from './soroban';
+import { validateContractAddress, validateUrl, clearSpans, getSpans } from './validation';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -165,37 +164,14 @@ async function run(): Promise<void> {
     });
   }
 
-  // Soroban contract registry lookup — resolve GitHub username → G-address
-  // before running Horizon checks. Falls back to stellar_address_input on
-  // any error so existing non-contract workflows are unaffected.
-  let resolvedAddress = stellarAddress;
-  if (sorobanRpcUrl && contractId && githubUsername) {
-    try {
-      const lookupResult = await lookupAddressFromContract(githubUsername, {
-        sorobanRpcUrl,
-        contractId,
-        timeoutMs: horizonTimeoutMs,
-      });
-      if (lookupResult.fromRegistry && lookupResult.address) {
-        core.info(
-          `[TrustBridge] Registry resolved @${githubUsername} → ${lookupResult.address}`,
-        );
-        resolvedAddress = lookupResult.address;
-      } else {
-        core.info(
-          `[TrustBridge] @${githubUsername} not found in registry — using stellar_address_input`,
-        );
-      }
-    } catch (err) {
-      const msg = getErrorMessage(err);
-      const retryable = err instanceof ContractLookupError && err.retryable;
-      core.warning(
-        `[TrustBridge] Contract registry lookup failed (${retryable ? 'retryable' : 'non-retryable'}): ${msg}. Falling back to stellar_address_input.`,
-      );
-    }
+  const urlValidation = validateUrl(horizonUrl, 'horizon_url', {
+    protocols: ['https', 'http'],
+  });
+  if (!urlValidation.valid) {
+    throw new Error(`Invalid horizon_url: ${urlValidation.errors.join('; ')}`);
   }
 
-  validateStellarAddress(resolvedAddress);
+  validateStellarAddress(stellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 
   const normalizedAsset = normalizeAssetConfig({
