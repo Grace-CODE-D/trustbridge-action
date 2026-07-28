@@ -133,6 +133,13 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  preflight_only:
+    description: >-
+      When true, run the issues:write preflight check and exit immediately
+      without calling Horizon. Useful for verifying token permissions in a new
+      repository without spending Horizon API quota. Defaults to false.
+    required: false
+    default: 'false'
 
 outputs:
   trustline_exists:

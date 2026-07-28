@@ -20,6 +20,33 @@ export function inferStellarNetwork(horizonUrl: string): StellarNetwork {
   return horizonUrl.toLowerCase().includes('testnet') ? 'testnet' : 'public';
 }
 
+/**
+ * Known Horizon presets and the network they belong to. Used by cross-network
+ * detection to identify which network an address was most recently active on.
+ */
+export const KNOWN_HORIZON_NETWORKS: Record<string, StellarNetwork> = {
+  'https://horizon.stellar.org': 'public',
+  'https://horizon-testnet.stellar.org': 'testnet',
+};
+
+/**
+ * Returns the "opposite" Stellar network (for cross-network mismatch error
+ * messages that suggest switching to the correct Horizon URL).
+ */
+export function oppositeNetwork(network: StellarNetwork): StellarNetwork {
+  return network === 'public' ? 'testnet' : 'public';
+}
+
+/**
+ * Returns the canonical Horizon base URL for a given network.
+ * Useful when suggesting "switch to the correct Horizon" in error messages.
+ */
+export function canonicalHorizonUrl(network: StellarNetwork): string {
+  return network === 'public'
+    ? 'https://horizon.stellar.org'
+    : 'https://horizon-testnet.stellar.org';
+}
+
 export function buildAccountViewerLink(stellarAddress: string, network: StellarNetwork): string {
   const params = new URLSearchParams({ network, account: stellarAddress });
   return `https://laboratory.stellar.org/#account-viewer?${params.toString()}`;

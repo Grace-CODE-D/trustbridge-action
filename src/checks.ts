@@ -1,6 +1,13 @@
 import { HorizonAccount, getNativeBalance, hasTrustline, parseHorizonBalance } from './horizon';
 import { escapeMarkdownInline, inlineCode } from './markdown';
-import { buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
+import {
+  buildChangeTrustLink,
+  buildLobstrLink,
+  canonicalHorizonUrl,
+  inferStellarNetwork,
+  oppositeNetwork,
+  StellarNetwork,
+} from './links';
 
 /** Stellar public network base reserve per ledger entry (XLM). */
 export const STELLAR_BASE_RESERVE_XLM = 0.5;
@@ -13,6 +20,68 @@ export interface CheckConfig {
   assetIssuer: string;
   minXlmReserve: number;
   horizonUrl?: string;
+}
+
+// ---------------------------------------------------------------------------
+// #144 — Cross-network detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Hint passed in from the caller when a 404 is received to indicate that the
+ * same address was found active on a **different** network (e.g. the address
+ * exists on testnet but the workflow is pointed at mainnet Horizon, or vice
+ * versa).
+ *
+ * When present, unfunded/not-found error messages are augmented with a clear
+ * cross-network remediation so contributors understand they need to either
+ * fund on the correct network or switch `horizon_url`.
+ */
+export interface NetworkMismatchHint {
+  /** Network the configured Horizon URL resolves to. */
+  configuredNetwork: StellarNetwork;
+  /** Network on which the address *was* found active. */
+  activeOnNetwork: StellarNetwork;
+}
+
+/**
+ * Detect whether a Stellar address that returned 404 on the primary Horizon
+ * URL is actually active on the opposite network.
+ *
+ * Returns a `NetworkMismatchHint` when a mismatch is confirmed, or
+ * `undefined` when there is no evidence of a mismatch (either no cross-check
+ * was performed or the address is genuinely unfunded everywhere).
+ *
+ * @param configuredHorizonUrl  The `horizon_url` input value.
+ * @param stellarAddress        The 56-char G-address that returned 404.
+ * @param fetchFn               Optional injected fetch (for testing).
+ */
+export async function detectNetworkMismatch(
+  configuredHorizonUrl: string,
+  stellarAddress: string,
+  fetchFn?: (url: string, init?: RequestInit) => Promise<{ status: number }>,
+): Promise<NetworkMismatchHint | undefined> {
+  const configuredNetwork = inferStellarNetwork(configuredHorizonUrl);
+  const altNetwork = oppositeNetwork(configuredNetwork);
+  const altHorizonUrl = canonicalHorizonUrl(altNetwork);
+  const checkUrl = `${altHorizonUrl}/accounts/${stellarAddress}`;
+
+  try {
+    const fetcher = fetchFn ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
+    const response = await fetcher(checkUrl, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (response.status === 200) {
+      return { configuredNetwork, activeOnNetwork: altNetwork };
+    }
+    // 404 means genuinely not found on alt network — no mismatch evidence
+    return undefined;
+  } catch {
+    // Network error or timeout — can't determine, so no hint
+    return undefined;
+  }
 }
 
 export interface CheckResultItem {
@@ -139,16 +208,27 @@ export function runAccountChecks(
 export function unfundedAccountResult(
   stellarAddress: string,
   config: CheckConfig,
+  mismatchHint?: NetworkMismatchHint,
 ): ValidationResult {
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
   const safeAddress = inlineCode(stellarAddress);
   const network = inferStellarNetwork(config.horizonUrl ?? '');
 
+  // Build the "not found" detail, extended with mismatch context when available
+  let notFoundDetail = `Account ${safeAddress} was **not found** on Horizon — it may not be funded or activated yet.`;
+  if (mismatchHint) {
+    const altUrl = canonicalHorizonUrl(mismatchHint.activeOnNetwork);
+    notFoundDetail =
+      `Account ${safeAddress} was **not found** on the **${mismatchHint.configuredNetwork}** network` +
+      ` but **is active on ${mismatchHint.activeOnNetwork}** (${altUrl}).` +
+      ` This looks like a network mismatch — ensure \`horizon_url\` points at the correct network.`;
+  }
+
   const checks: CheckResultItem[] = [
     {
       passed: false,
       label: 'Account funded',
-      detail: `Account ${safeAddress} was **not found** on Horizon — it may not be funded or activated yet.`,
+      detail: notFoundDetail,
     },
     {
       passed: false,
@@ -162,6 +242,27 @@ export function unfundedAccountResult(
     },
   ];
 
+  // Base remediation steps
+  const remediationSteps = [
+    `Activate ${safeAddress} by sending at least **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
+    `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](${buildChangeTrustLink(network)}) or [LOBSTR](${buildLobstrLink()}).`,
+    `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
+  ];
+
+  // Prepend network-mismatch guidance when detected so it's the first thing a
+  // contributor reads.
+  if (mismatchHint) {
+    const correctUrl = canonicalHorizonUrl(mismatchHint.configuredNetwork);
+    const altUrl = canonicalHorizonUrl(mismatchHint.activeOnNetwork);
+    remediationSteps.unshift(
+      `⚠️ **Network mismatch detected.** The address is active on **${mismatchHint.activeOnNetwork}** (${altUrl})` +
+      ` but your workflow is configured to check the **${mismatchHint.configuredNetwork}** network (${correctUrl}).` +
+      ` Either:\n` +
+      `  1. Fund this address on **${mismatchHint.configuredNetwork}**, or\n` +
+      `  2. Update \`horizon_url\` to \`${altUrl}\` if you intended to check ${mismatchHint.activeOnNetwork}.`,
+    );
+  }
+
   return {
     valid: false,
     accountFunded: false,
@@ -169,11 +270,7 @@ export function unfundedAccountResult(
     xlmBalance: '0',
     xlmReserveMet: false,
     checks,
-    remediation: [
-      `Activate ${safeAddress} by sending at least **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
-      `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](${buildChangeTrustLink(network)}) or [LOBSTR](${buildLobstrLink()}).`,
-      `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
-    ].join('\n\n'),
+    remediation: remediationSteps.join('\n\n'),
   };
 }
 

@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import {
   CheckConfig,
+  detectNetworkMismatch,
   horizonFailureResult,
   parseMinXlmReserve,
   runAccountChecks,
@@ -10,58 +11,66 @@ import {
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
-import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
+import { getErrorMessage, parseBooleanInput, parseNumberInput, resolveInput } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { runIssuesPreflight, PreflightError } from './preflight';
 
 async function run(): Promise<void> {
-  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
-  const assetCode = core.getInput('asset_code') || 'USDC';
+  // #147 — helper to resolve each input with TRUSTBRIDGE_* env fallback
+  const getInput = (name: string, opts?: Parameters<typeof core.getInput>[1]) =>
+    resolveInput(name, core.getInput(name, opts));
+
+  const horizonUrl = getInput('horizon_url') || 'https://horizon.stellar.org';
+  const assetCode = getInput('asset_code') || 'USDC';
   const assetIssuer =
-    core.getInput('asset_issuer') ||
+    getInput('asset_issuer') ||
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
-  const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
-  const stellarAddress = core.getInput('stellar_address_input').trim();
-  const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
-  const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
-  const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
+  const minXlmReserveRaw = getInput('min_xlm_reserve') || '1.5';
+  const stellarAddress = getInput('stellar_address_input').trim();
+  const failOnMissing = parseBooleanInput(getInput('fail_on_missing'), true);
+  const debugMode = parseBooleanInput(getInput('debug_mode'), false);
+  const horizonTimeoutMs = parseNumberInput(getInput('horizon_timeout_ms'), 15000, {
     min: 1000,
     max: 60000,
   });
-  const stickyComment = parseBooleanInput(core.getInput('sticky_comment'), true);
-  const waitUntilFunded = parseBooleanInput(core.getInput('wait_until_funded'), false);
+  const stickyComment = parseBooleanInput(getInput('sticky_comment'), true);
+  const waitUntilFunded = parseBooleanInput(getInput('wait_until_funded'), false);
   const waitUntilFundedTimeoutMs = parseNumberInput(
-    core.getInput('wait_until_funded_timeout_ms'),
+    getInput('wait_until_funded_timeout_ms'),
     120000,
     { min: 0, max: 600000 },
   );
   const waitUntilFundedIntervalMs = parseNumberInput(
-    core.getInput('wait_until_funded_interval_ms'),
+    getInput('wait_until_funded_interval_ms'),
     5000,
     { min: 1000, max: 60000 },
   );
-  const horizonUrlFallback = core.getInput('horizon_url_fallback') || '';
-  const rpcFallbackUrlRaw = core.getInput('rpc_fallback_url') || '';
+  const horizonUrlFallback = getInput('horizon_url_fallback') || '';
+  const rpcFallbackUrlRaw = getInput('rpc_fallback_url') || '';
   const fallbackUrls = rpcFallbackUrlRaw
     ? rpcFallbackUrlRaw.split(',').map((u) => u.trim()).filter(Boolean)
     : horizonUrlFallback
       ? [horizonUrlFallback]
       : [];
-  const horizonCacheTtlMs = parseNumberInput(core.getInput('horizon_cache_ttl_ms'), 60000, {
+  const horizonCacheTtlMs = parseNumberInput(getInput('horizon_cache_ttl_ms'), 60000, {
     min: 0,
     max: 3_600_000,
   });
-  const useCache = parseBooleanInput(core.getInput('use_cache'), false);
-  const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
-  const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+  const useCache = parseBooleanInput(getInput('use_cache'), false);
+  const logInputs = parseBooleanInput(getInput('log_inputs'), false);
+  const trustbridgeConfigPath = getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
 
   // SEP-0007 wallet deep links (Issue #44)
-  const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
-  const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+  const sep0007DeepLinks = parseBooleanInput(getInput('sep0007_deep_links'), false);
+  const sep0007OriginDomain = getInput('sep0007_origin_domain') || '';
+
+  // #145 — issues:write preflight
+  const preflightOnly = parseBooleanInput(getInput('preflight_only'), false);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -110,6 +119,38 @@ async function run(): Promise<void> {
 
   validateStellarAddress(stellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
+
+  // ── #145: issues:write preflight ──────────────────────────────────────────
+  // Run before any Horizon call so consumers get a clear error when the token
+  // lacks comment-posting permission, rather than a confusing 403 after all
+  // the heavy lifting is done.
+  let preflightSkipComment = false;
+  try {
+    const preflight = await runIssuesPreflight(githubToken);
+    preflightSkipComment = preflight.skip;
+    if (preflight.skip) {
+      core.info(`[TrustBridge] ${preflight.message}`);
+    } else {
+      logger.debug('issues:write preflight passed', {
+        component: 'preflight',
+        issueNumber: preflight.issueNumber,
+      });
+    }
+  } catch (preflightError) {
+    if (preflightError instanceof PreflightError) {
+      // Hard fail: token demonstrably cannot post comments
+      core.setFailed(preflightError.message);
+      return;
+    }
+    // Unexpected error — warn and continue (don't block Horizon work)
+    core.warning(`issues:write preflight encountered an unexpected error: ${getErrorMessage(preflightError)}`);
+  }
+
+  if (preflightOnly) {
+    core.info('[TrustBridge] preflight_only=true — exiting after preflight without running Horizon checks.');
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
 
@@ -176,7 +217,20 @@ async function run(): Promise<void> {
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
     if (error instanceof HorizonError && error.statusCode === 404) {
-      result = unfundedAccountResult(stellarAddress, checkConfig);
+      // #144: attempt cross-network detection before building the result so
+      // the comment surfaces a clear mismatch error when the address is active
+      // on the opposite network. Fire-and-forget with a short timeout so a
+      // slow alt-network Horizon never blocks the primary run.
+      const mismatchHint = await detectNetworkMismatch(horizonUrl, stellarAddress).catch(
+        () => undefined,
+      );
+      if (mismatchHint) {
+        core.warning(
+          `Cross-network mismatch detected: address is active on ${mismatchHint.activeOnNetwork} ` +
+          `but horizon_url points at ${mismatchHint.configuredNetwork}.`,
+        );
+      }
+      result = unfundedAccountResult(stellarAddress, checkConfig, mismatchHint);
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       result = horizonFailureResult(error.message, checkConfig);

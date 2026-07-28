@@ -287,4 +287,186 @@ If using `GITHUB_TOKEN`, no extra secret is required beyond workflow permissions
 
 ---
 
+## workflow_run chained triggers (#146)
+
+Use `workflow_run` when you want TrustBridge to run as a trusted downstream job triggered by an upstream address-resolution workflow. This is common in organizations that separate the untrusted "read the issue" step from the trusted "validate and comment" step.
+
+### Why use workflow_run instead of a direct issues: trigger?
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Simple: address in issue body, single repo | `issues: [assigned]` directly on the TrustBridge step |
+| Complex: address from external API/bot, matrix payouts, fork trust isolation | `workflow_run` + artifact passing |
+
+### Critical differences from a direct `issues:` trigger
+
+1. **No issue context in `github.event`** — `workflow_run` events do not carry `github.event.issue`. You must pass the issue number from the upstream workflow via an artifact or repository variable.
+2. **GITHUB_TOKEN has write access to the base repo** — correct for posting issue comments; safe even on fork-triggered `pull_request` or `issues` events.
+3. **Re-runs are idempotent** — `sticky_comment: true` (default) ensures TrustBridge updates its existing comment rather than spamming the issue on each re-run.
+
+### Required permissions
+
+```yaml
+permissions:
+  issues: write      # post/update the TrustBridge comment
+  contents: read     # standard
+  actions: read      # download artifacts from the upstream run
+```
+
+### Passing the Stellar address between workflows
+
+The upstream workflow uploads a JSON artifact; the downstream workflow reads it:
+
+**Upstream (intake workflow):**
+```yaml
+- name: Upload TrustBridge inputs
+  uses: actions/upload-artifact@v4
+  with:
+    name: trustbridge-inputs
+    path: /tmp/trustbridge/inputs.json
+    # inputs.json: {"stellar_address":"G...","issue_number":42}
+```
+
+**Downstream (TrustBridge workflow):**
+```yaml
+- uses: actions/download-artifact@v4
+  with:
+    name: trustbridge-inputs
+    run-id: ${{ github.event.workflow_run.id }}
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    path: /tmp/trustbridge
+```
+
+### Injecting issue context
+
+Because `workflow_run` events have no `payload.issue`, you must patch the event file before TrustBridge runs:
+
+```yaml
+- uses: actions/github-script@v7
+  with:
+    script: |
+      const fs = require('fs');
+      const eventPath = process.env.GITHUB_EVENT_PATH;
+      const event = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+      event.issue = { number: parseInt('${{ steps.inputs.outputs.issue }}', 10) };
+      fs.writeFileSync(eventPath, JSON.stringify(event));
+```
+
+### GITHUB_TOKEN limitations across repos
+
+`GITHUB_TOKEN` can only post comments on the **same repository** as the workflow file. For cross-repo comment posting (rare), use a PAT with `repo` scope or a GitHub App token.
+
+### Troubleshooting "comment skipped" in workflow_run context
+
+If TrustBridge warns "No issue context found — skipping comment", the most common causes are:
+
+| Cause | Fix |
+|-------|-----|
+| `github.event.issue` not injected | Add the "Inject issue context" step above |
+| `issue_number` is `NaN` or `0` | Verify your `jq` command extracts a valid integer |
+| Token lacks `issues: write` | Add `permissions: issues: write` to the job |
+| Upstream workflow was a `push` or PR event | Only `issues`-context runs have issue numbers; use `workflow_dispatch` for manual checks |
+
+See the complete working example: [docs/examples/workflow_run_chained.yml](examples/workflow_run_chained.yml)
+
+---
+
+## Per-check env vars for payout jobs (#147)
+
+For payout bots and matrix workflows, TrustBridge supports a `TRUSTBRIDGE_*` environment variable layer so you can configure asset and network settings without duplicating `with:` inputs across matrix legs.
+
+### Precedence
+
+```
+with: input  >  TRUSTBRIDGE_* env var  >  action.yml default
+```
+
+An explicit `with:` value always wins. The env var is only consulted when the `with:` value is empty.
+
+### Supported env vars
+
+| Env var | Maps to input | Notes |
+|---------|--------------|-------|
+| `TRUSTBRIDGE_HORIZON_URL` | `horizon_url` | |
+| `TRUSTBRIDGE_HORIZON_URL_FALLBACK` | `horizon_url_fallback` | |
+| `TRUSTBRIDGE_RPC_FALLBACK_URL` | `rpc_fallback_url` | |
+| `TRUSTBRIDGE_ASSET_CODE` | `asset_code` | |
+| `TRUSTBRIDGE_ASSET_ISSUER` | `asset_issuer` | |
+| `TRUSTBRIDGE_MIN_XLM_RESERVE` | `min_xlm_reserve` | |
+| `TRUSTBRIDGE_FAIL_ON_MISSING` | `fail_on_missing` | `true`/`false` |
+| `TRUSTBRIDGE_DEBUG_MODE` | `debug_mode` | |
+| `TRUSTBRIDGE_HORIZON_TIMEOUT_MS` | `horizon_timeout_ms` | |
+| `TRUSTBRIDGE_STICKY_COMMENT` | `sticky_comment` | |
+| `TRUSTBRIDGE_WAIT_UNTIL_FUNDED` | `wait_until_funded` | |
+| `TRUSTBRIDGE_WAIT_UNTIL_FUNDED_TIMEOUT_MS` | `wait_until_funded_timeout_ms` | |
+| `TRUSTBRIDGE_WAIT_UNTIL_FUNDED_INTERVAL_MS` | `wait_until_funded_interval_ms` | |
+| `TRUSTBRIDGE_HORIZON_CACHE_TTL_MS` | `horizon_cache_ttl_ms` | |
+| `TRUSTBRIDGE_USE_CACHE` | `use_cache` | |
+| `TRUSTBRIDGE_LOG_INPUTS` | `log_inputs` | |
+| `TRUSTBRIDGE_PREFLIGHT_ONLY` | `preflight_only` | |
+
+**Not supported** (intentionally excluded): `github_token`, `stellar_address_input`. These must always be supplied via explicit `with:` inputs. Never place token values in environment variables where they may be printed to job logs.
+
+### Matrix payout example
+
+```yaml
+strategy:
+  matrix:
+    include:
+      - asset_code: USDC
+        asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+        min_xlm_reserve: '1.5'
+      - asset_code: EURC
+        asset_issuer: GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP
+        min_xlm_reserve: '2.0'
+
+env:
+  TRUSTBRIDGE_ASSET_CODE:    ${{ matrix.asset_code }}
+  TRUSTBRIDGE_ASSET_ISSUER:  ${{ matrix.asset_issuer }}
+  TRUSTBRIDGE_MIN_XLM_RESERVE: ${{ matrix.min_xlm_reserve }}
+  TRUSTBRIDGE_FAIL_ON_MISSING: 'true'
+
+steps:
+  - uses: Stellar-TrustBridge/trustbridge-action@v1
+    with:
+      stellar_address_input: ${{ steps.addr.outputs.value }}
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      # asset_code, asset_issuer, min_xlm_reserve resolved from env vars above
+```
+
+See the full working example: [docs/examples/payout_matrix.yml](examples/payout_matrix.yml)
+
+---
+
+## issues:write preflight (#145)
+
+TrustBridge automatically runs a **preflight check** before any Horizon calls to verify that the token can post issue comments. This prevents wasting Horizon API quota when permissions are misconfigured.
+
+### What the preflight checks
+
+1. **Issue context** — is there an issue number in the event payload? If not (e.g. `workflow_dispatch` without an issue), comment posting is silently skipped and Horizon runs normally.
+2. **Token permission** — calls `GET /repos/{owner}/{repo}/issues/{number}/comments` (read-only). A 401 or 403 response fails the run immediately with a clear permission error before any Horizon work.
+
+### Preflight-only mode
+
+Set `preflight_only: true` to run only the permission check and exit without calling Horizon. Useful when setting up TrustBridge for the first time:
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.addr.outputs.value }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    preflight_only: true   # exits after permission check, no Horizon call
+```
+
+### Troubleshooting preflight failures
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `GitHub token lacks issues: write permission (403)` | Token scope too narrow | Add `permissions: issues: write` to the workflow job |
+| `GitHub token is not authorized (401)` | Invalid or expired token | Verify the token / regenerate the PAT |
+| `Issue #N was not found (404)` | Closed or deleted issue | Run the check on an open issue |
+
+---
+
 [← Back to README](../README.md)

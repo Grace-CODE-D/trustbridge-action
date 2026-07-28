@@ -11,8 +11,11 @@ Related docs: [README](../README.md) · [Architecture](ARCHITECTURE.md) · [Usag
 | Condition | HTTP / cause | Retries | Outputs | Comment | Workflow |
 |-----------|--------------|---------|---------|---------|----------|
 | Invalid G-address | Input validation | No | Not set (run fails early) | Not posted | `setFailed` |
+| **Missing issues:write** | **Preflight 401/403** | **No** | **Not set (run fails before Horizon)** | **Not posted** | **`setFailed` with clear guidance** |
+| **Issue not found (preflight)** | **Preflight 404** | **No** | **Not set** | **Not posted** | **`setFailed`** |
 | Account not found | Horizon 404 | No (unless `wait_until_funded`) | `account_funded=false`, others false/0 | Posted with activation steps | per `fail_on_missing` |
 | Account not found, `wait_until_funded: true` | Horizon 404 repeated | Polls every `wait_until_funded_interval_ms` until funded or `wait_until_funded_timeout_ms` elapses | Same as above if timeout reached | Same as above | per `fail_on_missing` |
+| **Cross-network mismatch** | **Horizon 404 + active on alt network** | **No** | **`account_funded=false`** | **Posted with mismatch guidance** | **per `fail_on_missing`** |
 | Missing trustline | Horizon 200, no matching balance | No | `account_funded=true`, `trustline_exists=false` | Posted with Lab/LOBSTR links | per `fail_on_missing` |
 | Zero trustlines | Horizon 200, native only | No | Same as missing trustline | Specific “zero trustlines” message | per `fail_on_missing` |
 | Low XLM reserve | Horizon 200, native &lt; min | No | `xlm_balance` set, reserve fail | Posted with amount to send | per `fail_on_missing` |
@@ -94,6 +97,59 @@ Messages differ so contributors know whether to add vs fix the asset.
 Native balance is parsed as a string from Horizon (7 decimal places) and compared numerically to `min_xlm_reserve`.
 
 Remediation calculates approximate additional XLM needed.
+
+---
+
+## issues:write preflight failures (#145)
+
+The preflight runs before Horizon to catch permission problems early.
+
+### 401 — Invalid or expired token
+
+The token is not recognized by GitHub. Either the token value is wrong or it has expired.
+
+**User message:** `GitHub token is not authorized (401). Ensure the token is valid...`
+
+**Fix:** Re-generate the PAT or verify `secrets.GITHUB_TOKEN` is correctly referenced.
+
+### 403 — Missing issues:write permission
+
+The token exists but does not have permission to read/write issues.
+
+**User message:** `GitHub token lacks issues: write permission (403). Add permissions: issues: write...`
+
+**Fix:**
+```yaml
+permissions:
+  issues: write
+  contents: read
+```
+
+### 404 — Issue not found
+
+The issue number from the event payload does not resolve to an open issue.
+
+**User message:** `Issue #N was not found (404).`
+
+**Fix:** Confirm the action is triggered by an `issues` event with an open issue.
+
+### Non-issue context (no preflight run)
+
+On `workflow_dispatch` and other non-issue events, TrustBridge skips both the preflight and comment posting. Checks still run and outputs are set.
+
+---
+
+## Cross-network mismatch (#144)
+
+When a Stellar address returns 404 on the configured Horizon endpoint, TrustBridge silently checks whether the same address is active on the **opposite** network (mainnet ↔ testnet) using a 5-second probe.
+
+If the address is found on the other network, the error message and remediation steps are augmented with clear guidance:
+
+- Which network the address is active on
+- The Horizon URL for that network
+- Two remediation options: fund on the correct network, or switch `horizon_url`
+
+This check adds at most ~5 seconds when a 404 is received and is silent on success (no hint appended for genuinely unfunded accounts).
 
 ---
 
