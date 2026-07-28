@@ -44,6 +44,10 @@ export interface FetchAccountOptions {
     cacheTtlMs?: number;
     cache?: SimpleCache;
     fetchFn?: FetchLike;
+    /** Optional AbortSignal from a parent controller (e.g. job cancellation).
+     *  When the signal fires, in-flight and pending requests are aborted
+     *  immediately; no misleading "account not funded" result is produced. */
+    signal?: AbortSignal;
 }
 export declare function normalizeHorizonUrl(baseUrl: string): string;
 export declare function isRetryableStatus(status: number): boolean;
@@ -60,6 +64,10 @@ export interface WaitForFundedAccountOptions {
     maxRetries?: number;
     /** Called after each unfunded (404) poll, before sleeping for the next attempt. */
     onPoll?: (attempt: number, elapsedMs: number) => void;
+    /** Optional AbortSignal from a parent controller (e.g. job cancellation).
+     *  When the signal fires, polling stops immediately without emitting a
+     *  misleading "account not funded" result. */
+    signal?: AbortSignal;
 }
 /**
  * Poll Horizon for an account until it becomes funded or the timeout budget

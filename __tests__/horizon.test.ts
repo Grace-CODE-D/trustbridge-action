@@ -643,41 +643,136 @@ describe('Horizon debug log redaction', () => {
   });
 });
 
-describe('fetchNetworkPassphrase', () => {
-  it('returns the network passphrase from the root endpoint', async () => {
-    const mockFetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ network_passphrase: 'Public Global Stellar Network ; September 2015' }),
-    });
+// ---------------------------------------------------------------------------
+// AbortSignal / job-cancellation tests (Issue #82)
+// ---------------------------------------------------------------------------
 
-    const passphrase = await fetchNetworkPassphrase('https://horizon.stellar.org', {
-      fetchFn: mockFetch as unknown as FetchLike,
-    });
-    expect(passphrase).toBe('Public Global Stellar Network ; September 2015');
-    expect(mockFetch).toHaveBeenCalledWith('https://horizon.stellar.org', expect.objectContaining({ method: 'GET' }));
-  });
+describe('AbortSignal cancellation', () => {
+  describe('fetchAccount: pre-flight abort', () => {
+    it('rejects immediately (non-retryable) when signal is already aborted before fetch starts', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const mock = makeMockFetch(async () => makeMockResponse(200, makeAccount()));
 
-  it('retries on retryable errors and succeeds', async () => {
-    const mockFetch = jest
-      .fn()
-      .mockResolvedValueOnce({ status: 429, ok: false })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ network_passphrase: 'Test SDF Network ; September 2015' }),
+      await expect(
+        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 2,
+          cacheTtlMs: 0,
+          signal: controller.signal,
+          fetchFn: mock,
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('aborted'),
+        retryable: false,
       });
 
-    const passphrase = await fetchNetworkPassphrase('https://horizon-testnet.stellar.org', {
-      fetchFn: mockFetch as unknown as FetchLike,
+      // The fetch function should NOT have been called at all.
+      expect(mock).not.toHaveBeenCalled();
     });
-    expect(passphrase).toBe('Test SDF Network ; September 2015');
-    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('throws an error on unrecoverable 404', async () => {
-    const mockFetch = jest.fn().mockResolvedValue({ status: 404, statusText: 'Not Found', ok: false });
-    await expect(fetchNetworkPassphrase('https://horizon.example.com', {
-      fetchFn: mockFetch as unknown as FetchLike,
-      maxRetries: 1,
-    })).rejects.toThrow(/Horizon returned 404/);
+  describe('fetchAccount: mid-request abort stops retries', () => {
+    it('does not retry after the parent signal fires during a request', async () => {
+      const controller = new AbortController();
+
+      // Simulate: first call triggers the job abort, second call should never run.
+      let callCount = 0;
+      const mock = makeMockFetch(async () => {
+        callCount += 1;
+        controller.abort(); // cancel the job during the first request
+        // Throw an AbortError as fetch would when the signal fires.
+        const err = new Error('The user aborted a request.');
+        err.name = 'AbortError';
+        throw err;
+      });
+
+      await expect(
+        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 3,
+          cacheTtlMs: 0,
+          signal: controller.signal,
+          fetchFn: mock,
+        }),
+      ).rejects.toMatchObject({
+        retryable: false,
+        message: expect.stringContaining('aborted'),
+      });
+
+      // Should have been called exactly once — no retries after cancellation.
+      expect(callCount).toBe(1);
+    });
+  });
+
+  describe('waitForFundedAccount: abort stops polling', () => {
+    it('exits without retrying when signal is already aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const fetchAccountFn = jest.fn().mockRejectedValue(new HorizonError('not found', 404, false));
+
+      await expect(
+        waitForFundedAccount(
+          PRIMARY_HORIZON,
+          TEST_ADDRESS,
+          { timeoutMs: 5000, pollIntervalMs: 5, signal: controller.signal },
+          fetchAccountFn,
+        ),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('aborted'),
+        retryable: false,
+      });
+
+      // fetch should not have been called — aborted before first attempt.
+      expect(fetchAccountFn).not.toHaveBeenCalled();
+    });
+
+    it('stops polling mid-loop when signal fires between polls', async () => {
+      const controller = new AbortController();
+      let calls = 0;
+
+      const fetchAccountFn = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        // Abort after the first 404 to simulate job cancellation between polls.
+        if (calls === 1) {
+          controller.abort();
+        }
+        throw new HorizonError('not found', 404, false);
+      });
+
+      await expect(
+        waitForFundedAccount(
+          PRIMARY_HORIZON,
+          TEST_ADDRESS,
+          { timeoutMs: 30000, pollIntervalMs: 1, signal: controller.signal },
+          fetchAccountFn,
+        ),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('aborted'),
+        retryable: false,
+      });
+
+      // Only one fetch should have been attempted before the abort was processed.
+      expect(calls).toBe(1);
+    });
+
+    it('does not produce a misleading "account not funded" error on abort', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const fetchAccountFn = jest.fn().mockRejectedValue(new HorizonError('not found', 404, false));
+
+      const error = await waitForFundedAccount(
+        PRIMARY_HORIZON,
+        TEST_ADDRESS,
+        { timeoutMs: 5000, pollIntervalMs: 5, signal: controller.signal },
+        fetchAccountFn,
+      ).catch((e) => e as HorizonError);
+
+      // Must NOT look like a genuine "account not funded" (404) error.
+      expect(error).toBeInstanceOf(HorizonError);
+      expect((error as HorizonError).statusCode).toBe(0);
+      expect((error as HorizonError).message).not.toContain('not funded');
+      expect((error as HorizonError).message).not.toContain('wait_until_funded');
+    });
   });
 });

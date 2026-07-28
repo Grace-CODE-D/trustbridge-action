@@ -25,109 +25,8 @@ import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
 import { globalMetrics } from './metrics';
-import {
-  validateContractAddress,
-  clearSpans,
-  getSpans,
-  computeEffectiveReserveRequirement,
-} from './validation';
-
-// ---------------------------------------------------------------------------
-// Wave #38: Dashboard webhook payload (dist e2e harness)
-// ---------------------------------------------------------------------------
-
-interface DashboardWebhookPayload {
-  /** Validation result summary (gate, checks, balances). */
-  validation: {
-    ready: boolean;
-    accountFunded: boolean;
-    trustlineExists: boolean;
-    xlmBalance: string;
-    xlmReserveMet: boolean;
-    failedChecks: number;
-    passedChecks: number;
-    totalChecks: number;
-    failedLabels: string[];
-  };
-  /** Asset and reserve configuration. */
-  config: {
-    assetCode: string;
-    assetIssuer: string;
-    minXlmReserve: number;
-  };
-  /** Redacted Stellar address (first4…last4). */
-  stellarAddressRedacted: string;
-  /** Comment mode for this run. */
-  commentMode: string;
-  /** Comment URL if posted, undefined if dry-run/off. */
-  commentUrl?: string;
-  /** ISO 8601 timestamp of the validation run. */
-  timestamp: string;
-}
-
-function redactStellarAddress(address: string): string {
-  if (address.length === 56 && (address.startsWith('G') || address.startsWith('C'))) {
-    return `${address.slice(0, 4)}...${address.slice(-4)}`;
-  }
-  return address;
-}
-
-async function postDashboardWebhook(
-  webhookUrl: string,
-  context: {
-    result: ValidationResult;
-    config: CheckConfig;
-    stellarAddress: string;
-    commentMode: string;
-    commentUrl?: string;
-  },
-): Promise<void> {
-  const gate = buildValidationGate(context.result);
-
-  const payload: DashboardWebhookPayload = {
-    validation: {
-      ready: gate.ready,
-      accountFunded: context.result.accountFunded,
-      trustlineExists: context.result.trustlineExists,
-      xlmBalance: context.result.xlmBalance,
-      xlmReserveMet: context.result.xlmReserveMet,
-      failedChecks: gate.failedChecks,
-      passedChecks: gate.passedChecks,
-      totalChecks: gate.totalChecks,
-      failedLabels: gate.failedLabels,
-    },
-    config: {
-      assetCode: context.config.assetCode,
-      assetIssuer: context.config.assetIssuer,
-      minXlmReserve: context.config.minXlmReserve,
-    },
-    stellarAddressRedacted: redactStellarAddress(context.stellarAddress),
-    commentMode: context.commentMode,
-    commentUrl: context.commentUrl,
-    timestamp: new Date().toISOString(),
-  };
-
-  const fetch = (await import('node-fetch')).default;
-  const response = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'TrustBridge-Action/1.0',
-    },
-    body: JSON.stringify(payload),
-    timeout: 10000,
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Dashboard webhook returned ${response.status}: ${response.statusText}`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Main run function
-// ---------------------------------------------------------------------------
+import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -179,12 +78,54 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
-  // Dynamic reserve engine (Issue #15)
-  const dynamicReserve = parseBooleanInput(core.getInput('dynamic_reserve'), false);
-  const reserveBufferXlm = parseNumberInput(core.getInput('reserve_buffer_xlm'), 0, {
-    min: 0,
-    max: 1000,
-  });
+  // Load and apply optional consumer config file (Issue #45).
+  // readTrustbridgeConfig fails fast (throws) if the file exists but is invalid.
+  // When the file is absent it returns config:null and found:false — no-op.
+  const { config: consumerConfig, validation: configValidation, found: configFound, resolvedPath: configResolvedPath } =
+    readTrustbridgeConfig(trustbridgeConfigPath);
+  if (!configValidation.valid) {
+    // Surface every error so the workflow author can fix them all in one pass.
+    throw new Error(
+      `trustbridge_config_path "${configResolvedPath}" failed validation:\n${configValidation.errors.join('\n')}`,
+    );
+  }
+  if (configFound && consumerConfig) {
+    logger.debug('Consumer config loaded', {
+      component: 'index',
+      configPath: configResolvedPath,
+      keys: Object.keys(consumerConfig),
+    });
+  }
+
+  // Build the set of inputs that were explicitly provided by the workflow
+  // author so mergeConsumerConfig knows which action inputs take precedence.
+  const explicitInputs = new Set<string>(
+    [
+      core.getInput('horizon_url') ? 'horizonUrl' : null,
+      core.getInput('horizon_url_fallback') ? 'horizonUrlFallback' : null,
+      core.getInput('rpc_fallback_url') ? 'rpcFallbackUrl' : null,
+      core.getInput('asset_code') ? 'assetCode' : null,
+      core.getInput('asset_issuer') ? 'assetIssuer' : null,
+      core.getInput('min_xlm_reserve') ? 'minXlmReserveRaw' : null,
+      core.getInput('fail_on_missing') ? 'failOnMissing' : null,
+    ].filter((v): v is string => v !== null),
+  );
+
+  // Merge consumer config defaults under explicit action inputs.
+  const mergedInputs = mergeConsumerConfig(
+    { horizonUrl, horizonUrlFallback, rpcFallbackUrl: rpcFallbackUrlRaw, assetCode, assetIssuer, minXlmReserveRaw, failOnMissing },
+    consumerConfig,
+    explicitInputs,
+  );
+
+  // Re-bind the merged values so the rest of the run uses them.
+  const effectiveHorizonUrl: string = typeof mergedInputs.horizonUrl === 'string' ? mergedInputs.horizonUrl : horizonUrl;
+  const effectiveHorizonUrlFallback: string = typeof mergedInputs.horizonUrlFallback === 'string' ? mergedInputs.horizonUrlFallback : horizonUrlFallback;
+  const effectiveRpcFallbackUrl: string = typeof mergedInputs.rpcFallbackUrl === 'string' ? mergedInputs.rpcFallbackUrl : rpcFallbackUrlRaw;
+  const effectiveAssetCode: string = typeof mergedInputs.assetCode === 'string' ? mergedInputs.assetCode : assetCode;
+  const effectiveAssetIssuer: string = typeof mergedInputs.assetIssuer === 'string' ? mergedInputs.assetIssuer : assetIssuer;
+  const effectiveMinXlmReserveRaw: string = typeof mergedInputs.minXlmReserveRaw === 'string' ? mergedInputs.minXlmReserveRaw : minXlmReserveRaw;
+  const effectiveFailOnMissing: boolean = typeof mergedInputs.failOnMissing === 'boolean' ? mergedInputs.failOnMissing : failOnMissing;
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -203,21 +144,19 @@ async function run(): Promise<void> {
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {
     component: 'index',
-    trustbridgeConfigPath,
-    horizonUrl,
-    horizonUrlFallback,
+    horizonUrl: effectiveHorizonUrl,
+    horizonUrlFallback: effectiveHorizonUrlFallback,
     horizonCacheTtlMs,
-    assetCode,
-    assetIssuer,
-    minXlmReserveRaw,
-    minAssetBalanceRaw,
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+    minXlmReserveRaw: effectiveMinXlmReserveRaw,
     debugMode,
     horizonTimeoutMs,
     stickyComment,
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
     waitUntilFundedIntervalMs,
-    rpcFallbackUrl: rpcFallbackUrlRaw,
+    rpcFallbackUrl: effectiveRpcFallbackUrl,
     useCache,
     sep0007DeepLinks,
     dynamicReserve,
@@ -248,15 +187,14 @@ async function run(): Promise<void> {
 
   if (logInputs) {
     emitInputsLogRecord({
-      horizonUrl,
-      horizonUrlFallback,
-      rpcFallbackUrl: rpcFallbackUrlRaw,
-      assetCode,
-      assetIssuer,
-      minXlmReserve: minXlmReserveRaw,
-      minAssetBalance: minAssetBalanceRaw,
+      horizonUrl: effectiveHorizonUrl,
+      horizonUrlFallback: effectiveHorizonUrlFallback,
+      rpcFallbackUrl: effectiveRpcFallbackUrl,
+      assetCode: effectiveAssetCode,
+      assetIssuer: effectiveAssetIssuer,
+      minXlmReserve: effectiveMinXlmReserveRaw,
       stellarAddress,
-      failOnMissing,
+      failOnMissing: effectiveFailOnMissing,
       debugMode,
       horizonTimeoutMs,
       stickyComment,
@@ -269,29 +207,13 @@ async function run(): Promise<void> {
     });
   }
 
-  validateStellarAddress(resolvedStellarAddress);
-  const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
-  const minAssetBalance = parseMinAssetBalance(minAssetBalanceRaw);
+  validateStellarAddress(stellarAddress);
+  const minXlmReserve = parseMinXlmReserve(effectiveMinXlmReserveRaw);
 
-  // Reject clearly unsafe Horizon/RPC endpoints before ever attempting a
-  // connection (Issue #71): private IPs, loopback, link-local, cloud
-  // metadata endpoints, and file:// are all blocked. HTTPS is required —
-  // plain HTTP Horizon endpoints are not supported in production defaults,
-  // so TLS verification can never be silently bypassed by pointing at an
-  // unencrypted mirror.
-  const horizonUrlInputs: Array<[string, string]> = [['horizon_url', horizonUrl]];
-  if (horizonUrlFallback) horizonUrlInputs.push(['horizon_url_fallback', horizonUrlFallback]);
-  for (const fallbackUrl of fallbackUrls) {
-    horizonUrlInputs.push(['rpc_fallback_url', fallbackUrl]);
-  }
-  for (const [fieldName, urlValue] of horizonUrlInputs) {
-    const urlCheck = validateSsrfSafeUrl(urlValue, fieldName);
-    if (!urlCheck.valid) {
-      throw new Error(`Invalid ${fieldName}: ${urlCheck.errors.join('; ')}`);
-    }
-  }
-
-  const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
+  const normalizedAsset = normalizeAssetConfig({
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+  });
 
   // Soroban fungible token contracts (SEP-41) use a "C..." contract address
   // as their issuer instead of a classic "G..." account. Validate that
@@ -313,13 +235,10 @@ async function run(): Promise<void> {
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
     minXlmReserve,
-    minAssetBalance,
-    horizonUrl,
-    unauthorizedTrustlinePolicy,
-    clawbackStrictMode,
+    horizonUrl: effectiveHorizonUrl,
   };
 
-  core.info(`Checking Stellar account ${resolvedStellarAddress} via ${horizonUrl}`);
+  core.info(`Checking Stellar account ${stellarAddress} via ${effectiveHorizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -329,12 +248,24 @@ async function run(): Promise<void> {
 
   let result;
 
+  // Create a job-level AbortController so Horizon fetches and polling loops
+  // stop promptly when the GitHub Actions runner cancels the workflow.
+  const jobController = new AbortController();
+
+  // Rebuild fallbackUrls from the effective (possibly config-merged) values.
+  const effectiveFallbackUrls = effectiveRpcFallbackUrl
+    ? effectiveRpcFallbackUrl.split(',').map((u) => u.trim()).filter(Boolean)
+    : effectiveHorizonUrlFallback
+      ? [effectiveHorizonUrlFallback]
+      : fallbackUrls;
+
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
-    horizonUrlFallback: horizonUrlFallback || undefined,
-    fallbackUrls,
+    horizonUrlFallback: effectiveHorizonUrlFallback || undefined,
+    fallbackUrls: effectiveFallbackUrls,
+    cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
-    cacheTtlMs: horizonCacheTtlMs,
+    signal: jobController.signal,
   };
 
   core.info(`Verifying network identity for ${horizonUrl}...`);
@@ -360,12 +291,13 @@ async function run(): Promise<void> {
   try {
     const account = waitUntilFunded
       ? await waitForFundedAccount(
-          horizonUrl,
-          resolvedStellarAddress,
+          effectiveHorizonUrl,
+          stellarAddress,
           {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
             requestTimeoutMs: horizonTimeoutMs,
+            signal: jobController.signal,
             onPoll: (attempt, elapsedMs) =>
               logger.debug(`Account not yet funded — polling again`, {
                 component: 'index',
@@ -375,36 +307,16 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
-
-    let effectiveCheckConfig = checkConfig;
-    if (dynamicReserve) {
-      const effectiveMinXlmReserve = computeEffectiveReserveRequirement(
-        checkConfig.minXlmReserve,
-        {
-          subentryCount: account.subentry_count,
-          numSponsoring: account.num_sponsoring,
-          numSponsored: account.num_sponsored,
-        },
-        { bufferXlm: reserveBufferXlm },
-      );
-      effectiveCheckConfig = { ...checkConfig, minXlmReserve: effectiveMinXlmReserve };
-      logger.debug('Dynamic reserve engine computed effective requirement', {
-        component: 'index',
-        configuredMinXlmReserve: checkConfig.minXlmReserve,
-        reserveBufferXlm,
-        effectiveMinXlmReserve,
-        subentryCount: account.subentry_count,
-        numSponsoring: account.num_sponsoring,
-        numSponsored: account.num_sponsored,
-      });
-    }
-
-    result = runAccountChecks(account, effectiveCheckConfig);
+      : await fetchAccount(effectiveHorizonUrl, stellarAddress, horizonOptions);
+    result = runAccountChecks(account, checkConfig);
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
-      result = unfundedAccountResult(resolvedStellarAddress, checkConfig);
+      result = unfundedAccountResult(stellarAddress, checkConfig);
+    } else if (error instanceof HorizonError && error.statusCode === 0 && !error.retryable) {
+      // Cancelled by job signal — exit cleanly without a misleading comment.
+      core.warning(`TrustBridge run was cancelled: ${error.message}`);
+      // result stays undefined; the null guard below returns cleanly.
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       globalMetrics.incrementCounter('errors');
@@ -416,15 +328,23 @@ async function run(): Promise<void> {
       globalMetrics.incrementCounter('errors');
       result = horizonFailureResult(message, checkConfig);
     }
+  } finally {
+    // Ensure the controller is not leaked if the function returns early.
+    jobController.abort();
+  }
+
+  // result is undefined only when the run was cancelled and we returned early above.
+  if (result == null) {
+    return;
   }
 
   setValidationOutputs(result);
 
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
-    stellarAddress: resolvedStellarAddress,
-    horizonUrl,
-    failOnMissing,
+    stellarAddress,
+    horizonUrl: effectiveHorizonUrl,
+    failOnMissing: effectiveFailOnMissing,
     stickyComment,
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
@@ -502,7 +422,7 @@ async function run(): Promise<void> {
 
   const failureMessage = `TrustBridge checks failed: ${summary}`;
 
-  if (failOnMissing) {
+  if (effectiveFailOnMissing) {
     core.setFailed(failureMessage);
   } else {
     core.warning(failureMessage);

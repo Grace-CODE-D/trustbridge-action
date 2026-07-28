@@ -450,13 +450,69 @@ Run through this on your own GHES org before relying on TrustBridge there:
 
 ## Permissions reference
 
+### Minimum permissions
+
 ```yaml
 permissions:
-  issues: write    # required for comments
+  issues: write    # required to post or update issue comments
   contents: read   # standard for checkout-less actions
 ```
 
-If using `GITHUB_TOKEN`, no extra secret is required beyond workflow permissions.
+`issues: write` is the only permission TrustBridge needs. `contents: read` is not strictly required unless you also check out the repository in the same job, but it is good practice to include it so the permission block documents the full job surface.
+
+### When `GITHUB_TOKEN` is enough
+
+| Trigger | `GITHUB_TOKEN` sufficient? | Notes |
+|---------|---------------------------|-------|
+| `issues: assigned` on default branch | ✅ Yes | Standard case — token is scoped to the repo |
+| `workflow_dispatch` | ✅ Yes | Same repo, no fork isolation |
+| `pull_request` from a fork | ❌ No | Fork PRs run with a read-only token; comment posting will fail with 403 |
+| Repository under org with restricted Actions token | ❌ Depends | Check **Organization → Settings → Actions → General → Workflow permissions** |
+| GitHub Enterprise Server (GHES) | ❌ Often needs PAT | Default token scopes vary by GHES version and admin policy |
+
+### When you need a PAT or GitHub App token
+
+Use a fine-grained PAT (or a GitHub App installation token) when:
+
+- The workflow is triggered by a **fork pull request** (`pull_request` event from a forked repo). Fork PRs receive a restricted token with no write access. Store the PAT as an Actions secret: `${{ secrets.MY_TRUSTBRIDGE_TOKEN }}`.
+- Your organization policy **sets default token permissions to read-only**. A PAT or App token scoped to `Issues: Read and write` bypasses the org policy.
+- You are on **GHES** and the instance admin has not granted `issues: write` to the default token.
+
+For GitHub Apps: request the **Issues (read and write)** permission during app registration, then pass the generated installation token via `${{ steps.generate_token.outputs.token }}`.
+
+### Troubleshooting 403 / 404 comment errors
+
+| Error | Likely cause | Fix |
+|-------|-------------|-----|
+| `Resource not accessible by integration` (403) | Token lacks `issues: write` | Add `permissions: issues: write` to the job or use a PAT |
+| `Not Found` (404) when posting a comment | Issue was deleted, transferred, or the repo has issues disabled | Verify the issue exists and issues are enabled |
+| `GitHub Actions is not permitted to create or approve pull requests` | Wrong permission for PRs (not needed by TrustBridge) | Ensure you are on the `issues` trigger, not `pull_request` |
+| Comment posted but empty / malformed | Snapshot mismatch in comment format | Open a bug report with the action log excerpt |
+| Comment not posted, no error | Workflow not running in issue context | Expected for `workflow_dispatch` without issue number; outputs are still set |
+
+### Least-privilege example
+
+```yaml
+name: TrustBridge — Stellar wallet check
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  verify-stellar-account:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write     # allow TrustBridge to post comments
+      contents: read    # standard read access
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: GCONTRIBUTORADDRESSHERE
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+This is the minimal permission block. Do not add `pull-requests: write`, `id-token: write`, or other scopes unless a separate step in the same job requires them.
 
 ---
 
