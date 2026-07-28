@@ -29,6 +29,7 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Includes __tests__/validation.performance.test.ts (mocked Horizon p95 budget).
       - name: Test
         run: npm test
 

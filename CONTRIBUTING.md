@@ -135,6 +135,27 @@ test: cover zero-trustline account path
 - **Do not** commit API keys, tokens, or `.env` files
 - Report security issues privately to repository maintainers before public disclosure
 
+### Validation performance budget
+
+CI includes a deterministic performance budget test (`__tests__/validation.performance.test.ts`) that times a full validation run of the action handler (`run` in `src/index.ts`) with **mocked Horizon** (no live network).
+
+| Setting | Value |
+|---------|--------|
+| Metric | p95 wall-clock duration over 25 samples (after warmup) |
+| Budget | **2000 ms** (`VALIDATION_PERFORMANCE_BUDGET_P95_MS`) |
+| Why generous | Standard GitHub-hosted runners vary; headroom avoids flakes |
+
+The test fails when p95 exceeds the budget. Failure messages call out likely causes: **Horizon retries**, **extra fetches**, or **logging/metrics bloat** on the validation path.
+
+#### Updating the baseline intentionally
+
+1. Confirm the slowdown is expected (new required work, not an accidental regression).
+2. Change `VALIDATION_PERFORMANCE_BUDGET_P95_MS` in `__tests__/validation.performance.test.ts`.
+3. Update the budget value in this section to match.
+4. Explain the new baseline in the PR description.
+
+Do not raise the budget to silence an unexplained regression.
+
 ---
 
 ## Questions

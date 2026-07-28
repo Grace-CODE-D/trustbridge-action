@@ -17,7 +17,7 @@ import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 
-async function run(): Promise<void> {
+export async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
@@ -84,6 +84,7 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
     sep0007DeepLinks,
+    trustbridgeConfigPath,
   });
 
   if (logInputs) {
@@ -243,6 +244,9 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((error) => {
-  core.setFailed(getErrorMessage(error));
-});
+// Skip auto-run under Jest so performance / integration tests can import `run`.
+if (process.env.JEST_WORKER_ID === undefined) {
+  run().catch((error) => {
+    core.setFailed(getErrorMessage(error));
+  });
+}

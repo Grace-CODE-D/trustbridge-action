@@ -22,4 +22,11 @@ describe('.github/workflows/ci.yml', () => {
     const content = fs.readFileSync(workflowPath, 'utf8');
     expect(content).toContain('Verify comment golden snapshots and test coverage');
   });
+
+  it('runs unit tests via npm test (includes validation performance budget)', () => {
+    const content = fs.readFileSync(workflowPath, 'utf8');
+    expect(content).toContain('npm test');
+    const perfTestPath = path.join(__dirname, 'validation.performance.test.ts');
+    expect(fs.existsSync(perfTestPath)).toBe(true);
+  });
 });
