@@ -239,6 +239,38 @@ inputs:
     required: false
     default: 'warn'
 
+  # ---------------------------------------------------------------------------
+  # Ledger lag / freshness guard (Issue #107)
+  # ---------------------------------------------------------------------------
+  check_ledger_freshness:
+    description: >-
+      When true, TrustBridge fetches the Horizon root endpoint before the
+      account check and compares the latest ledger close time against the
+      current wall clock. A lag beyond `max_ledger_lag_seconds` triggers a
+      warning (or failure, see `ledger_freshness_fail_on_stale`). Off by
+      default so existing USDC workflows are completely unaffected.
+    required: false
+    default: 'false'
+  max_ledger_lag_seconds:
+    description: >-
+      Maximum allowed lag in seconds between Horizon's latest ledger close
+      time and the current wall clock before the freshness guard fires.
+      Defaults to 60 seconds (approximately 5–6 Stellar ledger close cycles
+      at ~5–6 s each). Only used when `check_ledger_freshness` is true.
+    required: false
+    default: '60'
+  ledger_freshness_fail_on_stale:
+    description: >-
+      When true, a stale ledger response (lag > max_ledger_lag_seconds) marks
+      the check as failed. Combined with `fail_on_missing: true` this will
+      fail the workflow step. When false (default), the stale result is
+      informational only — a warning row appears in the checks table and
+      metrics are emitted, but `valid` is unaffected. This lets maintainers
+      observe lag before enforcing it. Only used when
+      `check_ledger_freshness` is true.
+    required: false
+    default: 'false'
+
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
   trustline_exists:

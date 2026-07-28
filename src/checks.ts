@@ -63,6 +63,34 @@ export interface CheckConfig {
    * tightened.
    */
   homeDomainCheckMode?: HomeDomainCheckMode;
+
+  // ---------------------------------------------------------------------------
+  // Ledger lag / freshness guard (Issue #107 — optional, off by default)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When true, TrustBridge fetches the Horizon root endpoint before the
+   * account check and compares `history_latest_ledger_closed_at` against
+   * the current wall-clock time.  Off by default so existing workflows are
+   * unaffected.
+   */
+  checkLedgerFreshness?: boolean;
+
+  /**
+   * Maximum allowed lag in seconds between the latest ledger close time and
+   * the current wall clock before the freshness guard fires.
+   * Defaults to 60 s (≈ 5–6 Stellar ledger close cycles).
+   */
+  maxLedgerLagSeconds?: number;
+
+  /**
+   * When `true` a stale ledger response sets `valid = false` and (when
+   * `fail_on_missing` is also true) fails the workflow step.
+   * When `false` (default / "warn") the result is informational only —
+   * a warning row is added to the checks table and metrics are emitted but
+   * the overall `valid` flag is unaffected.
+   */
+  ledgerFreshnessFailOnStale?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +188,11 @@ export interface ValidationResult {
    * `config.homeDomainCheckEnabled` is true.
    */
   homeDomainCheck?: HomeDomainCheckResult;
+  /**
+   * Ledger freshness / lag check result. Only populated when
+   * `config.checkLedgerFreshness` is true.
+   */
+  ledgerFreshnessResult?: LedgerFreshnessCheckResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +301,28 @@ export function evaluateHomeDomain(
     detail: `Issuer \`home_domain\` is \`${escapeMarkdownInline(rawDomain)}\` ✓`,
     blocksValid: false,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Ledger freshness check result type (Issue #107)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thin wrapper around `FreshnessCheckResult` from `freshness.ts` that adds
+ * the information needed by comment rendering and the checks table.
+ *
+ * - `status`          — 'ok' | 'stale' | 'unknown'
+ * - `lagSeconds`      — measured lag, or null when unavailable
+ * - `latestLedger`    — latest ledger sequence, or null
+ * - `message`         — human-readable detail line (safe for Markdown comment)
+ * - `blocksValid`     — true when `ledgerFreshnessFailOnStale=true` AND status='stale'
+ */
+export interface LedgerFreshnessCheckResult {
+  status: 'ok' | 'stale' | 'unknown';
+  lagSeconds: number | null;
+  latestLedger: number | null;
+  message: string;
+  blocksValid: boolean;
 }
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;

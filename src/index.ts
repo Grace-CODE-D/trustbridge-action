@@ -31,6 +31,8 @@ import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
+import { checkLedgerFreshness } from './freshness';
+import type { LedgerFreshnessCheckResult } from './checks';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -173,6 +175,11 @@ async function run(): Promise<void> {
   const homeDomainCheckMode: HomeDomainCheckMode =
     homeDomainCheckModeRaw === 'strict' ? 'strict' : 'warn';
 
+  // Ledger freshness / lag guard inputs (Issue #107 — optional, off by default)
+  const checkLedgerFreshnessEnabled = parseBooleanInput(core.getInput('check_ledger_freshness'), false);
+  const maxLedgerLagSeconds = parseNumberInput(core.getInput('max_ledger_lag_seconds') || '60', 60, { min: 1, max: 3600 });
+  const ledgerFreshnessFailOnStale = parseBooleanInput(core.getInput('ledger_freshness_fail_on_stale'), false);
+
   if (logInputs) {
     emitInputsLogRecord({
       horizonUrl,
@@ -224,6 +231,9 @@ async function run(): Promise<void> {
     homeDomainCheckEnabled,
     expectedHomeDomain,
     homeDomainCheckMode,
+    checkLedgerFreshness: checkLedgerFreshnessEnabled,
+    maxLedgerLagSeconds,
+    ledgerFreshnessFailOnStale,
   };
 
   core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
@@ -232,6 +242,54 @@ async function run(): Promise<void> {
     core.info(
       `wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ledger freshness / lag guard (Issue #107)
+  // Run before the account fetch so a stale Horizon is flagged before we trust
+  // the balance/trustline data it returns.
+  // ---------------------------------------------------------------------------
+  let freshnessResult: LedgerFreshnessCheckResult | undefined;
+  if (checkLedgerFreshnessEnabled) {
+    core.info(`Checking ledger freshness (max lag: ${maxLedgerLagSeconds}s)…`);
+    try {
+      const raw = await checkLedgerFreshness(horizonUrl, {
+        maxLagSeconds: maxLedgerLagSeconds,
+        timeoutMs: Math.min(horizonTimeoutMs, 10_000),
+      });
+
+      freshnessResult = {
+        status: raw.status,
+        lagSeconds: raw.lagSeconds,
+        latestLedger: raw.latestLedger,
+        message: raw.message,
+        blocksValid: raw.status === 'stale' && ledgerFreshnessFailOnStale,
+      };
+
+      if (raw.status === 'stale') {
+        const logMsg = `Ledger freshness check: STALE — ${raw.message}`;
+        if (ledgerFreshnessFailOnStale) {
+          core.error(logMsg);
+        } else {
+          core.warning(logMsg);
+        }
+      } else if (raw.status === 'unknown') {
+        core.warning(`Ledger freshness check: UNKNOWN — ${raw.message}`);
+      } else {
+        core.info(`Ledger freshness check: OK — ${raw.message}`);
+      }
+    } catch (freshnessError) {
+      // Fail-open: a freshness check error never blocks the account check.
+      const msg = getErrorMessage(freshnessError);
+      core.warning(`Ledger freshness check failed (proceeding fail-open): ${msg}`);
+      freshnessResult = {
+        status: 'unknown',
+        lagSeconds: null,
+        latestLedger: null,
+        message: `Freshness check error: ${msg}. Proceeding (fail-open).`,
+        blocksValid: false,
+      };
+    }
   }
 
   let result;
@@ -304,6 +362,15 @@ async function run(): Promise<void> {
   // result is undefined only when the run was cancelled and we returned early above.
   if (result == null) {
     return;
+  }
+
+  // Attach the freshness result to every result path so comment.ts can render it.
+  if (freshnessResult !== undefined) {
+    result = { ...result, ledgerFreshnessResult: freshnessResult };
+    // When stale AND fail-on-stale is enabled, override valid so the gate fires.
+    if (freshnessResult.blocksValid && result.valid) {
+      result = { ...result, valid: false };
+    }
   }
 
   setValidationOutputs(result);
