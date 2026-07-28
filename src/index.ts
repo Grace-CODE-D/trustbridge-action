@@ -108,6 +108,13 @@ async function run(): Promise<void> {
     });
   }
 
+  const urlValidation = validateUrl(horizonUrl, 'horizon_url', {
+    protocols: ['https', 'http'],
+  });
+  if (!urlValidation.valid) {
+    throw new Error(`Invalid horizon_url: ${urlValidation.errors.join('; ')}`);
+  }
+
   validateStellarAddress(stellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 

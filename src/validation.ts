@@ -275,7 +275,7 @@ export function validateAssetCode(code: string): ValidationResult {
 export function validateUrl(
   url: string,
   fieldName: string,
-  options: { protocols?: string[] } = {},
+  options: { protocols?: string[]; allowPathTraversal?: boolean } = {},
 ): ValidationResult {
   return withSpan(
     'validateUrl',
@@ -290,17 +290,38 @@ export function validateUrl(
         return { valid: false, errors, warnings };
       }
 
+      let parsed: URL;
       try {
-        const parsed = new URL(trimmed);
-        const allowedProtos = options.protocols || ['http', 'https'];
-
-        if (!allowedProtos.includes(parsed.protocol.replace(':', ''))) {
-          errors.push(
-            `${fieldName} must use one of these protocols: ${allowedProtos.join(', ')}`,
-          );
-        }
+        parsed = new URL(trimmed);
       } catch {
         errors.push(`${fieldName} is not a valid URL: "${trimmed}"`);
+        return { valid: false, errors, warnings };
+      }
+
+      const allowedProtos = options.protocols || ['http', 'https'];
+
+      if (!allowedProtos.includes(parsed.protocol.replace(':', ''))) {
+        errors.push(
+          `${fieldName} must use one of these protocols: ${allowedProtos.join(', ')}`,
+        );
+      }
+
+      if (parsed.username || parsed.password) {
+        errors.push(
+          `${fieldName} must not contain embedded credentials (userinfo)`,
+        );
+      }
+
+      if (!options.allowPathTraversal) {
+        const pathSegments = parsed.pathname.split('/');
+        for (const segment of pathSegments) {
+          if (segment === '..') {
+            errors.push(
+              `${fieldName} must not contain path traversal segments ("..")`,
+            );
+            break;
+          }
+        }
       }
 
       return {

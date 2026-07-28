@@ -287,4 +287,148 @@ If using `GITHUB_TOKEN`, no extra secret is required beyond workflow permissions
 
 ---
 
-[← Back to README](../README.md)
+## GitHub App token guide
+
+Some organizations restrict the default `GITHUB_TOKEN` to prevent cross-repo access or to enforce finer-grained permissions. In these cases, use a **GitHub App installation token** instead.
+
+### Why use a GitHub App token?
+
+| Concern | `GITHUB_TOKEN` | GitHub App token |
+|---------|---------------|------------------|
+| Cross-repo access | Limited to the current repo | Can be scoped to specific repos |
+| Permission granularity | Fixed per-event permissions | Customizable per-app |
+| Org policy compliance | May be blocked by org settings | Allowed when app is installed |
+| Token rotation | Automatic (short-lived) | Manual rotation required |
+
+### Setup steps
+
+1. **Create a GitHub App** in your organization or personal account:
+   - Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
+   - Set the **Homepage URL** to your repo URL
+   - Set the **Webhook URL** to a placeholder (not required for this use case)
+
+2. **Grant permissions** to the App:
+   - Under **Repository permissions**, grant:
+     - **Issues**: `Read and write`
+     - **Metadata**: `Read-only`
+   - Under **Organization permissions**, grant only what is needed
+
+3. **Install the App** on the target repository:
+   - On the App settings page, click **Install** and select the repository
+
+4. **Generate an installation access token** in your workflow:
+
+```yaml
+- name: Generate GitHub App token
+  id: app-token
+  uses: actions/create-github-app-token@v1
+  with:
+    app-id: ${{ secrets.GITHUB_APP_ID }}
+    private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+```
+
+5. **Pass the token** to the action:
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ steps.app-token.outputs.token }}
+    fail_on_missing: true
+```
+
+### Security warnings
+
+- **Do not log the token.** The action redacts `github_token` values in diagnostic output, but avoid printing it in workflow logs.
+- **Rotate keys regularly.** GitHub App private keys should be rotated on a schedule. Delete old keys after generating new ones.
+- **Use least privilege.** Grant only the permissions the App needs. The action requires `issues: write` to post comments.
+- **Store secrets in GitHub Secrets.** Never commit private keys or App IDs to the repository.
+
+### Events without issue context
+
+When the action runs in a `workflow_dispatch` or `push` context (not an issue event), there is no issue to comment on. The action still performs all checks and sets outputs, but comment posting is skipped with a warning. This applies regardless of token type.
+
+---
+
+## Org-level policy inheritance
+
+Integrators managing many repositories can centralize TrustBridge policy (asset, reserve, fail behavior) using **GitHub organization variables and secrets**, so child repos don't need to re-specify everything.
+
+### Naming conventions
+
+| Action input | Org variable/secret name | Description |
+|-------------|--------------------------|-------------|
+| `horizon_url` | `TRUSTBRIDGE_HORIZON_URL` | Horizon API base URL |
+| `asset_code` | `TRUSTBRIDGE_ASSET_CODE` | Asset code for trustline verification |
+| `asset_issuer` | `TRUSTBRIDGE_ASSET_ISSUER` | Issuer Stellar address |
+| `min_xlm_reserve` | `TRUSTBRIDGE_MIN_XLM_RESERVE` | Minimum native XLM balance required |
+| `fail_on_missing` | `TRUSTBRIDGE_FAIL_ON_MISSING` | `true` to fail, `false` to warn |
+| `horizon_timeout_ms` | `TRUSTBRIDGE_HORIZON_TIMEOUT_MS` | Horizon request timeout |
+| `sticky_comment` | `TRUSTBRIDGE_STICKY_COMMENT` | Update previous comment instead of posting new one |
+| `wait_until_funded` | `TRUSTBRIDGE_WAIT_UNTIL_FUNDED` | Poll until account is funded |
+
+### Reusable workflow example
+
+Create `.github/workflows/trustbridge.yml` in the organization template repo:
+
+```yaml
+name: TrustBridge — Stellar wallet check
+
+on:
+  issues:
+    types: [assigned]
+  workflow_dispatch:
+    inputs:
+      stellar_address:
+        description: 'Stellar G-address to validate'
+        required: true
+
+jobs:
+  verify-stellar-account:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: TrustBridge check
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ inputs.stellar_address }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          horizon_url: ${{ vars.TRUSTBRIDGE_HORIZON_URL }}
+          asset_code: ${{ vars.TRUSTBRIDGE_ASSET_CODE }}
+          asset_issuer: ${{ vars.TRUSTBRIDGE_ASSET_ISSUER }}
+          min_xlm_reserve: ${{ vars.TRUSTBRIDGE_MIN_XLM_RESERVE }}
+          fail_on_missing: ${{ vars.TRUSTBRIDGE_FAIL_ON_MISSING }}
+          horizon_timeout_ms: ${{ vars.TRUSTBRIDGE_HORIZON_TIMEOUT_MS }}
+          sticky_comment: ${{ vars.TRUSTBRIDGE_STICKY_COMMENT }}
+          wait_until_funded: ${{ vars.TRUSTBRIDGE_WAIT_UNTIL_FUNDED }}
+```
+
+### Override precedence
+
+Explicit action inputs always win over org variable defaults. The precedence order is:
+
+1. **Action input** (explicit value in the workflow step)
+2. **Org variable** (set via `vars` or `secrets`)
+3. **Default value** (the built-in default in `action.yml`)
+
+This means a repo can override the org default by setting an explicit input, while repos that omit the input inherit the org-level policy.
+
+### Using org secrets for sensitive values
+
+For values that should not be visible in the repository settings UI (e.g., custom Horizon URLs with embedded tokens), use **GitHub Secrets** instead of Variables:
+
+```yaml
+horizon_url: ${{ secrets.TRUSTBRIDGE_HORIZON_URL }}
+```
+
+Secrets are masked in workflow logs and are not visible to repository collaborators.
+
+### Org policy enforcement
+
+GitHub organization rulesets can enforce that certain workflows use the centralized TrustBridge configuration. Mention this as a possibility — rulesets can require the `trustbridge.yml` config file or specific workflow inputs to be present, but TrustBridge itself does not enforce rulesets programmatically.
+
+---
+
+## Extracting Stellar addresses from issues
