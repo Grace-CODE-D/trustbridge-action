@@ -472,7 +472,7 @@ describe('corePlugins full pipeline', () => {
     expect(result.accountFunded).toBe(true);
     expect(result.trustlineExists).toBe(true);
     expect(result.xlmReserveMet).toBe(true);
-    expect(result.checks).toHaveLength(3);
+    expect(result.checks).toHaveLength(4);
     expect(result.remediation).toBeUndefined();
   });
 
@@ -506,12 +506,13 @@ describe('corePlugins full pipeline', () => {
     expect(result.remediation).toMatch(/Send at least/i);
   });
 
-  it('exports exactly three core plugins in order', () => {
-    expect(corePlugins).toHaveLength(3);
+  it('exports exactly four core plugins in order', () => {
+    expect(corePlugins).toHaveLength(4);
     expect(corePlugins.map((p) => p.id)).toEqual([
       'trustbridge/account-funded',
       'trustbridge/trustline',
       'trustbridge/xlm-reserve',
+      'trustbridge/home-domain',
     ]);
   });
 });
