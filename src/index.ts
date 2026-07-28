@@ -16,6 +16,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { lookupAddressFromContract, ContractLookupError } from './soroban';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -56,12 +57,17 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
-  const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+  void core.getInput('trustbridge_config_path'); // reserved for future config-file integration
   const githubToken = core.getInput('github_token', { required: true });
 
   // SEP-0007 wallet deep links (Issue #44)
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Soroban contract registry (Issue #7)
+  const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
+  const contractId = core.getInput('contract_id') || '';
+  const githubUsername = core.getInput('github_username') || '';
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -108,7 +114,37 @@ async function run(): Promise<void> {
     });
   }
 
-  validateStellarAddress(stellarAddress);
+  // Soroban contract registry lookup — resolve GitHub username → G-address
+  // before running Horizon checks. Falls back to stellar_address_input on
+  // any error so existing non-contract workflows are unaffected.
+  let resolvedAddress = stellarAddress;
+  if (sorobanRpcUrl && contractId && githubUsername) {
+    try {
+      const lookupResult = await lookupAddressFromContract(githubUsername, {
+        sorobanRpcUrl,
+        contractId,
+        timeoutMs: horizonTimeoutMs,
+      });
+      if (lookupResult.fromRegistry && lookupResult.address) {
+        core.info(
+          `[TrustBridge] Registry resolved @${githubUsername} → ${lookupResult.address}`,
+        );
+        resolvedAddress = lookupResult.address;
+      } else {
+        core.info(
+          `[TrustBridge] @${githubUsername} not found in registry — using stellar_address_input`,
+        );
+      }
+    } catch (err) {
+      const msg = getErrorMessage(err);
+      const retryable = err instanceof ContractLookupError && err.retryable;
+      core.warning(
+        `[TrustBridge] Contract registry lookup failed (${retryable ? 'retryable' : 'non-retryable'}): ${msg}. Falling back to stellar_address_input.`,
+      );
+    }
+  }
+
+  validateStellarAddress(resolvedAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
@@ -136,7 +172,7 @@ async function run(): Promise<void> {
     horizonUrl,
   };
 
-  core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
+  core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -158,7 +194,7 @@ async function run(): Promise<void> {
     const account = waitUntilFunded
       ? await waitForFundedAccount(
           horizonUrl,
-          stellarAddress,
+          resolvedAddress,
           {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
@@ -172,11 +208,11 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
+      : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
     if (error instanceof HorizonError && error.statusCode === 404) {
-      result = unfundedAccountResult(stellarAddress, checkConfig);
+      result = unfundedAccountResult(resolvedAddress, checkConfig);
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       result = horizonFailureResult(error.message, checkConfig);
@@ -191,7 +227,7 @@ async function run(): Promise<void> {
 
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
-    stellarAddress,
+    stellarAddress: resolvedAddress,
     horizonUrl,
     failOnMissing,
     stickyComment,
