@@ -2,6 +2,8 @@
 
 Use this lightweight checklist before tagging a new action release.
 
+Related docs: [Breaking Changes](BREAKING_CHANGES.md) · [License Report](LICENSE_REPORT.md) · [Maintainer Checklist](MAINTAINER_CHECKLIST.md)
+
 ## Verify
 
 - Run the unit test suite (`npm test`).
@@ -11,6 +13,7 @@ Use this lightweight checklist before tagging a new action release.
 - Confirm `action.yml` inputs and README inputs stay aligned.
 - Confirm the release workflow still passes on the tag you plan to ship. The repo-level release job is a dry run gate for `v*` tags and should stay green before moving a major tag.
 - Keep an eye on XLM fee buffer guidance in the docs if the validation defaults change; the release checklist should point maintainers back to the current remediation copy.
+- **License report**: verify the release workflow attached `licenses-report.json` and `licenses-report.md` to the GitHub Release assets. If a new runtime dependency was added since the last release, check its SPDX identifier against the compatibility table in [docs/LICENSE_REPORT.md](LICENSE_REPORT.md) before publishing.
 
 ## Tagging
 
