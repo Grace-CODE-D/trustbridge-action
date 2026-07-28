@@ -41,6 +41,7 @@ export declare const STICKY_COMMENT_MARKER_LEGACY = "<!-- trustbridge-action:sti
  * one.
  */
 export declare const STICKY_COMMENT_MARKER = "<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->";
+export declare const MAX_COMMENT_LENGTH = 64000;
 export declare function formatCommentBody(result: ValidationResult, config: CommentConfig): string;
 /**
  * Build a hardened metrics JSON string safe for embedding in a GitHub issue

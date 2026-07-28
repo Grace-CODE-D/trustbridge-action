@@ -166,6 +166,31 @@ describe('formatCommentBody', () => {
     expect(body).toContain('Passed checks: 0/1');
     expect(body).toContain('Failed checks: 1');
   });
+
+  it('truncates the remediation section if the comment exceeds MAX_COMMENT_LENGTH', () => {
+    // Generate an artificially huge remediation string (70,000 chars)
+    const hugeRemediation = 'A'.repeat(70000);
+    const oversizedResult: ValidationResult = {
+      ...validationResult,
+      remediation: hugeRemediation,
+    };
+
+    const body = formatCommentBody(oversizedResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+    });
+
+    // The length should be bounded by MAX_COMMENT_LENGTH (plus/minus small variance due to newlines/spacing if our logic is strictly exact)
+    // We enforce it fits in the max budget exactly or is slightly smaller
+    expect(body.length).toBeLessThanOrEqual(64000);
+    
+    // Ensure the notice is present
+    expect(body).toContain('[Truncated due to GitHub length limits. See workflow logs for full details.]');
+    
+    // Ensure the pass/fail gate is still present
+    expect(body).toContain('### Validation gate');
+    expect(body).toContain('Failed checks: 1');
+  });
 });
 
 function makeOctokit(overrides: Record<string, jest.Mock> = {}) {
