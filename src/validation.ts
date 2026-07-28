@@ -643,3 +643,168 @@ export function validateTrustbridgeConfig(
 
   return combineResults(...results);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #15 — Dynamic reserve engine
+// ---------------------------------------------------------------------------
+//
+// A static `min_xlm_reserve` input assumes a fixed number of ledger entries
+// (trustlines, offers, data entries, sponsorships) on the account being
+// checked. In practice an account's *actual* network-enforced minimum
+// balance grows with every subentry and sponsorship it carries — Stellar
+// computes it as:
+//
+//   minBalance = (2 + numSubentries + numSponsoring - numSponsored) * baseReserve
+//
+// (base reserve is 0.5 XLM on both testnet and pubnet as of this writing).
+// If the static config value is lower than this real requirement, a check
+// can report "reserve met" for an account that is one payout away from
+// failing at Horizon submission time. The dynamic reserve engine recomputes
+// the true requirement from live account state so payout gating reflects
+// reality instead of a maintainer's guess made when the workflow was set up.
+
+/** Live Stellar reserve-relevant counters read from a Horizon account. */
+export interface AccountReserveState {
+  /** Number of subentries (trustlines, offers, data entries, signers). */
+  subentryCount: number;
+  /** Number of reserve entries this account is sponsoring for others. */
+  numSponsoring: number;
+  /** Number of this account's own reserve entries sponsored by others. */
+  numSponsored: number;
+}
+
+/** Result of a dynamic reserve computation, extending the base validation shape. */
+export interface DynamicReserveResult extends ValidationResult {
+  /** Network-enforced base reserve requirement computed from account state. */
+  baseReserveRequirement: number;
+  /** Additional safety buffer applied on top of the base requirement. */
+  bufferXlm: number;
+  /** baseReserveRequirement + bufferXlm — the total XLM the account must hold. */
+  totalRequirement: number;
+}
+
+/** Threshold below which a passing check still emits a "thin margin" warning. */
+const RESERVE_MARGIN_WARNING_XLM = 0.5;
+
+function sanitizeReserveCount(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** Default base reserve (XLM per ledger entry) on the Stellar network. */
+const STELLAR_BASE_RESERVE_XLM_DEFAULT = 0.5;
+
+/**
+ * Computes the real Stellar network minimum balance for an account from its
+ * live subentry/sponsorship counters, per the protocol formula:
+ *   (2 + subentries + sponsoring - sponsored) * baseReserve
+ *
+ * Malformed (negative or non-finite) counters are treated as 0 rather than
+ * allowed to reduce the computed requirement — a corrupt or partial Horizon
+ * response must never cause the engine to under-report what's required.
+ */
+export function computeBaseReserveRequirement(
+  state: AccountReserveState,
+  baseReserveXlm: number = STELLAR_BASE_RESERVE_XLM_DEFAULT,
+): number {
+  const subentryCount = sanitizeReserveCount(state.subentryCount);
+  const numSponsoring = sanitizeReserveCount(state.numSponsoring);
+  const numSponsored = sanitizeReserveCount(state.numSponsored);
+
+  const reserveEntries = 2 + subentryCount + numSponsoring - numSponsored;
+  return Math.max(0, reserveEntries) * baseReserveXlm;
+}
+
+/**
+ * Validates that an account's actual XLM balance meets the dynamically
+ * computed reserve requirement (base reserve for its live subentry/
+ * sponsorship state, plus an optional safety buffer).
+ *
+ * Records an OTel-style span. Attributes carry only counts and computed
+ * numbers — never a raw account balance or address.
+ */
+export function validateDynamicReserve(
+  state: AccountReserveState,
+  actualXlmBalance: number,
+  options: { bufferXlm?: number; baseReserveXlm?: number } = {},
+): DynamicReserveResult {
+  const startTimeMs = Date.now();
+  const bufferXlm = options.bufferXlm !== undefined && Number.isFinite(options.bufferXlm) && options.bufferXlm > 0
+    ? options.bufferXlm
+    : 0;
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!Number.isFinite(actualXlmBalance)) {
+    errors.push(`actualXlmBalance must be a finite number, got: ${actualXlmBalance}`);
+  }
+  for (const [field, value] of Object.entries(state) as [string, number][]) {
+    if (!Number.isFinite(value) || value < 0) {
+      warnings.push(`${field} was invalid (${value}) and was treated as 0`);
+    }
+  }
+
+  const baseReserveRequirement = computeBaseReserveRequirement(state, options.baseReserveXlm);
+  const totalRequirement = baseReserveRequirement + bufferXlm;
+  const safeActual = Number.isFinite(actualXlmBalance) ? actualXlmBalance : 0;
+  const met = errors.length === 0 && safeActual >= totalRequirement;
+
+  if (errors.length === 0 && !met) {
+    errors.push(
+      `XLM balance ${safeActual} is below the dynamically computed reserve requirement of ${totalRequirement} ` +
+        `(base ${baseReserveRequirement} + buffer ${bufferXlm})`,
+    );
+  } else if (met && safeActual - totalRequirement < RESERVE_MARGIN_WARNING_XLM) {
+    warnings.push(
+      `XLM balance ${safeActual} clears the reserve requirement of ${totalRequirement} by less than ` +
+        `${RESERVE_MARGIN_WARNING_XLM} XLM — consider funding additional headroom before future payouts.`,
+    );
+  }
+
+  const result: DynamicReserveResult = {
+    valid: errors.length === 0 && met,
+    errors,
+    warnings,
+    baseReserveRequirement,
+    bufferXlm,
+    totalRequirement,
+  };
+
+  recordSpan({
+    name: 'validateDynamicReserve',
+    attributes: {
+      subentryCount: sanitizeReserveCount(state.subentryCount),
+      numSponsoring: sanitizeReserveCount(state.numSponsoring),
+      numSponsored: sanitizeReserveCount(state.numSponsored),
+      baseReserveRequirement,
+      bufferXlm,
+      totalRequirement,
+      valid: result.valid,
+      errorCount: errors.length,
+    },
+    status: result.valid ? 'ok' : 'error',
+    durationMs: Date.now() - startTimeMs,
+    startTimeMs,
+    error: errors.length > 0 ? errors[0] : undefined,
+  });
+
+  return result;
+}
+
+/**
+ * Computes the effective minimum reserve to enforce for an account: the
+ * greater of the maintainer-configured static floor and the dynamically
+ * computed requirement (base reserve for current account state, plus any
+ * configured buffer). Never returns less than `configuredMinXlmReserve`, so
+ * enabling the dynamic engine can only raise the bar, never lower it below
+ * what a maintainer explicitly set.
+ */
+export function computeEffectiveReserveRequirement(
+  configuredMinXlmReserve: number,
+  state: AccountReserveState,
+  options: { bufferXlm?: number; baseReserveXlm?: number } = {},
+): number {
+  const dynamic = computeBaseReserveRequirement(state, options.baseReserveXlm) + (options.bufferXlm ?? 0);
+  const floor = Number.isFinite(configuredMinXlmReserve) ? configuredMinXlmReserve : 0;
+  return Math.max(floor, dynamic);
+}

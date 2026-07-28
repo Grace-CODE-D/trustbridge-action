@@ -148,3 +148,55 @@ export interface TrustbridgeConsumerConfig {
  * so the caller can surface them all at once rather than one-at-a-time.
  */
 export declare function validateTrustbridgeConfig(raw: Record<string, unknown>): ValidationResult;
+/** Live Stellar reserve-relevant counters read from a Horizon account. */
+export interface AccountReserveState {
+    /** Number of subentries (trustlines, offers, data entries, signers). */
+    subentryCount: number;
+    /** Number of reserve entries this account is sponsoring for others. */
+    numSponsoring: number;
+    /** Number of this account's own reserve entries sponsored by others. */
+    numSponsored: number;
+}
+/** Result of a dynamic reserve computation, extending the base validation shape. */
+export interface DynamicReserveResult extends ValidationResult {
+    /** Network-enforced base reserve requirement computed from account state. */
+    baseReserveRequirement: number;
+    /** Additional safety buffer applied on top of the base requirement. */
+    bufferXlm: number;
+    /** baseReserveRequirement + bufferXlm — the total XLM the account must hold. */
+    totalRequirement: number;
+}
+/**
+ * Computes the real Stellar network minimum balance for an account from its
+ * live subentry/sponsorship counters, per the protocol formula:
+ *   (2 + subentries + sponsoring - sponsored) * baseReserve
+ *
+ * Malformed (negative or non-finite) counters are treated as 0 rather than
+ * allowed to reduce the computed requirement — a corrupt or partial Horizon
+ * response must never cause the engine to under-report what's required.
+ */
+export declare function computeBaseReserveRequirement(state: AccountReserveState, baseReserveXlm?: number): number;
+/**
+ * Validates that an account's actual XLM balance meets the dynamically
+ * computed reserve requirement (base reserve for its live subentry/
+ * sponsorship state, plus an optional safety buffer).
+ *
+ * Records an OTel-style span. Attributes carry only counts and computed
+ * numbers — never a raw account balance or address.
+ */
+export declare function validateDynamicReserve(state: AccountReserveState, actualXlmBalance: number, options?: {
+    bufferXlm?: number;
+    baseReserveXlm?: number;
+}): DynamicReserveResult;
+/**
+ * Computes the effective minimum reserve to enforce for an account: the
+ * greater of the maintainer-configured static floor and the dynamically
+ * computed requirement (base reserve for current account state, plus any
+ * configured buffer). Never returns less than `configuredMinXlmReserve`, so
+ * enabling the dynamic engine can only raise the bar, never lower it below
+ * what a maintainer explicitly set.
+ */
+export declare function computeEffectiveReserveRequirement(configuredMinXlmReserve: number, state: AccountReserveState, options?: {
+    bufferXlm?: number;
+    baseReserveXlm?: number;
+}): number;

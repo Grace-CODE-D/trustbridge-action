@@ -25,7 +25,12 @@ import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
 import { globalMetrics } from './metrics';
-import { validateContractAddress, clearSpans, getSpans } from './validation';
+import {
+  validateContractAddress,
+  clearSpans,
+  getSpans,
+  computeEffectiveReserveRequirement,
+} from './validation';
 
 // ---------------------------------------------------------------------------
 // Wave #38: Dashboard webhook payload (dist e2e harness)
@@ -174,16 +179,12 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
-  // Wave #30: comment_mode (dry-run support)
-  const commentMode = (core.getInput('comment_mode') || 'post').trim().toLowerCase();
-  if (!['post', 'dry-run', 'off'].includes(commentMode)) {
-    throw new Error(
-      `comment_mode must be one of: "post", "dry-run", "off". Received: "${commentMode}"`,
-    );
-  }
-
-  // Wave #38: dashboard webhook URL
-  const dashboardWebhookUrl = core.getInput('dashboard_webhook_url') || '';
+  // Dynamic reserve engine (Issue #15)
+  const dynamicReserve = parseBooleanInput(core.getInput('dynamic_reserve'), false);
+  const reserveBufferXlm = parseNumberInput(core.getInput('reserve_buffer_xlm'), 0, {
+    min: 0,
+    max: 1000,
+  });
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -219,8 +220,8 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
     sep0007DeepLinks,
-    commentMode,
-    hasDashboardWebhook: Boolean(dashboardWebhookUrl),
+    dynamicReserve,
+    reserveBufferXlm,
   });
 
   // Wave #28: auto-extract Stellar address from the issue body when
@@ -374,9 +375,32 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, resolvedStellarAddress, horizonOptions);
-    globalMetrics.stopTimer('horizon_fetch');
-    result = runAccountChecks(account, checkConfig);
+      : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
+
+    let effectiveCheckConfig = checkConfig;
+    if (dynamicReserve) {
+      const effectiveMinXlmReserve = computeEffectiveReserveRequirement(
+        checkConfig.minXlmReserve,
+        {
+          subentryCount: account.subentry_count,
+          numSponsoring: account.num_sponsoring,
+          numSponsored: account.num_sponsored,
+        },
+        { bufferXlm: reserveBufferXlm },
+      );
+      effectiveCheckConfig = { ...checkConfig, minXlmReserve: effectiveMinXlmReserve };
+      logger.debug('Dynamic reserve engine computed effective requirement', {
+        component: 'index',
+        configuredMinXlmReserve: checkConfig.minXlmReserve,
+        reserveBufferXlm,
+        effectiveMinXlmReserve,
+        subentryCount: account.subentry_count,
+        numSponsoring: account.num_sponsoring,
+        numSponsored: account.num_sponsored,
+      });
+    }
+
+    result = runAccountChecks(account, effectiveCheckConfig);
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
