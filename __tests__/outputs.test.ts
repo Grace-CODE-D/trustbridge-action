@@ -17,6 +17,7 @@ describe('toActionOutputs', () => {
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: '',
+      full_report_path: '',
     });
   });
 
@@ -26,6 +27,24 @@ describe('toActionOutputs', () => {
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: 'https://github.com/comment',
+      full_report_path: '',
     });
+  });
+
+  it('includes full_report_path when provided', () => {
+    expect(
+      toActionOutputs(result, 'https://github.com/comment', '/workspace/trustbridge-report.md'),
+    ).toEqual({
+      trustline_exists: 'true',
+      xlm_balance: '5.0000000',
+      account_funded: 'true',
+      comment_url: 'https://github.com/comment',
+      full_report_path: '/workspace/trustbridge-report.md',
+    });
+  });
+
+  it('leaves full_report_path empty when not provided', () => {
+    const outputs = toActionOutputs(result, undefined, undefined);
+    expect(outputs.full_report_path).toBe('');
   });
 });

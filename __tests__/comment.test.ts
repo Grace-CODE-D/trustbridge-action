@@ -1,10 +1,17 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as github from '@actions/github';
 import {
   STICKY_COMMENT_MARKER,
   TRUSTBRIDGE_FOOTER,
+  COMMENT_SIZE_LIMIT_BYTES,
+  COMMENT_TRUNCATION_NOTICE_BYTES,
   findStickyComment,
   formatCommentBody,
   postIssueComment,
+  buildTruncatedCommentBody,
+  writeFullReport,
 } from '../src/comment';
 import { ValidationResult } from '../src/checks';
 
@@ -14,6 +21,16 @@ jest.mock('@actions/github', () => ({
     repo: { owner: 'test-owner', repo: 'test-repo' },
   },
   getOctokit: jest.fn(),
+}));
+
+jest.mock('@actions/core', () => ({
+  info: jest.fn(),
+  warning: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  setOutput: jest.fn(),
+  setFailed: jest.fn(),
+  getInput: jest.fn(),
 }));
 
 const validationResult: ValidationResult = {
@@ -293,5 +310,130 @@ describe('postIssueComment', () => {
     expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-3');
     expect(octokit.rest.issues.createComment).toHaveBeenCalled();
     expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Oversize comment truncation
+// ---------------------------------------------------------------------------
+
+describe('COMMENT_SIZE_LIMIT_BYTES', () => {
+  it('is 65536 (GitHub comment size limit)', () => {
+    expect(COMMENT_SIZE_LIMIT_BYTES).toBe(65536);
+  });
+
+  it('leaves enough room for the truncation notice', () => {
+    expect(COMMENT_SIZE_LIMIT_BYTES).toBeGreaterThan(COMMENT_TRUNCATION_NOTICE_BYTES);
+  });
+});
+
+describe('buildTruncatedCommentBody', () => {
+  const reportPath = 'trustbridge-report.md';
+
+  it('returns a body within COMMENT_SIZE_LIMIT_BYTES when given an oversized input', () => {
+    const oversizedBody = 'x'.repeat(COMMENT_SIZE_LIMIT_BYTES + 10000);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(Buffer.byteLength(truncated, 'utf8')).toBeLessThanOrEqual(COMMENT_SIZE_LIMIT_BYTES);
+  });
+
+  it('includes the truncation notice', () => {
+    const oversizedBody = 'A'.repeat(COMMENT_SIZE_LIMIT_BYTES + 1000);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(truncated).toContain('⚠️ Report truncated');
+    expect(truncated).toContain(reportPath);
+  });
+
+  it('includes a link to USAGE.md in the truncation notice', () => {
+    const oversizedBody = 'B'.repeat(COMMENT_SIZE_LIMIT_BYTES + 500);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(truncated).toContain('USAGE.md');
+  });
+
+  it('preserves the TrustBridge footer so the sticky marker is present', () => {
+    const oversizedBody = 'C'.repeat(COMMENT_SIZE_LIMIT_BYTES + 500);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(truncated).toContain('trustbridge-action');
+  });
+
+  it('embeds the custom report path in the notice', () => {
+    const oversizedBody = 'D'.repeat(COMMENT_SIZE_LIMIT_BYTES + 500);
+    const customPath = 'artifacts/my-report.md';
+    const truncated = buildTruncatedCommentBody(oversizedBody, customPath);
+    expect(truncated).toContain(customPath);
+  });
+
+  it('cuts on a line boundary (no partial lines in truncated content)', () => {
+    const line = 'line content here\n';
+    const repeated = line.repeat(Math.ceil((COMMENT_SIZE_LIMIT_BYTES + 5000) / line.length));
+    const truncated = buildTruncatedCommentBody(repeated, reportPath);
+    const noticeSeparator = '---\n> **⚠️ Report truncated**';
+    const cutIndex = truncated.indexOf(noticeSeparator);
+    if (cutIndex > 0) {
+      const before = truncated.slice(0, cutIndex);
+      expect(before.endsWith('\n') || before.endsWith('\n\n')).toBe(true);
+    }
+  });
+
+  it('stays well under the limit for a body exactly at the boundary', () => {
+    const exactBody = 'E'.repeat(COMMENT_SIZE_LIMIT_BYTES);
+    const truncated = buildTruncatedCommentBody(exactBody, reportPath);
+    expect(Buffer.byteLength(truncated, 'utf8')).toBeLessThanOrEqual(COMMENT_SIZE_LIMIT_BYTES);
+  });
+});
+
+describe('writeFullReport', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('writes the full body to the specified path and returns the resolved path', () => {
+    const outputPath = path.join(tmpDir, 'report.md');
+    const body = '# Full Report\n\nThis is the full content.';
+
+    const result = writeFullReport(body, outputPath);
+
+    expect(result).toBe(outputPath);
+    expect(fs.existsSync(outputPath)).toBe(true);
+    expect(fs.readFileSync(outputPath, 'utf8')).toBe(body);
+  });
+
+  it('creates intermediate directories as needed', () => {
+    const nestedPath = path.join(tmpDir, 'nested', 'deep', 'report.md');
+    const body = 'nested report content';
+
+    const result = writeFullReport(body, nestedPath);
+
+    expect(result).toBe(nestedPath);
+    expect(fs.existsSync(nestedPath)).toBe(true);
+  });
+
+  it('returns undefined and warns when the path is not writable', () => {
+    const { warning } = jest.requireMock('@actions/core') as { warning: jest.Mock };
+    warning.mockClear();
+
+    // Use a path with a null byte to force a write error cross-platform
+    const badPath = path.join(tmpDir, '\0invalid');
+    const result = writeFullReport('body', badPath);
+
+    expect(result).toBeUndefined();
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to write full validation report'),
+    );
+  });
+
+  it('preserves the exact byte content of the full body', () => {
+    const body = '# Report\n\nUnicode: こんにちは 🌟\n\nEnd.';
+    const outputPath = path.join(tmpDir, 'unicode-report.md');
+
+    writeFullReport(body, outputPath);
+
+    const written = fs.readFileSync(outputPath, 'utf8');
+    expect(written).toBe(body);
   });
 });

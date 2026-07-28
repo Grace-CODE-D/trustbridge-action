@@ -214,6 +214,67 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
+## Handling oversized reports
+
+Long remediation sections (multi-check failures, expert diagnostics, batch results) can push the comment body past GitHub's 65,536-byte limit. When that happens, TrustBridge automatically:
+
+1. Writes the **full** validation report to a workspace file (`trustbridge-report.md` by default).
+2. Posts a **truncated** comment with a notice explaining where to find the full report.
+3. Sets the `full_report_path` output to the absolute path of the written file.
+
+The file is only written when the body exceeds the limit — normal short comments are unchanged.
+
+### Uploading the report as a workflow artifact
+
+Add an `actions/upload-artifact` step **after** the TrustBridge step to make the full report available for download from the Actions run summary:
+
+```yaml
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: TrustBridge check
+        id: trustbridge
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.addr.outputs.value }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: customise where the full report is written
+          report_output_path: trustbridge-report.md
+
+      - name: Upload full validation report
+        if: steps.trustbridge.outputs.full_report_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustbridge-full-report
+          path: ${{ steps.trustbridge.outputs.full_report_path }}
+          retention-days: 7
+```
+
+The `if:` condition means the upload step is skipped entirely on normal runs where the comment fit within the limit.
+
+### Configuring the report path
+
+Use the `report_output_path` input to change where the file is written:
+
+```yaml
+with:
+  report_output_path: reports/trustbridge-${{ github.run_id }}.md
+```
+
+Intermediate directories are created automatically. The path can be workspace-relative or absolute.
+
+### Outputs added by this feature
+
+| Output | Description |
+| ------ | ----------- |
+| `full_report_path` | Absolute path of the written report file, or empty string when no file was written |
+
+---
+
 ## Extracting Stellar addresses from issues
 
 Common patterns:

@@ -133,6 +133,15 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  report_output_path:
+    description: >-
+      Workspace-relative (or absolute) path where the full validation report
+      is written when the comment body exceeds GitHub's size limit.  The file
+      can then be uploaded as a workflow artifact using
+      `actions/upload-artifact`.  Has no effect when the comment is within
+      the size limit.  Defaults to `trustbridge-report.md`.
+    required: false
+    default: 'trustbridge-report.md'
 
 outputs:
   trustline_exists:
@@ -143,6 +152,11 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
+  full_report_path:
+    description: >-
+      Absolute path of the full validation report file written to the workflow
+      workspace when the comment body exceeded GitHub's size limit.  Empty
+      when the comment was within the limit and no file was written.
 
 runs:
   using: 'node20'

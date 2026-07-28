@@ -8,7 +8,7 @@ import {
   validateStellarAddress,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
-import { formatCommentBody, postIssueComment } from './comment';
+import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
 import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
@@ -62,6 +62,9 @@ async function run(): Promise<void> {
   // SEP-0007 wallet deep links (Issue #44)
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Full-report artifact path (used when comment exceeds size limit)
+  const reportOutputPath = core.getInput('report_output_path') || 'trustbridge-report.md';
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -202,9 +205,25 @@ async function run(): Promise<void> {
     sep0007OriginDomain,
   });
 
+  // Detect oversize and write the full report to a workspace file when needed.
+  const commentBodyBytes = Buffer.byteLength(commentBody, 'utf8');
+  let fullReportPath: string | undefined;
+  let effectiveCommentBody: string;
+
+  if (commentBodyBytes > COMMENT_SIZE_LIMIT_BYTES) {
+    core.warning(
+      `Comment body is ${commentBodyBytes} bytes, which exceeds GitHub's ${COMMENT_SIZE_LIMIT_BYTES}-byte limit. ` +
+        `Writing full report to ${reportOutputPath} and posting a truncated comment instead.`,
+    );
+    fullReportPath = writeFullReport(commentBody, reportOutputPath);
+    effectiveCommentBody = buildTruncatedCommentBody(commentBody, reportOutputPath);
+  } else {
+    effectiveCommentBody = commentBody;
+  }
+
   let commentUrl: string | undefined;
   try {
-    commentUrl = await postIssueComment(githubToken, commentBody, { sticky: stickyComment });
+    commentUrl = await postIssueComment(githubToken, effectiveCommentBody, { sticky: stickyComment });
     if (commentUrl) {
       logger.info('Issue comment created', { component: 'index', commentUrl });
     }
@@ -213,7 +232,7 @@ async function run(): Promise<void> {
     core.warning(`Failed to post issue comment: ${message}`);
   }
 
-  setValidationOutputs(result, commentUrl);
+  setValidationOutputs(result, commentUrl, fullReportPath);
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
