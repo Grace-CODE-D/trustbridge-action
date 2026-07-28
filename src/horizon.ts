@@ -16,7 +16,28 @@ export interface HorizonBalanceCredit {
   selling_liabilities: string;
 }
 
-export type HorizonBalance = HorizonBalanceNative | HorizonBalanceCredit;
+export interface HorizonBalanceLiquidityPoolShares {
+  balance: string;
+  asset_type: 'liquidity_pool_shares';
+  liquidity_pool_id: string;
+  buying_liabilities: string;
+  selling_liabilities: string;
+  limit: string;
+  is_authorized: boolean;
+  is_authorized_to_maintain_liabilities: boolean;
+}
+
+export interface HorizonBalanceClaimable {
+  asset_type: 'claimable_balance_id';
+  balance: string;
+  claimable_balance_id: string;
+}
+
+export type HorizonBalance =
+  | HorizonBalanceNative
+  | HorizonBalanceCredit
+  | HorizonBalanceLiquidityPoolShares
+  | HorizonBalanceClaimable;
 
 export interface HorizonAccount {
   id: string;
@@ -145,7 +166,7 @@ function safeAccountSummary(account: HorizonAccount): {
   return {
     balancesCount: account.balances.length,
     hasNativeBalance: account.balances.some((b) => b.asset_type === 'native'),
-    creditTrustlineCount: account.balances.filter((b) => b.asset_type !== 'native').length,
+    creditTrustlineCount: account.balances.filter((b) => isCreditBalance(b)).length,
     subentryCount: account.subentry_count,
   };
 }
@@ -626,7 +647,7 @@ export async function waitForFundedAccount(
 }
 
 export function isCreditBalance(balance: HorizonBalance): balance is HorizonBalanceCredit {
-  return balance.asset_type !== 'native';
+  return balance.asset_type === 'credit_alphanum4' || balance.asset_type === 'credit_alphanum12';
 }
 
 export function getNativeBalance(account: HorizonAccount): string {

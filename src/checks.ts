@@ -1,4 +1,4 @@
-import { HorizonAccount, getNativeBalance, hasTrustline, parseHorizonBalance } from './horizon';
+import { HorizonAccount, getNativeBalance, hasTrustline, isCreditBalance, parseHorizonBalance } from './horizon';
 import { escapeMarkdownInline, inlineCode } from './markdown';
 import { buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
 
@@ -78,7 +78,7 @@ export function runAccountChecks(
   const trustlineExists = hasTrustline(account, config.assetCode, config.assetIssuer);
   const reserveRequirement = buildReserveRequirement(config.minXlmReserve, xlmNumeric);
   const xlmReserveMet = reserveRequirement.met;
-  const hasAnyTrustlines = account.balances.some((b) => b.asset_type !== 'native');
+  const hasAnyTrustlines = account.balances.some((b) => isCreditBalance(b));
 
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
 
