@@ -3,6 +3,7 @@ import {
   normalizeStellarAddress,
   parseMinXlmReserve,
   runAccountChecks,
+  runMultiAssetChecks,
   unfundedAccountResult,
   validateStellarAddress,
   getFailedCheckLabels,
@@ -361,6 +362,54 @@ describe('buildValidationGate', () => {
       failedChecks: 2,
       failedLabels: ['USDC trustline', 'XLM reserve'],
     });
+  });
+});
+
+describe('runMultiAssetChecks', () => {
+  const EURC_ISSUER = 'GCQTGZQQ5G4PTM2RNQRAXRJJEL5CQ5Z2OY5SUJRE763CPEKE6EJUMCU';
+
+  it('returns true for all assets when all trustlines exist', () => {
+    const account = makeAccount({
+      balances: [
+        { balance: '10.0000000', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+        { balance: '100.0000000', asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: USDC_ISSUER, buying_liabilities: '0', selling_liabilities: '0' },
+        { balance: '50.0000000', asset_type: 'credit_alphanum4', asset_code: 'EURC', asset_issuer: EURC_ISSUER, buying_liabilities: '0', selling_liabilities: '0' },
+      ],
+    });
+    const { results, allTrustlinesExist } = runMultiAssetChecks(account, [
+      { assetCode: 'USDC', assetIssuer: USDC_ISSUER },
+      { assetCode: 'EURC', assetIssuer: EURC_ISSUER },
+    ]);
+    expect(allTrustlinesExist).toBe(true);
+    expect(results).toEqual([
+      { assetCode: 'USDC', assetIssuer: USDC_ISSUER, trustlineExists: true },
+      { assetCode: 'EURC', assetIssuer: EURC_ISSUER, trustlineExists: true },
+    ]);
+  });
+
+  it('returns false aggregate when any trustline is missing', () => {
+    const account = makeAccount(); // only has USDC
+    const { results, allTrustlinesExist } = runMultiAssetChecks(account, [
+      { assetCode: 'USDC', assetIssuer: USDC_ISSUER },
+      { assetCode: 'EURC', assetIssuer: EURC_ISSUER },
+    ]);
+    expect(allTrustlinesExist).toBe(false);
+    expect(results[0].trustlineExists).toBe(true);
+    expect(results[1].trustlineExists).toBe(false);
+  });
+
+  it('returns empty results and true aggregate for empty asset list', () => {
+    const { results, allTrustlinesExist } = runMultiAssetChecks(makeAccount(), []);
+    expect(results).toEqual([]);
+    expect(allTrustlinesExist).toBe(true);
+  });
+
+  it('handles a single asset correctly', () => {
+    const { results, allTrustlinesExist } = runMultiAssetChecks(makeAccount(), [
+      { assetCode: 'USDC', assetIssuer: USDC_ISSUER },
+    ]);
+    expect(allTrustlinesExist).toBe(true);
+    expect(results[0].trustlineExists).toBe(true);
   });
 });
 

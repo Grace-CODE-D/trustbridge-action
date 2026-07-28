@@ -119,6 +119,17 @@ inputs:
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true
+  assets_json:
+    description: >-
+      JSON array of additional assets to validate trustlines for, e.g.
+      [{"code":"USDC","issuer":"GA5Z..."},{"code":"EURC","issuer":"GCQT..."}].
+      When provided, trustline checks are run for every listed asset in
+      addition to (or instead of) the single asset_code/asset_issuer pair.
+      Duplicate entries are silently deduplicated. Results are exposed via
+      the `assets_trustline_status` and `trustlines_summary` outputs and
+      rendered as a per-asset breakdown in the issue comment.
+    required: false
+    default: ''
   sep0007_deep_links:
     description: >-
       Emit SEP-0007 wallet deep links (web+stellar:pay / web+stellar:tx) in
@@ -165,6 +176,15 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
+  assets_trustline_status:
+    description: >-
+      JSON array of per-asset trustline check results when `assets_json` is
+      used. Each element is `{assetCode, assetIssuer, trustlineExists}`.
+      Empty string when `assets_json` is not provided.
+  trustlines_summary:
+    description: >-
+      `true` if every asset in `assets_json` has a trustline, `false` if any
+      are missing. Empty string when `assets_json` is not provided.
 
 runs:
   using: 'node20'

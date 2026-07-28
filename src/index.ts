@@ -4,12 +4,14 @@ import {
   horizonFailureResult,
   parseMinXlmReserve,
   runAccountChecks,
+  runMultiAssetChecks,
+  AssetTrustlineResult,
   unfundedAccountResult,
   validateStellarAddress,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
-import { normalizeAssetConfig } from './assets';
+import { normalizeAssetConfig, parseAssetsJson, dedupeAssets } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
@@ -63,6 +65,9 @@ async function run(): Promise<void> {
   // SEP-0007 wallet deep links (Issue #44)
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Multi-asset trustline validation (Issue #4)
+  const assetsJsonRaw = core.getInput('assets_json') || '';
 
   // Soroban contract registry (Issue #7)
   const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
@@ -225,6 +230,35 @@ async function run(): Promise<void> {
 
   setValidationOutputs(result);
 
+  // Multi-asset checks (Issue #4)
+  let multiAssetResults: AssetTrustlineResult[] | undefined;
+  if (assetsJsonRaw.trim()) {
+    const parsedAssets = dedupeAssets(parseAssetsJson(assetsJsonRaw));
+    if (result.accountFunded) {
+      // We need the account object — re-use the result path by fetching again
+      // only if we have a funded account. Since we already have the account
+      // data embedded in the result path, we run checks against the same
+      // account by fetching once more (cached if use_cache is on).
+      try {
+        const accountForMulti = await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
+        ({ results: multiAssetResults } = runMultiAssetChecks(accountForMulti, parsedAssets));
+      } catch {
+        // If re-fetch fails, fall back to running checks with what we know
+        multiAssetResults = parsedAssets.map((a) => ({
+          assetCode: a.assetCode,
+          assetIssuer: a.assetIssuer,
+          trustlineExists: false,
+        }));
+      }
+    } else {
+      multiAssetResults = parsedAssets.map((a) => ({
+        assetCode: a.assetCode,
+        assetIssuer: a.assetIssuer,
+        trustlineExists: false,
+      }));
+    }
+  }
+
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
     stellarAddress: resolvedAddress,
@@ -236,6 +270,7 @@ async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     sep0007DeepLinks,
     sep0007OriginDomain,
+    multiAssetResults,
   });
 
   let commentUrl: string | undefined;
@@ -249,7 +284,7 @@ async function run(): Promise<void> {
     core.warning(`Failed to post issue comment: ${message}`);
   }
 
-  setValidationOutputs(result, commentUrl);
+  setValidationOutputs(result, commentUrl, multiAssetResults);
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });

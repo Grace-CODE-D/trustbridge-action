@@ -236,6 +236,32 @@ export function buildReserveRequirement(required: number, actual: number): Reser
   };
 }
 
+/** Per-asset trustline check result for multi-asset validation. */
+export interface AssetTrustlineResult {
+  assetCode: string;
+  assetIssuer: string;
+  trustlineExists: boolean;
+}
+
+/**
+ * Run trustline checks for multiple assets against an already-fetched account.
+ * Returns per-asset results and an aggregate `allTrustlinesExist` flag.
+ */
+export function runMultiAssetChecks(
+  account: HorizonAccount,
+  assets: Array<{ assetCode: string; assetIssuer: string }>,
+): { results: AssetTrustlineResult[]; allTrustlinesExist: boolean } {
+  const results: AssetTrustlineResult[] = assets.map((a) => ({
+    assetCode: a.assetCode,
+    assetIssuer: a.assetIssuer,
+    trustlineExists: hasTrustline(account, a.assetCode, a.assetIssuer),
+  }));
+  return {
+    results,
+    allTrustlinesExist: results.every((r) => r.trustlineExists),
+  };
+}
+
 export interface ValidationGate {
   ready: boolean;
   totalChecks: number;
