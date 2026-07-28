@@ -196,7 +196,9 @@ with:
 
 Use this when contributors are expected to fund their wallet right after assignment. The action polls `GET /accounts/{id}` every `wait_until_funded_interval_ms` until it stops 404ing or `wait_until_funded_timeout_ms` elapses, then proceeds exactly as it would for a single check (comment, outputs, `fail_on_missing`). Non-404 Horizon errors (rate limits, outages, timeouts) are not retried by the polling loop — the existing per-request retry/backoff in `horizon.ts` handles those, and if they're still failing after that, the run fails fast instead of continuing to poll.
 
-## New output: `comment_url`
+## Action outputs
+
+### `comment_url`
 
 When the action runs in an issue context, it sets `comment_url` to the created GitHub comment URL.
 
@@ -211,6 +213,39 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 - name: Capture comment URL
   run: echo "Comment URL: ${{ steps.trustbridge.outputs.comment_url }}"
 ```
+
+### Readiness badge outputs
+
+The action exposes badge snippets suitable for embedding in READMEs or dashboards:
+
+- **`readiness_badge_markdown`** — Markdown-formatted badge with link to TrustBridge repository
+- **`readiness_badge_url`** — Plain Shields.io badge URL reflecting wallet-check status (pass/fail)
+
+#### Embedding in README
+
+Add the badge to your repository README using the Markdown output:
+
+```yaml
+- name: TrustBridge check
+  id: trustbridge
+  uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Update README with badge
+  run: |
+    # Example: update README with the latest badge status
+    echo "Badge: ${{ steps.trustbridge.outputs.readiness_badge_markdown }}" >> README.md
+```
+
+#### Example badge output
+
+**Pass state:** [![TrustBridge](https://img.shields.io/badge/trustbridge-Ready-brightgreen)](https://github.com/Stellar-TrustBridge/trustbridge-action)
+
+**Fail state:** [![TrustBridge](https://img.shields.io/badge/trustbridge-Not%20Ready-red)](https://github.com/Stellar-TrustBridge/trustbridge-action)
+
+The badge reflects the validation result without exposing PII (addresses, balances, or asset details).
 
 ---
 
