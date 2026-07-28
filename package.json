@@ -4,7 +4,7 @@
   "description": "GitHub Action to verify Stellar account trustlines and XLM reserve before issue assignment workflows",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc --noEmit && ncc build src/index.ts -o dist --source-map --license licenses.txt",
+    "build": "tsc --noEmit && ncc build src/index.ts -o dist --source-map --license licenses.txt && node scripts/normalize-maps.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "lint": "eslint src __tests__ --ext .ts",
