@@ -33889,6 +33889,8 @@ exports.normalizeAssetCode = normalizeAssetCode;
 exports.assertValidAssetCode = assertValidAssetCode;
 exports.assertValidAssetIssuer = assertValidAssetIssuer;
 exports.normalizeAssetConfig = normalizeAssetConfig;
+exports.parseAssetsJson = parseAssetsJson;
+exports.dedupeAssets = dedupeAssets;
 const ASSET_CODE_REGEX = /^[A-Z0-9]{1,12}$/;
 const STELLAR_ISSUER_G_REGEX = /^G[A-Z2-7]{55}$/;
 const STELLAR_ISSUER_C_REGEX = /^C[A-Z2-7]{55}$/;
@@ -33920,6 +33922,51 @@ function normalizeAssetConfig(input) {
         assetCode,
         assetIssuer,
     };
+}
+/**
+ * Parse and validate the `assets_json` action input.
+ * Accepts a JSON array of `{code, issuer}` objects.
+ * Returns normalized `AssetConfigInput[]`.
+ * Throws a descriptive error on any parse or validation failure.
+ */
+function parseAssetsJson(raw) {
+    let parsed;
+    try {
+        parsed = JSON.parse(raw.trim());
+    }
+    catch {
+        throw new Error(`assets_json must be a valid JSON array. Parse error: ${raw.slice(0, 80)}`);
+    }
+    if (!Array.isArray(parsed)) {
+        throw new Error('assets_json must be a JSON array of {code, issuer} objects.');
+    }
+    return parsed.map((entry, idx) => {
+        if (typeof entry !== 'object' || entry === null) {
+            throw new Error(`assets_json[${idx}]: each entry must be an object with "code" and "issuer" fields.`);
+        }
+        const e = entry;
+        if (typeof e.code !== 'string' || !e.code.trim()) {
+            throw new Error(`assets_json[${idx}]: "code" must be a non-empty string.`);
+        }
+        if (typeof e.issuer !== 'string' || !e.issuer.trim()) {
+            throw new Error(`assets_json[${idx}]: "issuer" must be a non-empty string.`);
+        }
+        return normalizeAssetConfig({ assetCode: e.code, assetIssuer: e.issuer });
+    });
+}
+/**
+ * Remove duplicate assets (same code + issuer after normalization).
+ * Preserves first-occurrence order.
+ */
+function dedupeAssets(assets) {
+    const seen = new Set();
+    return assets.filter((a) => {
+        const key = `${a.assetCode}:${a.assetIssuer}`;
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
 }
 
 
@@ -34009,7 +34056,7 @@ exports.unfundedAccountResult = unfundedAccountResult;
 exports.getFailedCheckLabels = getFailedCheckLabels;
 exports.horizonFailureResult = horizonFailureResult;
 exports.buildReserveRequirement = buildReserveRequirement;
-exports.buildAssetBalanceRequirement = buildAssetBalanceRequirement;
+exports.runMultiAssetChecks = runMultiAssetChecks;
 exports.buildValidationGate = buildValidationGate;
 exports.checkTrustlineExists = checkTrustlineExists;
 exports.checkReserveMet = checkReserveMet;
@@ -34286,6 +34333,21 @@ function buildAssetBalanceRequirement(required, actual) {
     };
 }
 /**
+ * Run trustline checks for multiple assets against an already-fetched account.
+ * Returns per-asset results and an aggregate `allTrustlinesExist` flag.
+ */
+function runMultiAssetChecks(account, assets) {
+    const results = assets.map((a) => ({
+        assetCode: a.assetCode,
+        assetIssuer: a.assetIssuer,
+        trustlineExists: (0, horizon_1.hasTrustline)(account, a.assetCode, a.assetIssuer),
+    }));
+    return {
+        results,
+        allTrustlinesExist: results.every((r) => r.trustlineExists),
+    };
+}
+/**
  * Build a machine-readable gate summary from the validation result.
  * This stays intentionally small so it can be consumed by comment output,
  * dashboards, or future release automation without re-parsing Markdown.
@@ -34543,6 +34605,13 @@ function formatCommentBody(result, config) {
     for (const check of result.checks) {
         lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
+    // Per-asset trustline breakdown (multi-asset mode)
+    if (config.multiAssetResults && config.multiAssetResults.length > 0) {
+        lines.push('', '### Asset trustlines', '');
+        for (const ar of config.multiAssetResults) {
+            lines.push(`- ${statusIcon(ar.trustlineExists)} **${(0, markdown_1.escapeMarkdownInline)(ar.assetCode)}** — issuer: ${(0, markdown_1.inlineCode)(ar.assetIssuer)}`);
+        }
+    }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
         : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
@@ -34655,8 +34724,10 @@ async function findStickyComment(octokit, owner, repo, issueNumber) {
         issue_number: issueNumber,
         per_page: 100,
     });
-    const existing = comments.find((comment) => isTrustBridgeComment(comment.body));
-    return existing?.id;
+    // Use the last matching comment so that if multiple TrustBridge comments
+    // exist (e.g. sticky was toggled off then on), we upsert the most recent one.
+    const matches = comments.filter((comment) => isTrustBridgeComment(comment.body));
+    return matches.length > 0 ? matches[matches.length - 1].id : undefined;
 }
 async function postIssueComment(token, body, options = {}) {
     const sticky = options.sticky ?? true;
@@ -34682,15 +34753,20 @@ async function postIssueComment(token, body, options = {}) {
         }
     }
     if (existingCommentId) {
-        const response = await octokit.rest.issues.updateComment({
-            owner,
-            repo,
-            comment_id: existingCommentId,
-            body,
-        });
-        const commentUrl = response.data.html_url;
-        core.info(`Updated existing TrustBridge comment on issue #${issueNumber}.`);
-        return commentUrl;
+        try {
+            const response = await octokit.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existingCommentId,
+                body,
+            });
+            core.info(`Updated existing TrustBridge comment on issue #${issueNumber}.`);
+            return response.data.html_url;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            core.warning(`Could not update existing TrustBridge comment (id=${existingCommentId}), falling back to a new comment: ${message}`);
+        }
     }
     const response = await octokit.rest.issues.createComment({
         owner,
@@ -34698,9 +34774,8 @@ async function postIssueComment(token, body, options = {}) {
         issue_number: issueNumber,
         body,
     });
-    const commentUrl = response.data.html_url;
     core.info(`Posted TrustBridge comment on issue #${issueNumber}.`);
-    return commentUrl;
+    return response.data.html_url;
 }
 
 
@@ -35629,6 +35704,8 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Multi-asset trustline validation (Issue #4)
+    const assetsJsonRaw = core.getInput('assets_json') || '';
     // Soroban contract registry (Issue #7)
     const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
     const contractId = core.getInput('contract_id') || '';
@@ -35770,6 +35847,36 @@ async function run() {
         return;
     }
     (0, outputs_1.setValidationOutputs)(result);
+    // Multi-asset checks (Issue #4)
+    let multiAssetResults;
+    if (assetsJsonRaw.trim()) {
+        const parsedAssets = (0, assets_1.dedupeAssets)((0, assets_1.parseAssetsJson)(assetsJsonRaw));
+        if (result.accountFunded) {
+            // We need the account object — re-use the result path by fetching again
+            // only if we have a funded account. Since we already have the account
+            // data embedded in the result path, we run checks against the same
+            // account by fetching once more (cached if use_cache is on).
+            try {
+                const accountForMulti = await (0, horizon_1.fetchAccount)(horizonUrl, resolvedAddress, horizonOptions);
+                ({ results: multiAssetResults } = (0, checks_1.runMultiAssetChecks)(accountForMulti, parsedAssets));
+            }
+            catch {
+                // If re-fetch fails, fall back to running checks with what we know
+                multiAssetResults = parsedAssets.map((a) => ({
+                    assetCode: a.assetCode,
+                    assetIssuer: a.assetIssuer,
+                    trustlineExists: false,
+                }));
+            }
+        }
+        else {
+            multiAssetResults = parsedAssets.map((a) => ({
+                assetCode: a.assetCode,
+                assetIssuer: a.assetIssuer,
+                trustlineExists: false,
+            }));
+        }
+    }
     const commentBody = (0, comment_1.formatCommentBody)(result, {
         ...checkConfig,
         stellarAddress: resolvedAddress,
@@ -35781,6 +35888,8 @@ async function run() {
         waitUntilFundedIntervalMs,
         sep0007DeepLinks,
         sep0007OriginDomain,
+        multiAssetResults,
+        metricsSnapshot: debugMode ? metrics_1.globalMetrics : undefined,
     });
     let commentUrl;
     try {
@@ -35796,7 +35905,7 @@ async function run() {
         const message = (0, inputs_1.getErrorMessage)(commentError);
         core.warning(`Failed to post issue comment: ${message}`);
     }
-    (0, outputs_1.setValidationOutputs)(result, commentUrl);
+    (0, outputs_1.setValidationOutputs)(result, commentUrl, multiAssetResults);
     if (debugMode) {
         logger_1.logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
         core.debug(metrics_1.globalMetrics.toJSON());
@@ -36571,21 +36680,25 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.toActionOutputs = toActionOutputs;
 exports.setValidationOutputs = setValidationOutputs;
 const core = __importStar(__nccwpck_require__(7484));
-function toActionOutputs(result, commentUrl) {
+function toActionOutputs(result, commentUrl, multiAssetResults) {
+    const assetsTrustlineStatus = multiAssetResults && multiAssetResults.length > 0
+        ? JSON.stringify(multiAssetResults)
+        : '';
+    const trustlinesSummary = multiAssetResults && multiAssetResults.length > 0
+        ? String(multiAssetResults.every((r) => r.trustlineExists))
+        : '';
     return {
         // Legacy outputs
         trustline_exists: String(result.trustlineExists),
         xlm_balance: result.xlmBalance,
         account_funded: String(result.accountFunded),
         comment_url: commentUrl ?? '',
-        // Per-check named outputs — match ValidationResult fields exactly
-        check_account_funded: String(result.accountFunded),
-        check_trustline: String(result.trustlineExists),
-        check_xlm_reserve: String(result.xlmReserveMet),
+        assets_trustline_status: assetsTrustlineStatus,
+        trustlines_summary: trustlinesSummary,
     };
 }
-function setValidationOutputs(result, commentUrl) {
-    const outputs = toActionOutputs(result, commentUrl);
+function setValidationOutputs(result, commentUrl, multiAssetResults) {
+    const outputs = toActionOutputs(result, commentUrl, multiAssetResults);
     for (const [name, value] of Object.entries(outputs)) {
         core.setOutput(name, value);
     }

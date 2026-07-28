@@ -20,6 +20,7 @@ Open-source programs and DAOs often gate contributions on Stellar wallet readine
 | Silent CI failures | Configurable `fail_on_missing` to fail or warn |
 | Custom assets / testnet | All Horizon and asset inputs are configurable |
 | Re-runs spam the issue with duplicate comments | `sticky_comment` (default `true`) updates the previous TrustBridge comment in place |
+| Comment update fails (deleted comment, rate-limit on PATCH) | Upsert falls back to creating a new comment — the run never fails due to a comment error |
 
 ## Release pipeline
 
@@ -451,6 +452,8 @@ with:
 
 ## Debug logging and redaction
 
+When `debug_mode: true` is set, TrustBridge emits detailed `core.debug` lines covering every stage of the Horizon client. A `### Metrics` block is also appended to the issue comment containing a machine-readable JSON summary of structural run metrics (no account addresses or balances).
+
 When `debug_mode: true` is set, TrustBridge emits detailed `core.debug` lines covering every stage of the Horizon client:
 
 | Debug event | Description |
@@ -630,6 +633,7 @@ TrustBridge handles common failure modes from Horizon and invalid input:
 | Cached account lookup | Returns cached response (no HTTP call); cache keys, stats, and summaries are redacted in debug output. |
 | Account with zero trustlines | Trustline check fails with specific message |
 | Comment post failure | Warning logged; check result still applied |
+| Sticky comment update fails (deleted, rate-limited) | Falls back to creating a new comment; warning logged |
 
 Full matrix: [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md).
 

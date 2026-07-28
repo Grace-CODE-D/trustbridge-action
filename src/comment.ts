@@ -358,8 +358,10 @@ export async function findStickyComment(
     per_page: 100,
   });
 
-  const existing = comments.find((comment) => isTrustBridgeComment(comment.body));
-  return existing?.id;
+  // Use the last matching comment so that if multiple TrustBridge comments
+  // exist (e.g. sticky was toggled off then on), we upsert the most recent one.
+  const matches = comments.filter((comment) => isTrustBridgeComment(comment.body));
+  return matches.length > 0 ? matches[matches.length - 1]!.id : undefined;
 }
 
 export async function postIssueComment(
@@ -403,16 +405,21 @@ export async function postIssueComment(
   }
 
   if (existingCommentId) {
-    const response = await octokit.rest.issues.updateComment({
-      owner,
-      repo,
-      comment_id: existingCommentId,
-      body,
-    });
-
-    const commentUrl = response.data.html_url;
-    core.info(`Updated existing TrustBridge comment on issue #${issueNumber}.`);
-    return commentUrl;
+    try {
+      const response = await octokit.rest.issues.updateComment({
+        owner,
+        repo,
+        comment_id: existingCommentId,
+        body,
+      });
+      core.info(`Updated existing TrustBridge comment on issue #${issueNumber}.`);
+      return response.data.html_url;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      core.warning(
+        `Could not update existing TrustBridge comment (id=${existingCommentId}), falling back to a new comment: ${message}`,
+      );
+    }
   }
 
   const response = await octokit.rest.issues.createComment({
@@ -422,7 +429,6 @@ export async function postIssueComment(
     body,
   });
 
-  const commentUrl = response.data.html_url;
   core.info(`Posted TrustBridge comment on issue #${issueNumber}.`);
-  return commentUrl;
+  return response.data.html_url;
 }

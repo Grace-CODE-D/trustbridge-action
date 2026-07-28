@@ -325,6 +325,7 @@ async function run(): Promise<void> {
     sep0007DeepLinks,
     sep0007OriginDomain,
     multiAssetResults,
+    metricsSnapshot: debugMode ? globalMetrics : undefined,
   });
 
   let commentUrl: string | undefined;

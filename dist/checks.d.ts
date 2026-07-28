@@ -63,14 +63,24 @@ export interface ReserveRequirement {
     missing: string;
     met: boolean;
 }
-export declare function buildReserveRequirement(required: bigint, actual: bigint): ReserveRequirement;
-export interface AssetBalanceRequirement {
-    required: bigint;
-    actual: bigint;
-    missing: string;
-    met: boolean;
+export declare function buildReserveRequirement(required: number, actual: number): ReserveRequirement;
+/** Per-asset trustline check result for multi-asset validation. */
+export interface AssetTrustlineResult {
+    assetCode: string;
+    assetIssuer: string;
+    trustlineExists: boolean;
 }
-export declare function buildAssetBalanceRequirement(required: bigint, actual: bigint): AssetBalanceRequirement;
+/**
+ * Run trustline checks for multiple assets against an already-fetched account.
+ * Returns per-asset results and an aggregate `allTrustlinesExist` flag.
+ */
+export declare function runMultiAssetChecks(account: HorizonAccount, assets: Array<{
+    assetCode: string;
+    assetIssuer: string;
+}>): {
+    results: AssetTrustlineResult[];
+    allTrustlinesExist: boolean;
+};
 export interface ValidationGate {
     ready: boolean;
     totalChecks: number;

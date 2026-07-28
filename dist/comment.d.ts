@@ -1,5 +1,5 @@
 import * as github from '@actions/github';
-import { CheckConfig, ValidationResult } from './checks';
+import { AssetTrustlineResult, CheckConfig, ValidationResult } from './checks';
 import { MetricsCollector } from './metrics';
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
@@ -26,6 +26,8 @@ export interface CommentConfig extends CheckConfig {
      * snapshot so the comment reflects the run that generated it.
      */
     metricsSnapshot?: MetricsCollector;
+    /** Per-asset trustline results from multi-asset validation. */
+    multiAssetResults?: AssetTrustlineResult[];
 }
 export declare const TRUSTBRIDGE_FOOTER = "_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_";
 /**
