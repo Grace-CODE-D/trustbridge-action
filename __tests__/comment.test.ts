@@ -155,6 +155,56 @@ describe('formatCommentBody', () => {
     expect(body).toContain('Passed checks: 0/1');
     expect(body).toContain('Failed checks: 1');
   });
+
+  it('includes onboarding checklist by default with unchecked boxes for failures', () => {
+    const body = formatCommentBody(validationResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+    });
+
+    expect(body).toContain('### Onboarding checklist');
+    expect(body).toContain('- [ ] **Fund account**');
+    expect(body).toContain('- [ ] **Add USDC trustline**');
+    expect(body).toContain('- [ ] **Verify XLM balance**');
+    expect(body).toContain('onboarding_checklist');
+  });
+
+  it('omits onboarding checklist when disabled', () => {
+    const body = formatCommentBody(validationResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+      onboardingChecklist: false,
+    });
+
+    expect(body).not.toContain('### Onboarding checklist');
+    expect(body).toContain('### Results');
+    expect(body).toContain('### Validation gate');
+  });
+
+  it('checks onboarding boxes from live ValidationResult state', () => {
+    const partial: ValidationResult = {
+      valid: false,
+      accountFunded: true,
+      trustlineExists: false,
+      xlmBalance: '5.0000000',
+      xlmReserveMet: true,
+      checks: [
+        { passed: true, label: 'Account funded', detail: 'ok' },
+        { passed: false, label: 'USDC trustline', detail: 'missing' },
+        { passed: true, label: 'XLM reserve', detail: 'ok' },
+      ],
+    };
+
+    const body = formatCommentBody(partial, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+      onboardingChecklist: true,
+    });
+
+    expect(body).toContain('- [x] **Fund account**');
+    expect(body).toContain('- [ ] **Add USDC trustline**');
+    expect(body).toContain('- [x] **Verify XLM balance**');
+  });
 });
 
 function makeOctokit(overrides: Record<string, jest.Mock> = {}) {

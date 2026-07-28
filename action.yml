@@ -133,6 +133,14 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  onboarding_checklist:
+    description: >-
+      Include an onboarding checklist section in the issue comment with
+      Markdown task-list checkboxes that reflect live validation state
+      (fund account → add trustline → verify XLM balance). Defaults to true.
+      Set to false to omit the checklist block.
+    required: false
+    default: 'true'
 
 outputs:
   trustline_exists:

@@ -15,7 +15,7 @@ import {
   buildSep0007PayLink,
   inferStellarNetwork,
 } from './links';
-import { inlineCode } from './markdown';
+import { buildOnboardingChecklist, inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
 
 /**
@@ -24,7 +24,7 @@ import { MetricsCollector } from './metrics';
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-export const COMMENT_SCHEMA_VERSION = '1.0.0';
+export const COMMENT_SCHEMA_VERSION = '1.1.0';
 
 export interface CommentConfig extends CheckConfig {
   stellarAddress: string;
@@ -34,6 +34,12 @@ export interface CommentConfig extends CheckConfig {
   waitUntilFundedTimeoutMs?: number;
   waitUntilFundedIntervalMs?: number;
   stickyComment?: boolean;
+  /**
+   * When true (default), append an onboarding checklist task list whose
+   * checkboxes reflect live ValidationResult state (fund → trustline →
+   * verify balance). Set false to omit the block.
+   */
+  onboardingChecklist?: boolean;
   /** Emit SEP-0007 wallet deep links (web+stellar:pay) in the comment. */
   sep0007DeepLinks?: boolean;
   /** Optional origin domain for SEP-0007 URIs (§3.4). */
@@ -88,6 +94,18 @@ export function formatCommentBody(
 
   for (const check of result.checks) {
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
+  }
+
+  // Onboarding checklist (Issue #154) — default on; omit when explicitly disabled.
+  const showOnboardingChecklist = config.onboardingChecklist !== false;
+  if (showOnboardingChecklist) {
+    lines.push(
+      '',
+      buildOnboardingChecklist(result, {
+        assetCode: config.assetCode,
+        minXlmReserve: config.minXlmReserve,
+      }),
+    );
   }
 
   lines.push(
@@ -149,6 +167,7 @@ export function formatCommentBody(
     `| --- | --- |`,
     `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`,
     `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`,
+    `| \`onboarding_checklist\` | ${config.onboardingChecklist === undefined ? '_default (true)_' : config.onboardingChecklist ? '`true` — checklist section included' : '`false` — checklist omitted'} |`,
     `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`,
   );
 

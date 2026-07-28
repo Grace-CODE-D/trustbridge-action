@@ -183,6 +183,17 @@ with:
 
 Set `sticky_comment: false` if you want a new comment posted on every run instead (e.g. for a full audit trail). See [Comment guide](COMMENT_GUIDE.md) for details on how the prior comment is located.
 
+## Onboarding checklist (default on)
+
+```yaml
+with:
+  github_token: ${{ secrets.GITHUB_TOKEN }}
+  stellar_address_input: ${{ steps.address.outputs.address }}
+  onboarding_checklist: true   # default — include live fund → trustline → balance checklist
+```
+
+The checklist section uses GitHub Markdown task-list checkboxes that reflect live Horizon validation (`accountFunded`, `trustlineExists`, `xlmReserveMet`) and links to [TROUBLESHOOTING.md](TROUBLESHOOTING.md) FAQ anchors. Set `onboarding_checklist: false` to omit it.
+
 ## Waiting for the account to be funded
 
 ```yaml

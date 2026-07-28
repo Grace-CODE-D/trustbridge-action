@@ -63,6 +63,9 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
+  // Onboarding checklist in comments (Issue #154) — default on
+  const onboardingChecklist = parseBooleanInput(core.getInput('onboarding_checklist'), true);
+
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
 
@@ -84,6 +87,8 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
     sep0007DeepLinks,
+    onboardingChecklist,
+    trustbridgeConfigPath,
   });
 
   if (logInputs) {
@@ -198,6 +203,7 @@ async function run(): Promise<void> {
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
     waitUntilFundedIntervalMs,
+    onboardingChecklist,
     sep0007DeepLinks,
     sep0007OriginDomain,
   });

@@ -12,6 +12,10 @@ Horizon returns `404` for accounts that have not been activated. Send the accoun
 
 Check both the asset code and issuer. A USDC trustline for a different issuer is not considered ready.
 
+## XLM reserve too low
+
+The account exists but its native XLM balance is below `min_xlm_reserve`. Send additional XLM so the balance meets the configured minimum (default `1.5` XLM). Remember that each trustline also consumes base reserve.
+
 ## Horizon availability failed
 
 Retry later or switch `horizon_url` to a trusted endpoint for the target network.

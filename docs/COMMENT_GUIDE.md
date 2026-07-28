@@ -22,8 +22,21 @@ Set `sticky_comment: false` to always post a new comment (e.g. if you want a ful
 - The Horizon endpoint used for verification.
 - The target asset code and issuer.
 - Per-check status for funding, trustline readiness, and XLM reserve.
+- An optional **Onboarding checklist** (default on via `onboarding_checklist: true`) with Markdown task-list checkboxes that auto-check from live `ValidationResult` state, plus FAQ links for each step.
 - A machine-readable validation-gate summary that callers can use to tell whether the run is release-ready or blocked.
 - Links to Stellar Laboratory and LOBSTR for remediation.
+
+## Onboarding checklist
+
+When `onboarding_checklist` is enabled (the default), the comment includes a concise guided path:
+
+1. Fund account
+2. Add trustline
+3. Verify XLM balance
+
+Each item is a GitHub Markdown task-list checkbox (`- [x]` / `- [ ]`) driven by `accountFunded`, `trustlineExists`, and `xlmReserveMet`. Boxes are comment-only — they are not synced via the GitHub Projects task-list API. FAQ links point at [TROUBLESHOOTING.md](TROUBLESHOOTING.md) anchors.
+
+Set `onboarding_checklist: false` to omit the section entirely (e.g. for expert-only workflows).
 
 ## Maintainer tips
 
