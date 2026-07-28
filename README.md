@@ -81,8 +81,9 @@ Collecting wallets via a GitHub Issue Form instead of a hardcoded address? See [
 
 | Input | Required | Default | Description |
 | -------- | ---------- | --------- | ------------- |
-| `stellar_address_input` | **Yes** | — | Stellar public key (G-address, 56 characters) to validate |
-| `github_token` | **Yes** | — | GitHub token used to post issue comments. Requires `issues: write`. `GITHUB_TOKEN` is sufficient for issue-triggered runs on the default branch. For fork PRs, org-policy-restricted repos, or GHES you may need a fine-grained PAT or GitHub App token. See [docs/USAGE.md](docs/USAGE.md#permissions-reference) for the full permission matrix. |
+| `stellar_address_input` | No* | — | Stellar public key (G-address, 56 characters) to validate. Required unless `assignee_address_map` is set. |
+| `assignee_address_map` | No | _(empty)_ | JSON object or path to a JSON file mapping GitHub usernames (assignees) → Stellar G-addresses. When set, resolves the assignee login from the GitHub event context before Horizon. Do not commit private rosters to public repos. See [docs/USAGE.md](docs/USAGE.md#assignee--address-roster-map-assignee_address_map). |
+| `github_token` | **Yes** | — | Token with `issues: write` to post comments (`GITHUB_TOKEN` is typical) |
 | `horizon_url` | No | `https://horizon.stellar.org` | Horizon API base URL (use testnet URL for testing) |
 | `asset_code` | No | `USDC` | Asset code for trustline verification |
 | `asset_issuer` | No | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | Issuer address for the asset |

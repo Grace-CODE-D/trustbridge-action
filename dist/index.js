@@ -34476,6 +34476,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35009,7 +35072,7 @@ const markdown_1 = __nccwpck_require__(3758);
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-exports.COMMENT_SCHEMA_VERSION = '1.1.0';
+exports.COMMENT_SCHEMA_VERSION = '1.0.0';
 exports.TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
 /**
  * Legacy hidden marker (pre-schema-version). Kept for backward
@@ -35072,7 +35135,7 @@ function formatCommentBody(result, config) {
     if (result.remediation) {
         lines.push('', '### Remediation', '', result.remediation);
     }
-    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`onboarding_checklist\` | ${config.onboardingChecklist === undefined ? '_default (true)_' : config.onboardingChecklist ? '`true` — checklist section included' : '`false` — checklist omitted'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
+    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
     if (config.waitUntilFunded) {
         const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
         const interval = config.waitUntilFundedIntervalMs ?? 5000;
@@ -36117,20 +36180,56 @@ const outputs_1 = __nccwpck_require__(7729);
 const logger_1 = __nccwpck_require__(6999);
 const metrics_1 = __nccwpck_require__(5670);
 const validation_1 = __nccwpck_require__(4344);
-const soroban_1 = __nccwpck_require__(3597);
+/**
+ * Resolve the GitHub assignee login from the current Actions event payload.
+ * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
+ */
+function resolveAssigneeLoginFromContext() {
+    const payload = github.context.payload;
+    const fromEvent = payload.assignee?.login?.trim();
+    if (fromEvent) {
+        return fromEvent;
+    }
+    const assignees = payload.issue?.assignees;
+    if (Array.isArray(assignees)) {
+        for (const entry of assignees) {
+            const login = entry?.login?.trim();
+            if (login) {
+                return login;
+            }
+        }
+    }
+    return undefined;
+}
+/**
+ * Resolve the Stellar G-address to validate: either from assignee_address_map
+ * (GitHub username → address roster) or from stellar_address_input.
+ */
+function resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw) {
+    const mapRaw = assigneeAddressMapRaw.trim();
+    if (mapRaw) {
+        const map = (0, inputs_1.parseAssigneeAddressMap)(mapRaw, {
+            workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
+        });
+        const assigneeLogin = resolveAssigneeLoginFromContext();
+        return (0, inputs_1.resolveAddressFromAssigneeMap)(map, assigneeLogin);
+    }
+    const direct = stellarAddressInput.trim();
+    if (direct) {
+        return direct;
+    }
+    throw new Error('Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
+        '(JSON / file path mapping GitHub usernames to G-addresses).');
+}
 async function run() {
     const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
     const assetCode = core.getInput('asset_code') || 'USDC';
     const assetIssuer = core.getInput('asset_issuer') ||
         'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
     const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
-    const minAssetBalanceRaw = core.getInput('min_asset_balance') || '';
-    const stellarAddress = core.getInput('stellar_address_input').trim();
-    const stellarAddressesRaw = core.getInput('stellar_addresses').trim();
-    const batchRequestDelayMs = (0, inputs_1.parseNumberInput)(core.getInput('batch_request_delay_ms'), 200, {
-        min: 0,
-        max: 60000,
-    });
+    const stellarAddressInput = core.getInput('stellar_address_input');
+    const assigneeAddressMapRaw = core.getInput('assignee_address_map');
+    const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
     const failOnMissing = (0, inputs_1.parseBooleanInput)(core.getInput('fail_on_missing'), true);
     const debugMode = (0, inputs_1.parseBooleanInput)(core.getInput('debug_mode'), false);
     const horizonTimeoutMs = (0, inputs_1.parseNumberInput)(core.getInput('horizon_timeout_ms'), 15000, {
@@ -36159,8 +36258,6 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Onboarding checklist in comments (Issue #154) — default on
-    const onboardingChecklist = (0, inputs_1.parseBooleanInput)(core.getInput('onboarding_checklist'), true);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -36180,9 +36277,8 @@ async function run() {
         waitUntilFundedIntervalMs,
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
-        sep0007DeepLinks,
-        onboardingChecklist,
         trustbridgeConfigPath,
+        sep0007DeepLinks,
     });
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
@@ -36314,7 +36410,6 @@ async function run() {
         waitUntilFunded,
         waitUntilFundedTimeoutMs,
         waitUntilFundedIntervalMs,
-        onboardingChecklist,
         sep0007DeepLinks,
         sep0007OriginDomain,
     });
@@ -36375,14 +36470,51 @@ if (process.env.JEST_WORKER_ID === undefined) {
 /***/ }),
 
 /***/ 8422:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
 
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.parseBooleanInput = parseBooleanInput;
 exports.parseNumberInput = parseNumberInput;
 exports.getErrorMessage = getErrorMessage;
+exports.parseAssigneeAddressMap = parseAssigneeAddressMap;
+exports.resolveAddressFromAssigneeMap = resolveAddressFromAssigneeMap;
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
 function parseBooleanInput(value, defaultValue) {
     if (value === undefined || value === '') {
         return defaultValue;
@@ -36414,6 +36546,91 @@ function parseNumberInput(value, defaultValue, options = {}) {
 }
 function getErrorMessage(error) {
     return error instanceof Error ? error.message : String(error);
+}
+/**
+ * Parse `assignee_address_map` from either inline JSON or a path to a JSON file.
+ *
+ * Inline JSON must start with `{`. Anything else is treated as a file path
+ * relative to `workspaceRoot` (or absolute).
+ */
+function parseAssigneeAddressMap(raw, options = {}) {
+    const trimmed = (raw ?? '').trim();
+    if (!trimmed) {
+        return {};
+    }
+    // Inline JSON: objects/arrays, or bare JSON literals that should fail validation.
+    // Anything else is treated as a file path relative to the workspace.
+    const looksLikeInlineJson = trimmed.startsWith('{') ||
+        trimmed.startsWith('[') ||
+        trimmed === 'null' ||
+        trimmed === 'true' ||
+        trimmed === 'false' ||
+        (trimmed.startsWith('"') && trimmed.endsWith('"'));
+    let jsonText = trimmed;
+    if (!looksLikeInlineJson) {
+        const root = options.workspaceRoot ?? process.cwd();
+        const candidate = path.isAbsolute(trimmed) ? trimmed : path.join(root, trimmed);
+        const resolvedPath = path.normalize(candidate);
+        const resolvedRoot = path.normalize(root);
+        if (!path.isAbsolute(trimmed) &&
+            !resolvedPath.startsWith(resolvedRoot + path.sep) &&
+            resolvedPath !== resolvedRoot) {
+            throw new Error(`assignee_address_map path resolves outside the workspace root: "${trimmed}"`);
+        }
+        if (!fs.existsSync(resolvedPath)) {
+            throw new Error(`assignee_address_map file not found: "${trimmed}". ` +
+                'Provide inline JSON ({"username":"G..."}) or a path to a roster JSON file.');
+        }
+        try {
+            jsonText = fs.readFileSync(resolvedPath, 'utf8');
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`Failed to read assignee_address_map file "${trimmed}": ${msg}`);
+        }
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(jsonText);
+    }
+    catch {
+        throw new Error('assignee_address_map must be valid JSON (object of GitHub username → G-address) ' +
+            'or a path to such a file. Received invalid JSON.');
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('assignee_address_map must be a JSON object mapping GitHub usernames to Stellar G-addresses.');
+    }
+    const result = {};
+    for (const [key, value] of Object.entries(parsed)) {
+        const login = key.trim();
+        if (!login) {
+            throw new Error('assignee_address_map contains an empty username key.');
+        }
+        if (typeof value !== 'string') {
+            throw new Error(`assignee_address_map entry for "${login}" must be a string Stellar G-address.`);
+        }
+        result[login.toLowerCase()] = value.trim();
+    }
+    return result;
+}
+/**
+ * Look up a Stellar address for an assignee login in a parsed roster map.
+ * Throws an actionable error when the login is missing or not in the map.
+ */
+function resolveAddressFromAssigneeMap(map, assigneeLogin) {
+    const login = (assigneeLogin ?? '').trim();
+    if (!login) {
+        throw new Error('assignee_address_map was provided but no assignee login was found in the GitHub event context. ' +
+            'Use this input with `on: issues: types: [assigned]` (payload.assignee), ' +
+            'or ensure the issue has at least one assignee.');
+    }
+    const address = map[login.toLowerCase()];
+    if (!address) {
+        throw new Error(`Assignee "${login}" is not present in assignee_address_map. ` +
+            'Add an entry for this GitHub username mapping to their Stellar G-address, ' +
+            'or pass stellar_address_input explicitly instead of using the roster map.');
+    }
+    return address;
 }
 
 

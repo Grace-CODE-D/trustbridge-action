@@ -35,25 +35,23 @@ inputs:
     required: false
     default: '1.5'
   stellar_address_input:
-    description: 'Stellar account address (G-address) to validate'
+    description: >-
+      Stellar account address (G-address) to validate. Required unless
+      assignee_address_map is set, in which case the address is resolved
+      from the map using the GitHub assignee login.
     required: false
     default: ''
-  stellar_addresses:
+  assignee_address_map:
     description: >-
-      Newline-separated or JSON-array list of Stellar G-addresses for batch
-      validation. When set, the action validates all addresses sequentially
-      and emits per-address results as a JSON artifact (batch_results output)
-      plus aggregate metrics. The single-address stellar_address_input path
-      is bypassed when this input is non-empty. Empty list is an error.
+      Optional JSON object (or path to a JSON file) mapping GitHub usernames
+      (assignees) to Stellar G-addresses. When set, TrustBridge resolves the
+      assignee login from the GitHub event context and looks up their address
+      before calling Horizon — so assignment workflows do not need to parse
+      the issue body. Example: '{"alice":"G...","bob":"G..."}' or
+      'rosters/wallets.json'. Do not commit private rosters to public repos;
+      prefer org/repo secrets or a private path.
     required: false
     default: ''
-  batch_request_delay_ms:
-    description: >-
-      Delay in milliseconds between individual Horizon requests in batch mode
-      (default 200 ms). Increase for conservative rate-limit budgets; set to
-      0 to remove the inter-request pause entirely.
-    required: false
-    default: '200'
   fail_on_missing:
     description: 'Fail the workflow step when checks do not pass (true) or only warn (false)'
     required: false

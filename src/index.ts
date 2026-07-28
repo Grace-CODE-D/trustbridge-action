@@ -18,7 +18,13 @@ import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { RateBudgetTracker } from './resilience';
 import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
-import { getErrorMessage, parseBooleanInput, parseNumberInput, resolveInput } from './inputs';
+import {
+  getErrorMessage,
+  parseAssigneeAddressMap,
+  parseBooleanInput,
+  parseNumberInput,
+  resolveAddressFromAssigneeMap,
+} from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs, writeValidationJson } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
@@ -26,17 +32,75 @@ import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { runIssuesPreflight, PreflightError } from './preflight';
 
-export async function run(): Promise<void> {
+/**
+ * Resolve the GitHub assignee login from the current Actions event payload.
+ * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
+ */
+function resolveAssigneeLoginFromContext(): string | undefined {
+  const payload = github.context.payload as {
+    assignee?: { login?: string };
+    issue?: { assignees?: Array<{ login?: string }> };
+  };
+
+  const fromEvent = payload.assignee?.login?.trim();
+  if (fromEvent) {
+    return fromEvent;
+  }
+
+  const assignees = payload.issue?.assignees;
+  if (Array.isArray(assignees)) {
+    for (const entry of assignees) {
+      const login = entry?.login?.trim();
+      if (login) {
+        return login;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Resolve the Stellar G-address to validate: either from assignee_address_map
+ * (GitHub username → address roster) or from stellar_address_input.
+ */
+function resolveStellarAddressInput(
+  stellarAddressInput: string,
+  assigneeAddressMapRaw: string,
+): string {
+  const mapRaw = assigneeAddressMapRaw.trim();
+  if (mapRaw) {
+    const map = parseAssigneeAddressMap(mapRaw, {
+      workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
+    });
+    const assigneeLogin = resolveAssigneeLoginFromContext();
+    return resolveAddressFromAssigneeMap(map, assigneeLogin);
+  }
+
+  const direct = stellarAddressInput.trim();
+  if (direct) {
+    return direct;
+  }
+
+  throw new Error(
+    'Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
+      '(JSON / file path mapping GitHub usernames to G-addresses).',
+  );
+}
+
+async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
     getInput('asset_issuer') ||
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
-  const minXlmReserveRaw = getInput('min_xlm_reserve') || '1.5';
-  const stellarAddress = getInput('stellar_address_input').trim();
-  const failOnMissing = parseBooleanInput(getInput('fail_on_missing'), true);
-  const debugMode = parseBooleanInput(getInput('debug_mode'), false);
-  const horizonTimeoutMs = parseNumberInput(getInput('horizon_timeout_ms'), 15000, {
+  const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+  const stellarAddressInput = core.getInput('stellar_address_input');
+  const assigneeAddressMapRaw = core.getInput('assignee_address_map');
+  const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
+  const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
+  const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
+  const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
     min: 1000,
     max: 60000,
   });
@@ -118,6 +182,7 @@ export async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     rpcFallbackUrl: effectiveRpcFallbackUrl,
     useCache,
+    trustbridgeConfigPath,
     sep0007DeepLinks,
     onboardingChecklist,
     trustbridgeConfigPath,
