@@ -13,7 +13,22 @@ export interface HorizonBalanceCredit {
     buying_liabilities: string;
     selling_liabilities: string;
 }
-export type HorizonBalance = HorizonBalanceNative | HorizonBalanceCredit;
+export interface HorizonBalanceLiquidityPoolShares {
+    balance: string;
+    asset_type: 'liquidity_pool_shares';
+    liquidity_pool_id: string;
+    buying_liabilities: string;
+    selling_liabilities: string;
+    limit: string;
+    is_authorized: boolean;
+    is_authorized_to_maintain_liabilities: boolean;
+}
+export interface HorizonBalanceClaimable {
+    asset_type: 'claimable_balance_id';
+    balance: string;
+    claimable_balance_id: string;
+}
+export type HorizonBalance = HorizonBalanceNative | HorizonBalanceCredit | HorizonBalanceLiquidityPoolShares | HorizonBalanceClaimable;
 export interface HorizonAccount {
     id: string;
     account_id: string;

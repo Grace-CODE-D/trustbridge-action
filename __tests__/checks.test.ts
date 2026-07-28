@@ -335,6 +335,65 @@ describe('runAccountChecks', () => {
     expect(result.remediation).toMatch(/Send at least/i);
   });
 
+  it('does not false-positive hasAnyTrustlines when only LP shares are present', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '1.0000000',
+          asset_type: 'liquidity_pool_shares',
+          liquidity_pool_id: 'pool1',
+          buying_liabilities: '0',
+          selling_liabilities: '0',
+          limit: '1000',
+          is_authorized: true,
+          is_authorized_to_maintain_liabilities: true,
+        } as unknown as import('../src/horizon').HorizonBalance,
+      ],
+    });
+
+    const result = runAccountChecks(account, defaultConfig);
+    expect(result.trustlineExists).toBe(false);
+    // Should say "zero trustlines" not "has trustlines but not for USDC"
+    expect(result.checks[1].detail).toMatch(/zero trustlines/i);
+  });
+
+  it('finds trustline in account with 100+ mixed balance entries without false negative', () => {
+    const manyBalances: import('../src/horizon').HorizonBalance[] = [
+      { balance: '10.0000000', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+    ];
+    for (let i = 0; i < 98; i++) {
+      manyBalances.push({
+        balance: '1.0000000',
+        asset_type: 'liquidity_pool_shares',
+        liquidity_pool_id: `pool${i}`,
+        buying_liabilities: '0',
+        selling_liabilities: '0',
+        limit: '1000',
+        is_authorized: true,
+        is_authorized_to_maintain_liabilities: true,
+      } as unknown as import('../src/horizon').HorizonBalance);
+    }
+    manyBalances.push({
+      balance: '100.0000000',
+      asset_type: 'credit_alphanum4',
+      asset_code: 'USDC',
+      asset_issuer: USDC_ISSUER,
+      buying_liabilities: '0.0000000',
+      selling_liabilities: '0.0000000',
+    });
+
+    const account = makeAccount({ balances: manyBalances });
+    const result = runAccountChecks(account, defaultConfig);
+    expect(result.trustlineExists).toBe(true);
+    expect(result.valid).toBe(true);
+  });
+
   it('matches asset by code and issuer exactly', () => {
     const account = makeAccount({
       balances: [

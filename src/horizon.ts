@@ -29,24 +29,28 @@ export interface HorizonBalanceCredit {
   is_clawback_enabled?: boolean;
 }
 
-/**
- * Liquidity pool share balances have no `asset_code`/`asset_issuer` — they
- * are keyed by `liquidity_pool_id` instead. Modeling this as its own
- * variant (rather than letting it fall through as a generic non-native
- * balance) keeps `isCreditBalance` from ever mistaking an LP share for a
- * credit trustline.
- */
-export interface HorizonBalanceLiquidityPool {
+export interface HorizonBalanceLiquidityPoolShares {
   balance: string;
   asset_type: 'liquidity_pool_shares';
   liquidity_pool_id: string;
-  limit?: string;
+  buying_liabilities: string;
+  selling_liabilities: string;
+  limit: string;
+  is_authorized: boolean;
+  is_authorized_to_maintain_liabilities: boolean;
+}
+
+export interface HorizonBalanceClaimable {
+  asset_type: 'claimable_balance_id';
+  balance: string;
+  claimable_balance_id: string;
 }
 
 export type HorizonBalance =
   | HorizonBalanceNative
   | HorizonBalanceCredit
-  | HorizonBalanceLiquidityPool;
+  | HorizonBalanceLiquidityPoolShares
+  | HorizonBalanceClaimable;
 
 export interface HorizonAccount {
   id: string;
@@ -255,7 +259,7 @@ function safeAccountSummary(account: HorizonAccount): {
   return {
     balancesCount: account.balances.length,
     hasNativeBalance: account.balances.some((b) => b.asset_type === 'native'),
-    creditTrustlineCount: account.balances.filter(isCreditBalance).length,
+    creditTrustlineCount: account.balances.filter((b) => isCreditBalance(b)).length,
     subentryCount: account.subentry_count,
   };
 }

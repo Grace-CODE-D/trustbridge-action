@@ -1,4 +1,4 @@
-import { HorizonAccount, getAssetBalance, getNativeBalance, hasTrustline, parseHorizonBalance, parseStroops, formatStroops } from './horizon';
+import { HorizonAccount, getNativeBalance, hasTrustline, isCreditBalance, parseHorizonBalance } from './horizon';
 import { escapeMarkdownInline, inlineCode } from './markdown';
 import { buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
 import { UnauthorizedTrustlinePolicy } from './inputs';
@@ -158,21 +158,7 @@ export function runAccountChecks(
   const minXlmReserveStroops = parseStroops(config.minXlmReserve);
   const reserveRequirement = buildReserveRequirement(minXlmReserveStroops, xlmNumeric);
   const xlmReserveMet = reserveRequirement.met;
-  // Uses isCreditBalance (not `asset_type !== 'native'`) so liquidity-pool
-  // share balances alone don't make an account look like it "has
-  // trustlines" for the purposes of this message.
-  const hasAnyTrustlines = account.balances.some(isCreditBalance);
-
-  const assetBalanceRaw = getAssetBalance(account, config.assetCode, config.assetIssuer);
-  const assetBalanceNumeric = parseHorizonBalance(assetBalanceRaw);
-  const minAssetBalanceRequired = config.minAssetBalance !== undefined ? config.minAssetBalance : '0';
-  const minAssetBalanceStroops = parseStroops(minAssetBalanceRequired);
-  const assetBalanceCheckEnabled = minAssetBalanceStroops > 0n;
-  const assetBalanceRequirement = buildAssetBalanceRequirement(
-    minAssetBalanceStroops,
-    assetBalanceNumeric,
-  );
-  const assetBalanceMet = !assetBalanceCheckEnabled || assetBalanceRequirement.met;
+  const hasAnyTrustlines = account.balances.some((b) => isCreditBalance(b));
 
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
 

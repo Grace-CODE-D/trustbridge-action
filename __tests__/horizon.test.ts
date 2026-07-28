@@ -164,6 +164,27 @@ describe('isCreditBalance', () => {
     expect(isCreditBalance({ balance: '1', asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: 'GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', buying_liabilities: '0', selling_liabilities: '0' })).toBe(true);
     expect(isCreditBalance({ balance: '1', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' })).toBe(false);
   });
+
+  it('returns false for liquidity_pool_shares', () => {
+    expect(isCreditBalance({
+      balance: '1',
+      asset_type: 'liquidity_pool_shares',
+      liquidity_pool_id: 'abc123',
+      buying_liabilities: '0',
+      selling_liabilities: '0',
+      limit: '1000',
+      is_authorized: true,
+      is_authorized_to_maintain_liabilities: true,
+    })).toBe(false);
+  });
+
+  it('returns false for claimable_balance_id', () => {
+    expect(isCreditBalance({
+      asset_type: 'claimable_balance_id',
+      balance: '1',
+      claimable_balance_id: 'xyz',
+    })).toBe(false);
+  });
 });
 
 describe('parseHorizonBalance', () => {
@@ -189,6 +210,55 @@ describe('getNativeBalance & hasTrustline', () => {
     const account = makeAccount();
     expect(hasTrustline(account, 'USDC', TEST_ADDRESS_2)).toBe(true);
     expect(hasTrustline(account, 'EURT', TEST_ADDRESS_2)).toBe(false);
+  });
+
+  it('does not false-positive on liquidity_pool_shares entries', () => {
+    const account = makeAccount();
+    account.balances = [
+      { balance: '10.0000000', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+      {
+        balance: '1.0000000',
+        asset_type: 'liquidity_pool_shares',
+        liquidity_pool_id: 'pool123',
+        buying_liabilities: '0',
+        selling_liabilities: '0',
+        limit: '1000',
+        is_authorized: true,
+        is_authorized_to_maintain_liabilities: true,
+      },
+    ];
+    expect(hasTrustline(account, 'USDC', TEST_ADDRESS_2)).toBe(false);
+  });
+
+  it('finds trustline in account with 100+ mixed balance entries', () => {
+    const account = makeAccount();
+    const manyBalances: HorizonAccount['balances'] = [
+      { balance: '10.0000000', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+    ];
+    // 98 LP share entries
+    for (let i = 0; i < 98; i++) {
+      manyBalances.push({
+        balance: '1.0000000',
+        asset_type: 'liquidity_pool_shares',
+        liquidity_pool_id: `pool${i}`,
+        buying_liabilities: '0',
+        selling_liabilities: '0',
+        limit: '1000',
+        is_authorized: true,
+        is_authorized_to_maintain_liabilities: true,
+      });
+    }
+    // target trustline at the end
+    manyBalances.push({
+      balance: '5.0000000',
+      asset_type: 'credit_alphanum4',
+      asset_code: 'USDC',
+      asset_issuer: TEST_ADDRESS_2,
+      buying_liabilities: '0',
+      selling_liabilities: '0',
+    });
+    account.balances = manyBalances;
+    expect(hasTrustline(account, 'USDC', TEST_ADDRESS_2)).toBe(true);
   });
 });
 
@@ -635,6 +705,50 @@ describe('Horizon debug log redaction', () => {
         expect(ctx.creditTrustlineCount).toBe(1);
         expect(ctx.hasNativeBalance).toBe(true);
         expect(ctx.subentryCount).toBe(2);
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+
+    it('excludes liquidity_pool_shares from creditTrustlineCount', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const account = makeAccount(TEST_ADDRESS);
+      account.balances = [
+        { balance: '10.0000000', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+        {
+          balance: '1.0000000',
+          asset_type: 'liquidity_pool_shares',
+          liquidity_pool_id: 'pool1',
+          buying_liabilities: '0',
+          selling_liabilities: '0',
+          limit: '1000',
+          is_authorized: true,
+          is_authorized_to_maintain_liabilities: true,
+        },
+        {
+          balance: '5.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: TEST_ADDRESS_2,
+          buying_liabilities: '0',
+          selling_liabilities: '0',
+        },
+      ];
+      const mock = makeMockFetch(async () => makeMockResponse(200, account));
+      loggerModule.logger.setDebugMode(true);
+
+      try {
+        await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          fetchFn: mock,
+        });
+        const success = calls.find((c) => c.message === 'Horizon fetch success');
+        const ctx = requireContext(success);
+        expect(ctx.balancesCount).toBe(3);
+        // LP share must NOT be counted as a credit trustline
+        expect(ctx.creditTrustlineCount).toBe(1);
       } finally {
         jest.restoreAllMocks();
         restore();
