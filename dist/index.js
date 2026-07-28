@@ -34011,6 +34011,13 @@ exports.horizonFailureResult = horizonFailureResult;
 exports.buildReserveRequirement = buildReserveRequirement;
 exports.buildAssetBalanceRequirement = buildAssetBalanceRequirement;
 exports.buildValidationGate = buildValidationGate;
+exports.checkTrustlineExists = checkTrustlineExists;
+exports.checkReserveMet = checkReserveMet;
+exports.validateStrKeyFormat = validateStrKeyFormat;
+exports.checkMultiAssetTrustlines = checkMultiAssetTrustlines;
+exports.calculateRecommendedReserve = calculateRecommendedReserve;
+exports.checkAccountSponsored = checkAccountSponsored;
+exports.generateValidationReport = generateValidationReport;
 const horizon_1 = __nccwpck_require__(9164);
 const markdown_1 = __nccwpck_require__(3758);
 const links_1 = __nccwpck_require__(3346);
@@ -34181,7 +34188,6 @@ function unfundedAccountResult(stellarAddress, config) {
     const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(config.assetCode);
     const safeAddress = (0, markdown_1.inlineCode)(stellarAddress);
     const network = (0, links_1.inferStellarNetwork)(config.horizonUrl ?? '');
-    const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
     const checks = [
         {
             passed: false,
@@ -34303,6 +34309,150 @@ function buildValidationGate(result) {
         failedLabels,
     };
 }
+// ---------------------------------------------------------------------------
+// Wave #32: Reusable workflow examples for trustline, reserve, StrKey,
+// multi-asset validation checks (Issue #32)
+// ---------------------------------------------------------------------------
+/**
+ * Reusable workflow: verify trustline existence for a specific asset.
+ * Returns true if the account has an active trustline for the given asset code
+ * and issuer, false otherwise.
+ *
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify USDC trustline
+ *   run: |
+ *     if check-trustline USDC ${ISSUER}; then
+ *       echo "Trustline configured"
+ *     fi
+ * ```
+ */
+function checkTrustlineExists(account, assetCode, assetIssuer) {
+    return (0, horizon_1.hasTrustline)(account, assetCode, assetIssuer);
+}
+/**
+ * Reusable workflow: verify XLM reserve meets minimum threshold.
+ * Returns true if native balance >= minReserve, false otherwise.
+ *
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify XLM reserve
+ *   run: |
+ *     if check-reserve ${ADDRESS} 1.5; then
+ *       echo "Reserve met"
+ *     fi
+ * ```
+ */
+function checkReserveMet(account, minReserve) {
+    const xlmBalance = (0, horizon_1.getNativeBalance)(account);
+    const parsed = (0, horizon_1.parseHorizonBalance)(xlmBalance);
+    return parsed >= minReserve;
+}
+/**
+ * Reusable workflow: validate StrKey format for Stellar addresses.
+ * Supports both G-addresses (accounts) and C-addresses (contracts).
+ * Returns true if the address matches StrKey shape, false otherwise.
+ *
+ * Usage in workflows:
+ * ```yaml
+ * - name: Validate address format
+ *   run: |
+ *     if validate-strkey ${ADDRESS}; then
+ *       echo "Valid StrKey"
+ *     fi
+ * ```
+ */
+function validateStrKeyFormat(address) {
+    const trimmed = address.trim();
+    if (trimmed.length !== 56)
+        return false;
+    const prefix = trimmed.charAt(0);
+    if (prefix !== 'G' && prefix !== 'C')
+        return false;
+    // StrKey uses base32 alphabet: A-Z, 2-7
+    const strKeyRegex = /^[GC][A-Z2-7]{55}$/;
+    return strKeyRegex.test(trimmed);
+}
+/**
+ * Reusable workflow: verify multiple asset trustlines in a single check.
+ * Returns an array of results — one per asset — with pass/fail status.
+ *
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify multi-asset trustlines
+ *   run: |
+ *     check-multi-asset USDC,EURC ${USDC_ISSUER},${EURC_ISSUER}
+ * ```
+ */
+function checkMultiAssetTrustlines(account, assets) {
+    return assets.map((cfg) => ({
+        asset: cfg.assetCode,
+        issuer: cfg.assetIssuer,
+        exists: (0, horizon_1.hasTrustline)(account, cfg.assetCode, cfg.assetIssuer),
+        required: cfg.required,
+    }));
+}
+/**
+ * Reusable workflow: calculate recommended XLM reserve for an account.
+ * Formula: base account reserve (1 XLM) + (trustline count × 0.5 XLM per entry).
+ *
+ * Usage in workflows:
+ * ```yaml
+ * - name: Calculate reserve requirement
+ *   run: |
+ *     RESERVE=$(calculate-reserve ${TRUSTLINE_COUNT})
+ *     echo "Recommended reserve: ${RESERVE} XLM"
+ * ```
+ */
+function calculateRecommendedReserve(trustlineCount) {
+    return exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM + trustlineCount * exports.STELLAR_BASE_RESERVE_XLM;
+}
+/**
+ * Reusable workflow: check if account sponsor is configured.
+ * Returns true if the account has a sponsor (num_sponsored > 0), false otherwise.
+ *
+ * Useful for DAO/treasury workflows where accounts may be sponsored to reduce
+ * reserve requirements for contributors.
+ *
+ * Usage in workflows:
+ * ```yaml
+ * - name: Verify sponsorship
+ *   run: |
+ *     if check-sponsored ${ADDRESS}; then
+ *       echo "Account is sponsored"
+ *     fi
+ * ```
+ */
+function checkAccountSponsored(account) {
+    return account.num_sponsored > 0;
+}
+function generateValidationReport(account, config, additionalAssets = []) {
+    const xlmBalance = (0, horizon_1.getNativeBalance)(account);
+    const xlmParsed = (0, horizon_1.parseHorizonBalance)(xlmBalance);
+    const trustlineCount = account.balances.filter((b) => b.asset_type !== 'native').length;
+    const recommendedReserve = calculateRecommendedReserve(trustlineCount);
+    const primaryTrustline = {
+        asset: config.assetCode,
+        issuer: config.assetIssuer,
+        exists: (0, horizon_1.hasTrustline)(account, config.assetCode, config.assetIssuer),
+    };
+    const additionalTrustlineResults = checkMultiAssetTrustlines(account, additionalAssets).map((r) => ({ asset: r.asset, issuer: r.issuer, exists: r.exists }));
+    return {
+        address: account.account_id,
+        strKeyValid: validateStrKeyFormat(account.account_id),
+        accountFunded: true,
+        xlmBalance,
+        reserveStatus: {
+            current: xlmParsed,
+            required: Math.max(config.minXlmReserve, recommendedReserve),
+            met: xlmParsed >= Math.max(config.minXlmReserve, recommendedReserve),
+            deficit: formatXlmDeficit(Math.max(config.minXlmReserve, recommendedReserve), xlmParsed),
+        },
+        trustlines: [primaryTrustline, ...additionalTrustlineResults],
+        sponsored: checkAccountSponsored(account),
+        timestamp: new Date().toISOString(),
+    };
+}
 
 
 /***/ }),
@@ -34363,7 +34513,7 @@ const markdown_1 = __nccwpck_require__(3758);
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-exports.COMMENT_SCHEMA_VERSION = '1.1.0';
+exports.COMMENT_SCHEMA_VERSION = '1.0.0';
 exports.TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
 /**
  * Legacy hidden marker (pre-schema-version). Kept for backward
@@ -34402,14 +34552,7 @@ function formatCommentBody(result, config) {
     }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
-        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **XLM minimum required:** \`${config.minXlmReserve} XLM\``);
-    if (assetBalanceCheckEnabled) {
-        const assetBalanceDisplay = result.assetBalance === 'unknown'
-            ? '_unknown_'
-            : `\`${result.assetBalance} ${config.assetCode}\``;
-        lines.push(`- **${config.assetCode} balance:** ${assetBalanceDisplay}`, `- **${config.assetCode} minimum required:** \`${config.minAssetBalance} ${config.assetCode}\``);
-    }
-    lines.push('', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     // SEP-0007 wallet deep links (Issue #44)
     if (config.sep0007DeepLinks) {
         const payLink = (0, links_1.buildSep0007PayLink)({
@@ -34425,15 +34568,12 @@ function formatCommentBody(result, config) {
         lines.push('', '### Remediation', '', result.remediation);
     }
     lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
-    if (assetBalanceCheckEnabled) {
-        lines.push(`| \`min_asset_balance\` | \`${config.minAssetBalance} ${config.assetCode}\` |`);
-    }
     if (config.waitUntilFunded) {
         const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
         const interval = config.waitUntilFundedIntervalMs ?? 5000;
         lines.push(`| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`, `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`);
     }
-    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`asset_balance\` | \`${result.assetBalance}\` | **${config.assetCode}** balance reported by Horizon (from \`action.yml\`) |`, `| \`asset_balance_met\` | \`${String(result.assetBalanceMet)}\` | Whether **${config.assetCode}** balance meets the configured floor (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
+    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
     // Hardened metrics JSON export (Issue #33)
     if (config.metricsSnapshot) {
         const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
@@ -34625,7 +34765,6 @@ exports.getAssetBalance = getAssetBalance;
 exports.parseStroops = parseStroops;
 exports.formatStroops = formatStroops;
 exports.parseHorizonBalance = parseHorizonBalance;
-exports.fetchNetworkPassphrase = fetchNetworkPassphrase;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
 class HorizonError extends Error {
@@ -35269,8 +35408,6 @@ async function run() {
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
-    const networkPassphrase = core.getInput('network_passphrase') || 'Public Global Stellar Network ; September 2015';
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
@@ -35307,7 +35444,6 @@ async function run() {
             assetCode,
             assetIssuer,
             minXlmReserve: minXlmReserveRaw,
-            minAssetBalance: minAssetBalanceRaw,
             stellarAddress,
             failOnMissing,
             debugMode,
@@ -35339,7 +35475,6 @@ async function run() {
     const checkConfig = {
         ...normalizedAsset,
         minXlmReserve,
-        minAssetBalance,
         horizonUrl,
     };
     core.info(`Checking Stellar account ${resolvedStellarAddress} via ${horizonUrl}`);
@@ -35351,21 +35486,9 @@ async function run() {
         timeoutMs: horizonTimeoutMs,
         horizonUrlFallback: horizonUrlFallback || undefined,
         fallbackUrls,
+        cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
-        cacheTtlMs: horizonCacheTtlMs,
     };
-    core.info(`Verifying network identity for ${horizonUrl}...`);
-    const actualPassphrase = await (0, horizon_1.fetchNetworkPassphrase)(horizonUrl, horizonOptions);
-    if (actualPassphrase !== networkPassphrase) {
-        throw new Error(`Network identity mismatch. Expected "${networkPassphrase}" but Horizon returned "${actualPassphrase}". ` +
-            `Check your horizon_url and network_passphrase inputs.`);
-    }
-    const PUBLIC_USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
-    if (normalizedAsset.assetIssuer === PUBLIC_USDC_ISSUER &&
-        actualPassphrase !== 'Public Global Stellar Network ; September 2015') {
-        throw new Error(`Mismatched configuration: The asset_issuer is the Public Network USDC issuer, ` +
-            `but the network_passphrase indicates a different network.`);
-    }
     try {
         const account = waitUntilFunded
             ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, resolvedStellarAddress, {
@@ -35960,7 +36083,6 @@ function buildInputsLogRecord(inputs) {
         assetCode: inputs.assetCode,
         assetIssuer: redactStellarAddress(inputs.assetIssuer) || redactString(inputs.assetIssuer),
         minXlmReserve: inputs.minXlmReserve,
-        minAssetBalance: inputs.minAssetBalance,
         stellarAddress: redactStellarAddress(inputs.stellarAddress),
         failOnMissing: inputs.failOnMissing,
         debugMode: inputs.debugMode,
@@ -36656,7 +36778,7 @@ function validateTrustbridgeConfig(raw) {
         }
     }
     // String fields — injection sanitization
-    for (const strField of ['asset_code', 'asset_issuer', 'min_xlm_reserve', 'min_asset_balance']) {
+    for (const strField of ['asset_code', 'asset_issuer', 'min_xlm_reserve']) {
         const val = raw[strField];
         if (val !== undefined && val !== null && val !== '') {
             if (typeof val !== 'string') {

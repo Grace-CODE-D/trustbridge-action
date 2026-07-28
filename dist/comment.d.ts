@@ -7,7 +7,7 @@ import { MetricsCollector } from './metrics';
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-export declare const COMMENT_SCHEMA_VERSION = "1.1.0";
+export declare const COMMENT_SCHEMA_VERSION = "1.0.0";
 export interface CommentConfig extends CheckConfig {
     stellarAddress: string;
     horizonUrl: string;
@@ -40,7 +40,7 @@ export declare const STICKY_COMMENT_MARKER_LEGACY = "<!-- trustbridge-action:sti
  * prior comment and decide whether to update it in place or post a new
  * one.
  */
-export declare const STICKY_COMMENT_MARKER = "<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->";
+export declare const STICKY_COMMENT_MARKER = "<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->";
 export declare function formatCommentBody(result: ValidationResult, config: CommentConfig): string;
 /**
  * Build a hardened metrics JSON string safe for embedding in a GitHub issue

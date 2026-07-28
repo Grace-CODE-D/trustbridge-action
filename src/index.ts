@@ -9,7 +9,8 @@ import {
   tlsFailureResult,
   unfundedAccountResult,
   validateStellarAddress,
-  extractStellarAddressFromText,
+  buildValidationGate,
+  ValidationResult,
 } from './checks';
 import { fetchAccount, fetchNetworkPassphrase, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
@@ -22,9 +23,106 @@ import {
 } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
-import { logger, emitInputsLogRecord } from './logger';
-import { globalMetrics, writeJobSummary } from './metrics';
+import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
+import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+
+// ---------------------------------------------------------------------------
+// Wave #38: Dashboard webhook payload (dist e2e harness)
+// ---------------------------------------------------------------------------
+
+interface DashboardWebhookPayload {
+  /** Validation result summary (gate, checks, balances). */
+  validation: {
+    ready: boolean;
+    accountFunded: boolean;
+    trustlineExists: boolean;
+    xlmBalance: string;
+    xlmReserveMet: boolean;
+    failedChecks: number;
+    passedChecks: number;
+    totalChecks: number;
+    failedLabels: string[];
+  };
+  /** Asset and reserve configuration. */
+  config: {
+    assetCode: string;
+    assetIssuer: string;
+    minXlmReserve: number;
+  };
+  /** Redacted Stellar address (first4…last4). */
+  stellarAddressRedacted: string;
+  /** Comment mode for this run. */
+  commentMode: string;
+  /** Comment URL if posted, undefined if dry-run/off. */
+  commentUrl?: string;
+  /** ISO 8601 timestamp of the validation run. */
+  timestamp: string;
+}
+
+function redactStellarAddress(address: string): string {
+  if (address.length === 56 && (address.startsWith('G') || address.startsWith('C'))) {
+    return `${address.slice(0, 4)}...${address.slice(-4)}`;
+  }
+  return address;
+}
+
+async function postDashboardWebhook(
+  webhookUrl: string,
+  context: {
+    result: ValidationResult;
+    config: CheckConfig;
+    stellarAddress: string;
+    commentMode: string;
+    commentUrl?: string;
+  },
+): Promise<void> {
+  const gate = buildValidationGate(context.result);
+
+  const payload: DashboardWebhookPayload = {
+    validation: {
+      ready: gate.ready,
+      accountFunded: context.result.accountFunded,
+      trustlineExists: context.result.trustlineExists,
+      xlmBalance: context.result.xlmBalance,
+      xlmReserveMet: context.result.xlmReserveMet,
+      failedChecks: gate.failedChecks,
+      passedChecks: gate.passedChecks,
+      totalChecks: gate.totalChecks,
+      failedLabels: gate.failedLabels,
+    },
+    config: {
+      assetCode: context.config.assetCode,
+      assetIssuer: context.config.assetIssuer,
+      minXlmReserve: context.config.minXlmReserve,
+    },
+    stellarAddressRedacted: redactStellarAddress(context.stellarAddress),
+    commentMode: context.commentMode,
+    commentUrl: context.commentUrl,
+    timestamp: new Date().toISOString(),
+  };
+
+  const fetch = (await import('node-fetch')).default;
+  const response = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'TrustBridge-Action/1.0',
+    },
+    body: JSON.stringify(payload),
+    timeout: 10000,
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Dashboard webhook returned ${response.status}: ${response.statusText}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main run function
+// ---------------------------------------------------------------------------
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -76,14 +174,16 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
-  // Wave #29: workflow_dispatch issue_number benchmark (Issue #29)
-  const issueNumberRaw = core.getInput('issue_number') || '';
-  const dispatchIssueNumber = issueNumberRaw.trim()
-    ? parseNumberInput(issueNumberRaw.trim(), 0, { min: 1 })
-    : undefined;
+  // Wave #30: comment_mode (dry-run support)
+  const commentMode = (core.getInput('comment_mode') || 'post').trim().toLowerCase();
+  if (!['post', 'dry-run', 'off'].includes(commentMode)) {
+    throw new Error(
+      `comment_mode must be one of: "post", "dry-run", "off". Received: "${commentMode}"`,
+    );
+  }
 
-  // Wave #28: address extraction from issue body (Issue #28)
-  const extractAddressFromIssue = parseBooleanInput(core.getInput('extract_address_from_issue'), false);
+  // Wave #38: dashboard webhook URL
+  const dashboardWebhookUrl = core.getInput('dashboard_webhook_url') || '';
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -119,8 +219,8 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
     sep0007DeepLinks,
-    extractAddressFromIssue,
-    dispatchIssueNumber: dispatchIssueNumber ?? null,
+    commentMode,
+    hasDashboardWebhook: Boolean(dashboardWebhookUrl),
   });
 
   // Wave #28: auto-extract Stellar address from the issue body when
@@ -311,57 +411,47 @@ async function run(): Promise<void> {
   });
 
   let commentUrl: string | undefined;
-  try {
-    commentUrl = await postIssueComment(githubToken, commentBody, {
-      sticky: stickyComment,
-      issueNumber: dispatchIssueNumber,
-    });
-    if (commentUrl) {
-      logger.info('Issue comment created', { component: 'index', commentUrl });
+
+  // Wave #30: skip comment posting in dry-run and off modes
+  const shouldPostComment = commentMode === 'post';
+
+  if (shouldPostComment) {
+    try {
+      commentUrl = await postIssueComment(githubToken, commentBody, { sticky: stickyComment });
+      if (commentUrl) {
+        logger.info('Issue comment created', { component: 'index', commentUrl });
+      }
+    } catch (commentError) {
+      const message = getErrorMessage(commentError);
+      core.warning(`Failed to post issue comment: ${message}`);
     }
-  } catch (commentError) {
-    const message = getErrorMessage(commentError);
-    core.warning(`Failed to post issue comment: ${message}`);
+  } else {
+    logger.info(`Comment posting skipped (comment_mode=${commentMode})`, {
+      component: 'index',
+      commentMode,
+    });
   }
 
   setValidationOutputs(result, commentUrl);
 
-  // Wave #31: auto wallet labels — apply wallet state label to the issue.
-  const issueNumber = github.context.payload.issue?.number;
-  if (autoWalletLabels && issueNumber) {
-    const octokit = github.getOctokit(githubToken);
-    const { owner, repo } = github.context.repo;
-    const isHorizonError =
-      !result.accountFunded && result.xlmBalance === 'unknown';
-
-    const labelResult = await globalOctokitMetrics.track(
-      'issues.addLabels',
-      async () => {
-        const r = await applyWalletLabels(octokit, owner, repo, issueNumber, {
-          accountFunded: result.accountFunded,
-          trustlineExists: result.trustlineExists,
-          xlmReserveMet: result.xlmReserveMet,
-          horizonError: isHorizonError,
-        });
-        return { status: r.error ? 422 : 200, headers: {}, data: r };
-      },
-    );
-
-    if (labelResult.data.error) {
-      core.warning(`Auto wallet label failed: ${labelResult.data.error}`);
-    } else {
-      logger.info(`Wallet label applied: ${labelResult.data.applied}`, {
-        component: 'index',
-        applied: labelResult.data.applied,
-        removed: labelResult.data.removed.length,
+  // Wave #38: POST validation summary to dashboard webhook (if configured)
+  if (dashboardWebhookUrl) {
+    try {
+      await postDashboardWebhook(dashboardWebhookUrl, {
+        result,
+        config: checkConfig,
+        stellarAddress,
+        commentMode,
+        commentUrl,
       });
+      logger.info('Dashboard webhook delivered', {
+        component: 'index',
+        webhookUrl: redactHorizonUrl(dashboardWebhookUrl),
+      });
+    } catch (webhookError) {
+      const message = getErrorMessage(webhookError);
+      core.warning(`Failed to POST dashboard webhook: ${message}`);
     }
-  }
-
-  // Wave #37: emit Octokit metrics JSON artifact in debug mode.
-  if (debugMode) {
-    logger.debug('Octokit metrics summary (JSON artifact)', { component: 'metrics' });
-    core.debug(globalOctokitMetrics.toJSON());
   }
 
   if (debugMode) {

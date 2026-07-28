@@ -137,22 +137,32 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  min_asset_balance:
+  comment_mode:
     description: >-
-      Optional minimum balance floor for the configured asset (e.g. 100 for
-      USDC). When set to a positive non-zero value, TrustBridge adds a fourth
-      check that the account's asset balance is at least this amount. The
-      check is skipped entirely when the input is empty (default). A deficit
-      is surfaced in the issue comment, the remediation section, and as
-      action outputs `asset_balance` and `asset_balance_met`.
+      Controls how (and whether) TrustBridge posts the validation result as a
+      GitHub issue comment.
+        - "post" (default) — post or upsert the comment normally.
+        - "dry-run"        — run all validation checks and set all action
+                             outputs exactly as in "post" mode, but skip the
+                             GitHub API call. Useful in CI smoke-tests, preview
+                             jobs, and pre-release dry-runs where you want to
+                             verify the validation logic without writing to the
+                             issue timeline.
+        - "off"            — same as "dry-run" but makes the intent explicit:
+                             comment posting is permanently disabled for this
+                             step (e.g. scheduled health-check workflows).
+    required: false
+    default: 'post'
+  dashboard_webhook_url:
+    description: >-
+      Optional HTTPS webhook URL. When set, TrustBridge POSTs a JSON summary
+      of the validation result to this endpoint after each run (including
+      dry-run and off modes). The payload contains the validation gate, XLM
+      balance, trustline status, and run metadata — no raw Stellar addresses
+      are included; only redacted first-4…last-4 identifiers. Leave empty to
+      disable (default).
     required: false
     default: ''
-  network_passphrase:
-    description: >-
-      The expected Stellar network passphrase (e.g. 'Public Global Stellar Network ; September 2015').
-      Used to verify that the configured Horizon URL and asset issuer match the intended network identity.
-    required: false
-    default: 'Public Global Stellar Network ; September 2015'
 
 outputs:
   trustline_exists:

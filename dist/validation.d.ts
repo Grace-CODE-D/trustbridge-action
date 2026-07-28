@@ -136,8 +136,6 @@ export interface TrustbridgeConsumerConfig {
     asset_issuer?: string;
     /** Minimum XLM reserve override. */
     min_xlm_reserve?: string;
-    /** Optional minimum asset balance floor. */
-    min_asset_balance?: string;
     /** Whether to fail the step on missing checks. */
     fail_on_missing?: boolean;
 }

@@ -216,62 +216,97 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
-## Private Horizon mirrors
+## comment_mode — dry-run and off (Wave #30)
 
-Enterprises running TrustBridge against their own Horizon mirror (instead of the public `https://horizon.stellar.org`) should be aware of the following:
+By default TrustBridge posts (or upserts) a Markdown comment on the issue after every run. Set `comment_mode` to skip that GitHub API call while still running all validation checks and setting all outputs.
 
-- **HTTPS only.** `horizon_url`, `horizon_url_fallback`, and `rpc_fallback_url` must use `https://`. Plain `http://` endpoints are rejected before any connection is attempted — TrustBridge never weakens or skips TLS certificate verification, and there is no input to disable it.
-- **SSRF-safe targets required.** The same URLs are rejected if they target a private IP range, loopback, link-local address, or a cloud metadata endpoint (`169.254.169.254`, `metadata.google.internal`), or use `file://`. This applies to the direct action inputs, not just values sourced from `.trustbridge.yml` (see [Consumer trustbridge.yml config file](../README.md#consumer-trustbridgeyml-config-file) for that layer's guarantees).
-- **Certificate must be trusted by the runner.** Self-signed, expired, or otherwise untrusted certificates cause the run to fail with a distinct **"Horizon TLS / certificate verification"** check — this is reported separately from account/trustline failures so it is never mistaken for "the contributor's account isn't set up right."
-- **Custom/private CA.** TrustBridge does not ship a custom CA bundle injection input in v1. If your mirror's certificate is signed by an internal CA, add a step before the TrustBridge step that sets `NODE_EXTRA_CA_CERTS` to point at a PEM file containing your CA chain:
+| Value | Behaviour |
+|-------|-----------|
+| `post` | **(default)** Post or upsert the comment normally. |
+| `dry-run` | Run all checks, set all outputs, but skip the GitHub API comment call. `comment_url` output is always empty. |
+| `off` | Same as `dry-run` — comment posting is permanently disabled for this step. Use when you want to make the intent explicit (e.g. scheduled health-check workflows). |
 
-  ```yaml
-  - name: Trust internal CA
-    run: echo "NODE_EXTRA_CA_CERTS=$GITHUB_WORKSPACE/internal-ca.pem" >> "$GITHUB_ENV"
+### When to use dry-run
 
-  - uses: Stellar-TrustBridge/trustbridge-action@v1
-    with:
-      horizon_url: https://horizon.internal.example.com
-      stellar_address_input: ${{ steps.address.outputs.address }}
-      github_token: ${{ secrets.GITHUB_TOKEN }}
-  ```
-
-  Do **not** set `NODE_TLS_REJECT_UNAUTHORIZED=0` to work around a certificate problem — that disables TLS verification for the whole process. TrustBridge detects and warns loudly in the logs if it finds this set in the environment.
-- **The comment hides your mirror's hostname by default.** Since a private Horizon mirror's hostname can itself be sensitive infrastructure information, the issue comment only shows the URL scheme (e.g. `https://•••`) unless `debug_mode: true` is set, in which case the full host is shown (the account address embedded in any Horizon URL is always masked regardless).
-
----
-
-## Unauthorized trustline policy
-
-Some issued assets set the issuer's `AUTHORIZATION_REQUIRED` flag, meaning a trustline can exist on an account without the issuer having authorized it yet — payments in that asset will fail until authorization happens, even though the trustline check alone would otherwise look green. Control how TrustBridge treats this with `unauthorized_trustline_policy`:
-
-| Value | Behavior |
-| ----- | -------- |
-| `warn` (default) | Trustline check still passes; the comment adds a warning explaining the account needs issuer authorization. |
-| `fail` | The trustline check does not pass. The `trustline_exists` output reflects this stricter meaning. |
-| `ignore` | No additional check or warning — matches pre-#72 behavior. |
+- **CI smoke tests** — verify validation logic in PR pipelines without spamming the issue timeline.
+- **Preview jobs** — run TrustBridge in a pre-release dry-run job to confirm the action bundle is working before tagging.
+- **Scheduled health checks** — periodic checks on wallet readiness without writing new comments on every cron tick.
 
 ```yaml
-with:
-  stellar_address_input: ${{ steps.address.outputs.address }}
-  github_token: ${{ secrets.GITHUB_TOKEN }}
-  unauthorized_trustline_policy: fail
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    comment_mode: dry-run    # validate + set outputs, skip comment
+    fail_on_missing: false
+```
+
+The `comment_url` output is `''` in `dry-run` and `off` modes. All other outputs (`account_funded`, `trustline_exists`, `xlm_balance`) are set exactly as they would be in `post` mode.
+
+### dry-run in downstream conditional steps
+
+```yaml
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bridge
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.addr.outputs.value }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          comment_mode: dry-run
+
+      - name: Gate on validation result
+        if: steps.bridge.outputs.account_funded == 'true'
+        run: echo "Account is funded — safe to proceed"
 ```
 
 ---
 
-## Clawback-enabled asset warnings
+## dashboard_webhook_url — validation telemetry (Wave #38)
 
-If the configured asset's trustline has clawback enabled (the issuer can revoke balances from the account at any time), TrustBridge surfaces a warning in the comment by default. For security-sensitive workflows (e.g. gating bounty payouts), set `clawback_strict_mode: true` to fail the check instead of only warning:
+When `dashboard_webhook_url` is set, TrustBridge POSTs a compact JSON summary of every validation run to that endpoint. This works in **all** `comment_mode` values including `dry-run` and `off`, making it suitable for dashboards, Slack alerts, and release automation that need a machine-readable signal without a GitHub issue comment.
 
 ```yaml
-with:
-  stellar_address_input: ${{ steps.address.outputs.address }}
-  github_token: ${{ secrets.GITHUB_TOKEN }}
-  clawback_strict_mode: true
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    comment_mode: dry-run
+    dashboard_webhook_url: ${{ secrets.TRUSTBRIDGE_WEBHOOK_URL }}
 ```
 
-Vanilla mainnet USDC (and any asset without clawback enabled) never triggers this warning — it is only raised when Horizon reports `is_clawback_enabled: true` on the matched trustline.
+### Webhook payload
+
+```json
+{
+  "validation": {
+    "ready": true,
+    "accountFunded": true,
+    "trustlineExists": true,
+    "xlmBalance": "10.0000000",
+    "xlmReserveMet": true,
+    "failedChecks": 0,
+    "passedChecks": 3,
+    "totalChecks": 3,
+    "failedLabels": []
+  },
+  "config": {
+    "assetCode": "USDC",
+    "assetIssuer": "GA5Z...KZVN",
+    "minXlmReserve": 1.5
+  },
+  "stellarAddressRedacted": "GAAA...AWHF",
+  "commentMode": "dry-run",
+  "commentUrl": "",
+  "timestamp": "2025-01-01T00:00:00.000Z"
+}
+```
+
+**Privacy guarantee:** Raw Stellar addresses are never included in the payload. `stellarAddressRedacted` contains only the first-4/last-4 characters (`GAAA...AWHF`).
+
+If the webhook call fails (network error, non-2xx response), TrustBridge emits a `core.warning` and continues — a webhook failure never fails the action step.
 
 ---
 

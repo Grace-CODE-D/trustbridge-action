@@ -125,7 +125,6 @@ export interface ActionInputsLogRecord {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: string;
-    minAssetBalance: string;
     stellarAddress: string;
     failOnMissing: boolean;
     debugMode: boolean;
