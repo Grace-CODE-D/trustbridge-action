@@ -42,10 +42,49 @@ npm ci
 |---------|---------|
 | `npm test` | Run Jest unit tests |
 | `npm run test:coverage` | Coverage report in `coverage/` |
+| `npm run test:mock` | Smoke tests against local mock Horizon (requires `npm run mock:start` first) |
 | `npm run lint` | ESLint on `src/` and `__tests__/` |
 | `npm run build` | Compile TypeScript to `dist/` |
+| `npm run mock:start` | Start mock Horizon container on `http://localhost:8089` |
+| `npm run mock:stop` | Stop and remove mock Horizon container |
 
-All commands must pass before opening a PR. CI runs the same pipeline (see `.github/workflows/ci.yml`).
+All commands except `mock:*` and `test:mock` must pass before opening a PR. CI runs the same pipeline (see `.github/workflows/ci.yml`).
+
+---
+
+## Mock Horizon for local development
+
+TrustBridge ships a [WireMock](https://wiremock.org)-based mock Horizon server
+so contributors can develop and test the action offline without hitting public
+Horizon or consuming rate-limit quota.
+
+### Quick start
+
+```bash
+# Requires Docker Desktop (or Docker Engine + Compose v2)
+npm run mock:start                                # start on http://localhost:8089
+HORIZON_MOCK_URL=http://localhost:8089 npm run test:mock   # run smoke tests
+npm run mock:stop                                 # stop container
+```
+
+### What is mocked
+
+| Scenario | Address | Response |
+|----------|---------|----------|
+| All checks pass | `GAAA...AWHF` | 200, 10 XLM, USDC trustline |
+| Unfunded account | `GBBB...BBBB` | 404 Not Found |
+| Low XLM balance | `GCCC...CCCC` | 200, 0.5 XLM, USDC trustline |
+| No trustline | `GDDD...DDDD` | 200, 10 XLM, no trustline |
+| Rate limited | `GEEE...EEEE` | 429 with `Retry-After: 1` |
+
+Stub definitions live in `mock/horizon/mappings/`. Full documentation:
+[mock/horizon/README.md](mock/horizon/README.md).
+
+### Skip behaviour
+
+The smoke test file (`__tests__/horizon-mock-smoke.test.ts`) skips all suites
+automatically when `HORIZON_MOCK_URL` is not set — so `npm test` is never
+affected by whether Docker is running.
 
 ---
 

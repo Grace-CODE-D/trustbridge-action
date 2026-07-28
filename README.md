@@ -425,6 +425,7 @@ Full matrix: [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md).
 | [docs/STRUCTURE.md](docs/STRUCTURE.md) | File and directory reference |
 | [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md) | Error cases and retry behavior |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, PR checklist, release process |
+| [mock/horizon/README.md](mock/horizon/README.md) | Mock Horizon server for offline local development |
 
 ---
 

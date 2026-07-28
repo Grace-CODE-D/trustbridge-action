@@ -48,3 +48,43 @@ jobs:
             git diff --stat -- dist
             exit 1
           fi
+
+  # ── Opt-in mock Horizon smoke tests ─────────────────────────────────────
+  # This job runs the smoke test suite against a local WireMock container.
+  # It is DISABLED in the default CI pipeline (if: false) to keep standard
+  # CI fast and dependency-free.
+  #
+  # To enable:
+  #   - Change `if: false` to `if: github.event_name == 'workflow_dispatch'`
+  #     to run only on manual triggers, OR
+  #   - Remove the `if:` condition entirely to always run alongside unit tests.
+  #
+  # See mock/horizon/README.md for full documentation.
+  mock-horizon-smoke:
+    runs-on: ubuntu-latest
+    # Change or remove this condition to opt in:
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start mock Horizon container
+        run: npm run mock:start
+
+      - name: Run smoke tests against mock Horizon
+        env:
+          HORIZON_MOCK_URL: http://localhost:8089
+        run: npm run test:mock
+
+      - name: Stop mock Horizon container
+        if: always()
+        run: npm run mock:stop

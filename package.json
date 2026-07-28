@@ -7,8 +7,11 @@
     "build": "tsc --noEmit && ncc build src/index.ts -o dist --source-map --license licenses.txt",
     "test": "jest",
     "test:coverage": "jest --coverage",
+    "test:mock": "jest --testPathPattern horizon-mock-smoke --forceExit",
     "lint": "eslint src __tests__ --ext .ts",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "mock:start": "docker compose -f mock/horizon/docker-compose.yml up -d --wait",
+    "mock:stop": "docker compose -f mock/horizon/docker-compose.yml down"
   },
   "repository": {
     "type": "git",
