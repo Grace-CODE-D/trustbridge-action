@@ -34900,7 +34900,7 @@ exports.isValidStellarAddress = isValidStellarAddress;
 exports.extractStellarAddressFromText = extractStellarAddressFromText;
 exports.validateStellarAddress = validateStellarAddress;
 exports.parseMinXlmReserve = parseMinXlmReserve;
-exports.parseMinAssetBalance = parseMinAssetBalance;
+exports.parseTrustlineLimit = parseTrustlineLimit;
 exports.estimateTrustlineSetupCost = estimateTrustlineSetupCost;
 exports.formatXlmDeficit = formatXlmDeficit;
 exports.formatAssetDeficit = formatAssetDeficit;
@@ -34994,6 +34994,14 @@ function parseMinAssetBalance(value) {
     }
     return normalized;
 }
+function parseTrustlineLimit(value) {
+    const normalized = value.trim();
+    const parsed = Number(normalized);
+    if (!normalized || !Number.isFinite(parsed) || parsed < 0) {
+        throw new Error(`min_trustline_limit must be a non-negative number. Received: "${value}"`);
+    }
+    return parsed;
+}
 function estimateTrustlineSetupCost() {
     return exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM + exports.STELLAR_BASE_RESERVE_XLM;
 }
@@ -35014,6 +35022,10 @@ function runAccountChecks(account, config) {
     const xlmReserveMet = reserveRequirement.met;
     const hasAnyTrustlines = account.balances.some((b) => (0, horizon_1.isCreditBalance)(b));
     const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(config.assetCode);
+    // Get trustline limit for the asset (Issue #140)
+    const trustlineLimit = (0, horizon_1.getTrustlineLimit)(account, config.assetCode, config.assetIssuer);
+    const trustlineLimitNumeric = (0, horizon_1.parseHorizonBalance)(trustlineLimit);
+    const trustlineLimitMet = !config.minTrustlineLimit || trustlineLimitNumeric >= config.minTrustlineLimit;
     const checks = [
         {
             passed: true,
@@ -35037,16 +35049,16 @@ function runAccountChecks(account, config) {
                 : `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** is below the required **${config.minXlmReserve} XLM**.`,
         },
     ];
-    if (assetBalanceCheckEnabled) {
-        const assetBalanceCheckDetail = trustlineExists
-            ? assetBalanceRequirement.met
-                ? `Balance **${(0, markdown_1.inlineCode)(assetBalanceRaw)} ${safeAssetCode}** meets the minimum of **${minAssetBalanceRequired} ${safeAssetCode}**.`
-                : `Balance **${(0, markdown_1.inlineCode)(assetBalanceRaw)} ${safeAssetCode}** is below the required **${minAssetBalanceRequired} ${safeAssetCode}**. Deficit: **${assetBalanceRequirement.missing} ${safeAssetCode}**.`
-            : `Cannot verify ${safeAssetCode} balance — trustline is not configured yet.`;
+    // Add trustline limit check if configured (Issue #140)
+    if (config.minTrustlineLimit !== undefined) {
         checks.push({
-            passed: assetBalanceMet || !trustlineExists,
-            label: `${safeAssetCode} minimum balance`,
-            detail: assetBalanceCheckDetail,
+            passed: trustlineExists && trustlineLimitMet,
+            label: 'Trustline limit',
+            detail: trustlineExists
+                ? trustlineLimitMet
+                    ? `Trustline limit is **${(0, markdown_1.inlineCode)(trustlineLimit)} ${safeAssetCode}** (minimum required: **${config.minTrustlineLimit} ${safeAssetCode}**).`
+                    : `Trustline limit is **${(0, markdown_1.inlineCode)(trustlineLimit)} ${safeAssetCode}** but **${config.minTrustlineLimit} ${safeAssetCode}** is required.`
+                : `Cannot verify trustline limit (${safeAssetCode} trustline does not exist).`,
         });
     }
     const valid = checks.every((c) => c.passed);
@@ -35060,8 +35072,8 @@ function runAccountChecks(account, config) {
         if (!xlmReserveMet) {
             steps.push(`Send at least **${reserveRequirement.missing} XLM** to ${(0, markdown_1.inlineCode)(account.account_id)} to meet the reserve requirement.`);
         }
-        if (assetBalanceCheckEnabled && !assetBalanceMet && trustlineExists) {
-            steps.push(`Acquire at least **${assetBalanceRequirement.missing} ${safeAssetCode}** to meet the minimum asset balance requirement of **${minAssetBalanceRequired} ${safeAssetCode}**.`);
+        if (trustlineExists && !trustlineLimitMet && config.minTrustlineLimit) {
+            steps.push(`Increase the ${safeAssetCode} trustline limit to at least **${config.minTrustlineLimit} ${safeAssetCode}** using [Stellar Laboratory](${(0, links_1.buildChangeTrustLink)(network)}) (Manage Trust operation) or a wallet. Current limit is **${(0, markdown_1.inlineCode)(trustlineLimit)} ${safeAssetCode}**.`);
         }
         remediation = steps.join('\n\n');
     }
@@ -35076,8 +35088,7 @@ function runAccountChecks(account, config) {
         trustlineExists,
         xlmBalance,
         xlmReserveMet,
-        assetBalance: assetBalanceRaw,
-        assetBalanceMet,
+        trustlineLimit,
         checks,
         remediation,
         sponsorshipInfo,
@@ -36207,9 +36218,7 @@ exports.waitForFundedAccount = waitForFundedAccount;
 exports.isCreditBalance = isCreditBalance;
 exports.getNativeBalance = getNativeBalance;
 exports.hasTrustline = hasTrustline;
-exports.getAssetBalance = getAssetBalance;
-exports.parseStroops = parseStroops;
-exports.formatStroops = formatStroops;
+exports.getTrustlineLimit = getTrustlineLimit;
 exports.parseHorizonBalance = parseHorizonBalance;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
@@ -36708,43 +36717,15 @@ function hasTrustline(account, assetCode, assetIssuer) {
         balance.asset_code === assetCode &&
         balance.asset_issuer === assetIssuer);
 }
-function getAssetBalance(account, assetCode, assetIssuer) {
-    const credit = account.balances.find((balance) => isCreditBalance(balance) &&
-        balance.asset_code === assetCode &&
-        balance.asset_issuer === assetIssuer);
-    return credit?.balance ?? '0';
-}
-function parseStroops(value) {
-    if (value === undefined || value === null)
-        return 0n;
-    const str = String(value).trim();
-    if (!str)
-        return 0n;
-    if (!/^-?\d+(\.\d+)?$/.test(str))
-        return 0n;
-    const isNegative = str.startsWith('-');
-    const absStr = isNegative ? str.slice(1) : str;
-    const parts = absStr.split('.');
-    const intPart = parts[0] || '0';
-    let fracPart = parts[1] || '';
-    if (fracPart.length > 7) {
-        fracPart = fracPart.slice(0, 7);
-    }
-    else {
-        fracPart = fracPart.padEnd(7, '0');
-    }
-    const absStroops = BigInt(intPart + fracPart);
-    return isNegative ? -absStroops : absStroops;
-}
-function formatStroops(stroops) {
-    const isNegative = stroops < 0n;
-    const absStroops = isNegative ? -stroops : stroops;
-    const str = absStroops.toString().padStart(8, '0');
-    const intPart = str.slice(0, -7);
-    const fracPart = str.slice(-7);
-    // Strip trailing zeros to match typical human formatting, but ensure at least .0
-    const cleanFrac = fracPart.replace(/0+$/, '');
-    return `${isNegative ? '-' : ''}${intPart}.${cleanFrac.padEnd(7, '0')}`;
+/**
+ * Get the trustline limit for a specific asset, if it exists.
+ * Returns the limit as a string (as provided by Horizon) or '0' if not found.
+ */
+function getTrustlineLimit(account, assetCode, assetIssuer) {
+    const balance = account.balances.find((b) => isCreditBalance(b) &&
+        b.asset_code === assetCode &&
+        b.asset_issuer === assetIssuer);
+    return balance && isCreditBalance(balance) && balance.limit ? balance.limit : '0';
 }
 function parseHorizonBalance(balance) {
     return parseStroops(balance);
@@ -37171,6 +37152,10 @@ async function run() {
         useCache,
         sep0007DeepLinks,
     });
+    (0, checks_1.validateStellarAddress)(stellarAddress);
+    const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
+    const minTrustlineLimitRaw = core.getInput('min_trustline_limit') || '';
+    const minTrustlineLimit = minTrustlineLimitRaw ? (0, inputs_1.parseNumberInput)(minTrustlineLimitRaw, 0, { min: 0 }) : undefined;
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
             horizonUrl,
@@ -37179,6 +37164,7 @@ async function run() {
             assetCode,
             assetIssuer,
             minXlmReserve: minXlmReserveRaw,
+            minTrustlineLimit: minTrustlineLimitRaw,
             stellarAddress,
             failOnMissing,
             debugMode,
@@ -37192,8 +37178,6 @@ async function run() {
             logInputs,
         });
     }
-    (0, checks_1.validateStellarAddress)(stellarAddress);
-    const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
     const normalizedAsset = (0, assets_1.normalizeAssetConfig)({ assetCode, assetIssuer });
     // Soroban fungible token contracts (SEP-41) use a "C..." contract address
     // as their issuer instead of a classic "G..." account. Validate that
@@ -37209,6 +37193,7 @@ async function run() {
     const checkConfig = {
         ...normalizedAsset,
         minXlmReserve,
+        minTrustlineLimit,
         horizonUrl,
     };
     core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
@@ -37976,6 +37961,7 @@ function buildInputsLogRecord(inputs) {
         assetCode: inputs.assetCode,
         assetIssuer: redactStellarAddress(inputs.assetIssuer) || redactString(inputs.assetIssuer),
         minXlmReserve: inputs.minXlmReserve,
+        minTrustlineLimit: inputs.minTrustlineLimit,
         stellarAddress: redactStellarAddress(inputs.stellarAddress),
         failOnMissing: inputs.failOnMissing,
         debugMode: inputs.debugMode,

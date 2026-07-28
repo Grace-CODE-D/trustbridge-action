@@ -7,6 +7,7 @@ export interface CheckConfig {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: number;
+    minTrustlineLimit?: number;
     horizonUrl?: string;
 }
 export interface CheckResultItem {
@@ -26,8 +27,7 @@ export interface ValidationResult {
     trustlineExists: boolean;
     xlmBalance: string;
     xlmReserveMet: boolean;
-    assetBalance: string;
-    assetBalanceMet: boolean;
+    trustlineLimit?: string;
     checks: CheckResultItem[];
     remediation?: string;
     /** Sponsorship relationship counts from Horizon. */
@@ -56,8 +56,8 @@ export interface AddressExtractionResult {
  */
 export declare function extractStellarAddressFromText(text: string | undefined | null): AddressExtractionResult;
 export declare function validateStellarAddress(address: string): void;
-export declare function parseMinXlmReserve(value: string): string;
-export declare function parseMinAssetBalance(value: string): string | undefined;
+export declare function parseMinXlmReserve(value: string): number;
+export declare function parseTrustlineLimit(value: string): number;
 export declare function estimateTrustlineSetupCost(): number;
 export declare function formatXlmDeficit(required: bigint, actual: bigint): string;
 export declare function formatAssetDeficit(required: bigint, actual: bigint): string;

@@ -146,36 +146,20 @@ async function run(): Promise<void> {
     trustbridgeConfigPath,
   });
 
-  // Wave #28: auto-extract Stellar address from the issue body when
-  // `extract_address_from_issue` is true and no explicit address was given.
-  let resolvedStellarAddress = stellarAddress;
-  if (extractAddressFromIssue && !resolvedStellarAddress) {
-    const issueBody = github.context.payload.issue?.body ?? '';
-    const extraction = extractStellarAddressFromText(issueBody);
-    if (extraction.address) {
-      resolvedStellarAddress = extraction.address;
-      logger.debug('Stellar address extracted from issue body', {
-        component: 'index',
-        stellarAddress: resolvedStellarAddress,
-        totalFound: extraction.allAddresses.length,
-      });
-      core.info(`Extracted Stellar address from issue body: ${resolvedStellarAddress}`);
-    } else {
-      throw new Error(
-        'extract_address_from_issue is true but no valid Stellar G-address was found in the issue body. ' +
-        'Add a Stellar address to the issue body or supply stellar_address_input explicitly.',
-      );
-    }
-  }
+  validateStellarAddress(stellarAddress);
+  const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
+  const minTrustlineLimitRaw = core.getInput('min_trustline_limit') || '';
+  const minTrustlineLimit = minTrustlineLimitRaw ? parseNumberInput(minTrustlineLimitRaw, 0, { min: 0 }) : undefined;
 
   if (logInputs) {
     emitInputsLogRecord({
-      horizonUrl: effectiveHorizonUrl,
-      horizonUrlFallback: effectiveHorizonUrlFallback,
-      rpcFallbackUrl: effectiveRpcFallbackUrl,
-      assetCode: effectiveAssetCode,
-      assetIssuer: effectiveAssetIssuer,
-      minXlmReserve: effectiveMinXlmReserveRaw,
+      horizonUrl,
+      horizonUrlFallback,
+      rpcFallbackUrl: rpcFallbackUrlRaw,
+      assetCode,
+      assetIssuer,
+      minXlmReserve: minXlmReserveRaw,
+      minTrustlineLimit: minTrustlineLimitRaw,
       stellarAddress,
       failOnMissing: effectiveFailOnMissing,
       debugMode,
@@ -191,48 +175,6 @@ async function run(): Promise<void> {
       logInputs,
     });
   }
-
-  const urlValidation = validateUrl(horizonUrl, 'horizon_url', {
-    protocols: ['https', 'http'],
-  });
-  if (!urlValidation.valid) {
-    throw new Error(`Invalid horizon_url: ${urlValidation.errors.join('; ')}`);
-  }
-
-  validateStellarAddress(stellarAddress);
-  const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
-
-  // ── #145: issues:write preflight ──────────────────────────────────────────
-  // Run before any Horizon call so consumers get a clear error when the token
-  // lacks comment-posting permission, rather than a confusing 403 after all
-  // the heavy lifting is done.
-  let preflightSkipComment = false;
-  try {
-    const preflight = await runIssuesPreflight(githubToken);
-    preflightSkipComment = preflight.skip;
-    if (preflight.skip) {
-      core.info(`[TrustBridge] ${preflight.message}`);
-    } else {
-      logger.debug('issues:write preflight passed', {
-        component: 'preflight',
-        issueNumber: preflight.issueNumber,
-      });
-    }
-  } catch (preflightError) {
-    if (preflightError instanceof PreflightError) {
-      // Hard fail: token demonstrably cannot post comments
-      core.setFailed(preflightError.message);
-      return;
-    }
-    // Unexpected error — warn and continue (don't block Horizon work)
-    core.warning(`issues:write preflight encountered an unexpected error: ${getErrorMessage(preflightError)}`);
-  }
-
-  if (preflightOnly) {
-    core.info('[TrustBridge] preflight_only=true — exiting after preflight without running Horizon checks.');
-    return;
-  }
-  // ─────────────────────────────────────────────────────────────────────────
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
 
@@ -256,7 +198,8 @@ async function run(): Promise<void> {
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
     minXlmReserve,
-    horizonUrl: effectiveHorizonUrl,
+    minTrustlineLimit,
+    horizonUrl,
   };
 
   core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);

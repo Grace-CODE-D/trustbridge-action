@@ -15,18 +15,7 @@ export interface HorizonBalanceCredit {
   asset_issuer: string;
   buying_liabilities: string;
   selling_liabilities: string;
-  /**
-   * Present only when the issuer has AUTHORIZATION_REQUIRED set. Absent
-   * means the issuer does not require per-account authorization.
-   */
-  is_authorized?: boolean;
-  is_authorized_to_maintain_liabilities?: boolean;
-  /**
-   * Per-trustline clawback flag (Horizon protocol 17+). Reflects the
-   * issuer's AUTH_CLAWBACK_ENABLED setting unless overridden on this
-   * specific trustline.
-   */
-  is_clawback_enabled?: boolean;
+  limit?: string; // Maximum balance this trustline can hold (Issue #140)
 }
 
 export interface HorizonBalanceLiquidityPoolShares {
@@ -882,111 +871,27 @@ export function hasTrustline(
   );
 }
 
-export function getAssetBalance(
+/**
+ * Get the trustline limit for a specific asset, if it exists.
+ * Returns the limit as a string (as provided by Horizon) or '0' if not found.
+ */
+export function getTrustlineLimit(
   account: HorizonAccount,
   assetCode: string,
   assetIssuer: string,
 ): string {
-  const credit = account.balances.find(
-    (balance) =>
-      isCreditBalance(balance) &&
-      balance.asset_code === assetCode &&
-      balance.asset_issuer === assetIssuer,
+  const balance = account.balances.find(
+    (b) =>
+      isCreditBalance(b) &&
+      b.asset_code === assetCode &&
+      b.asset_issuer === assetIssuer,
   );
-  return credit?.balance ?? '0';
+  return balance && isCreditBalance(balance) && balance.limit ? balance.limit : '0';
 }
 
-export function parseStroops(value: string | number | undefined): bigint {
-  if (value === undefined || value === null) return 0n;
-  const str = String(value).trim();
-  if (!str) return 0n;
-
-  if (!/^-?\d+(\.\d+)?$/.test(str)) return 0n;
-
-  const isNegative = str.startsWith('-');
-  const absStr = isNegative ? str.slice(1) : str;
-
-  const parts = absStr.split('.');
-  const intPart = parts[0] || '0';
-  let fracPart = parts[1] || '';
-
-  if (fracPart.length > 7) {
-    fracPart = fracPart.slice(0, 7);
-  } else {
-    fracPart = fracPart.padEnd(7, '0');
-  }
-
-  const absStroops = BigInt(intPart + fracPart);
-  return isNegative ? -absStroops : absStroops;
-}
-
-export function formatStroops(stroops: bigint): string {
-  const isNegative = stroops < 0n;
-  const absStroops = isNegative ? -stroops : stroops;
-  
-  const str = absStroops.toString().padStart(8, '0');
-  const intPart = str.slice(0, -7);
-  const fracPart = str.slice(-7);
-  
-  // Strip trailing zeros to match typical human formatting, but ensure at least .0
-  const cleanFrac = fracPart.replace(/0+$/, '');
-  return `${isNegative ? '-' : ''}${intPart}.${cleanFrac.padEnd(7, '0')}`;
-}
-
-export function parseHorizonBalance(balance: string): bigint {
-  return parseStroops(balance);
-}
-
-/**
- * Fetches the network_passphrase from the Horizon root endpoint.
- */
-export async function fetchNetworkPassphrase(
-  horizonUrl: string,
-  options: FetchAccountOptions = {},
-): Promise<string> {
-  const fetchImpl = options.fetchFn ?? (await import('node-fetch')).default;
-  const timeoutMs = options.timeoutMs || 15000;
-  const maxRetries = options.maxRetries ?? 3;
-  const retryBaseDelayMs = 1000;
-
-  let attempt = 0;
-  const normalizedUrl = horizonUrl.replace(/\/$/, '');
-
-  while (attempt <= maxRetries) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetchImpl(normalizedUrl, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: controller.signal as unknown as import('node-fetch').RequestInit['signal'],
-      });
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = (await response.json()) as { network_passphrase?: string };
-        if (data.network_passphrase) {
-          return data.network_passphrase;
-        }
-        throw new Error('network_passphrase not found in Horizon root response');
-      }
-
-      if (response.status !== 429 && response.status < 500) {
-        throw new Error(`Horizon returned ${response.status} ${response.statusText}`);
-      }
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (attempt >= maxRetries) {
-        throw error;
-      }
-    }
-    
-    attempt++;
-    await new Promise((resolve) => setTimeout(resolve, retryBaseDelayMs * Math.pow(2, attempt - 1)));
-  }
-  
-  throw new Error(`Failed to fetch network passphrase from ${redactHorizonUrl(horizonUrl)}`);
+export function parseHorizonBalance(balance: string): number {
+  const parsed = Number(balance);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export interface HorizonFetchOptions {
