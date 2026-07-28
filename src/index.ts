@@ -84,6 +84,9 @@ export async function run(): Promise<void> {
   const contractId = core.getInput('contract_id') || '';
   const githubUsername = core.getInput('github_username') || '';
 
+  // Onboarding checklist in comments (Issue #154) — default on
+  const onboardingChecklist = parseBooleanInput(core.getInput('onboarding_checklist'), true);
+
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
 
@@ -116,6 +119,7 @@ export async function run(): Promise<void> {
     rpcFallbackUrl: effectiveRpcFallbackUrl,
     useCache,
     sep0007DeepLinks,
+    onboardingChecklist,
     trustbridgeConfigPath,
   });
 
@@ -353,6 +357,7 @@ export async function run(): Promise<void> {
     waitUntilFunded,
     waitUntilFundedTimeoutMs,
     waitUntilFundedIntervalMs,
+    onboardingChecklist,
     sep0007DeepLinks,
     sep0007OriginDomain,
     multiAssetResults,

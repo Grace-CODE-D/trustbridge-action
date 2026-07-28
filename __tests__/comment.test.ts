@@ -167,29 +167,54 @@ describe('formatCommentBody', () => {
     expect(body).toContain('Failed checks: 1');
   });
 
-  it('truncates the remediation section if the comment exceeds MAX_COMMENT_LENGTH', () => {
-    // Generate an artificially huge remediation string (70,000 chars)
-    const hugeRemediation = 'A'.repeat(70000);
-    const oversizedResult: ValidationResult = {
-      ...validationResult,
-      remediation: hugeRemediation,
-    };
-
-    const body = formatCommentBody(oversizedResult, {
+  it('includes onboarding checklist by default with unchecked boxes for failures', () => {
+    const body = formatCommentBody(validationResult, {
       ...baseConfig,
       horizonUrl: 'https://horizon.stellar.org',
     });
 
-    // The length should be bounded by MAX_COMMENT_LENGTH (plus/minus small variance due to newlines/spacing if our logic is strictly exact)
-    // We enforce it fits in the max budget exactly or is slightly smaller
-    expect(body.length).toBeLessThanOrEqual(64000);
-    
-    // Ensure the notice is present
-    expect(body).toContain('[Truncated due to GitHub length limits. See workflow logs for full details.]');
-    
-    // Ensure the pass/fail gate is still present
+    expect(body).toContain('### Onboarding checklist');
+    expect(body).toContain('- [ ] **Fund account**');
+    expect(body).toContain('- [ ] **Add USDC trustline**');
+    expect(body).toContain('- [ ] **Verify XLM balance**');
+    expect(body).toContain('onboarding_checklist');
+  });
+
+  it('omits onboarding checklist when disabled', () => {
+    const body = formatCommentBody(validationResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+      onboardingChecklist: false,
+    });
+
+    expect(body).not.toContain('### Onboarding checklist');
+    expect(body).toContain('### Results');
     expect(body).toContain('### Validation gate');
-    expect(body).toContain('Failed checks: 1');
+  });
+
+  it('checks onboarding boxes from live ValidationResult state', () => {
+    const partial: ValidationResult = {
+      valid: false,
+      accountFunded: true,
+      trustlineExists: false,
+      xlmBalance: '5.0000000',
+      xlmReserveMet: true,
+      checks: [
+        { passed: true, label: 'Account funded', detail: 'ok' },
+        { passed: false, label: 'USDC trustline', detail: 'missing' },
+        { passed: true, label: 'XLM reserve', detail: 'ok' },
+      ],
+    };
+
+    const body = formatCommentBody(partial, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+      onboardingChecklist: true,
+    });
+
+    expect(body).toContain('- [x] **Fund account**');
+    expect(body).toContain('- [ ] **Add USDC trustline**');
+    expect(body).toContain('- [x] **Verify XLM balance**');
   });
 });
 

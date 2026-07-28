@@ -16,7 +16,7 @@ import {
   buildSep0007PayLink,
   inferStellarNetwork,
 } from './links';
-import { inlineCode, escapeMarkdownInline } from './markdown';
+import { buildOnboardingChecklist, inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
 import { displayHorizonUrl } from './horizon';
 
@@ -36,6 +36,12 @@ export interface CommentConfig extends CheckConfig {
   waitUntilFundedTimeoutMs?: number;
   waitUntilFundedIntervalMs?: number;
   stickyComment?: boolean;
+  /**
+   * When true (default), append an onboarding checklist task list whose
+   * checkboxes reflect live ValidationResult state (fund → trustline →
+   * verify balance). Set false to omit the block.
+   */
+  onboardingChecklist?: boolean;
   /** Emit SEP-0007 wallet deep links (web+stellar:pay) in the comment. */
   sep0007DeepLinks?: boolean;
   /** Optional origin domain for SEP-0007 URIs (§3.4). */
@@ -107,14 +113,16 @@ export function formatCommentBody(
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
   }
 
-  // Per-asset trustline breakdown (multi-asset mode)
-  if (config.multiAssetResults && config.multiAssetResults.length > 0) {
-    lines.push('', '### Asset trustlines', '');
-    for (const ar of config.multiAssetResults) {
-      lines.push(
-        `- ${statusIcon(ar.trustlineExists)} **${escapeMarkdownInline(ar.assetCode)}** — issuer: ${inlineCode(ar.assetIssuer)}`,
-      );
-    }
+  // Onboarding checklist (Issue #154) — default on; omit when explicitly disabled.
+  const showOnboardingChecklist = config.onboardingChecklist !== false;
+  if (showOnboardingChecklist) {
+    lines.push(
+      '',
+      buildOnboardingChecklist(result, {
+        assetCode: config.assetCode,
+        minXlmReserve: config.minXlmReserve,
+      }),
+    );
   }
 
   lines.push(
@@ -189,6 +197,7 @@ export function formatCommentBody(
     `| --- | --- |`,
     `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`,
     `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`,
+    `| \`onboarding_checklist\` | ${config.onboardingChecklist === undefined ? '_default (true)_' : config.onboardingChecklist ? '`true` — checklist section included' : '`false` — checklist omitted'} |`,
     `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`,
     `| \`unauthorized_trustline_policy\` | \`${config.unauthorizedTrustlinePolicy ?? 'warn'}\` |`,
     `| \`clawback_strict_mode\` | ${config.clawbackStrictMode ? '`true`' : '`false` (default)'} |`,

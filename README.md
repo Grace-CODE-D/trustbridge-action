@@ -93,6 +93,7 @@ Collecting wallets via a GitHub Issue Form instead of a hardcoded address? See [
 | `debug_mode` | No | `false` | Enable extra action logs for troubleshooting |
 | `horizon_timeout_ms` | No | `15000` | Horizon request timeout in milliseconds |
 | `sticky_comment` | No | `true` | Update TrustBridge's previous issue comment instead of posting a new one each run |
+| `onboarding_checklist` | No | `true` | Include an onboarding checklist (fund → trustline → verify balance) with live checkboxes in the issue comment |
 | `wait_until_funded` | No | `false` | Poll Horizon until the account is funded instead of failing on the first 404 |
 | `wait_until_funded_timeout_ms` | No | `120000` | Max time to poll for funding, in milliseconds (0-600000) |
 | `wait_until_funded_interval_ms` | No | `5000` | Delay between funding polls, in milliseconds (1000-60000) |

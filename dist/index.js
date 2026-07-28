@@ -34413,6 +34413,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -34946,7 +35009,7 @@ const markdown_1 = __nccwpck_require__(3758);
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-exports.COMMENT_SCHEMA_VERSION = '1.0.0';
+exports.COMMENT_SCHEMA_VERSION = '1.1.0';
 exports.TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
 /**
  * Legacy hidden marker (pre-schema-version). Kept for backward
@@ -34984,6 +35047,14 @@ function formatCommentBody(result, config) {
     for (const check of result.checks) {
         lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
+    // Onboarding checklist (Issue #154) — default on; omit when explicitly disabled.
+    const showOnboardingChecklist = config.onboardingChecklist !== false;
+    if (showOnboardingChecklist) {
+        lines.push('', (0, markdown_1.buildOnboardingChecklist)(result, {
+            assetCode: config.assetCode,
+            minXlmReserve: config.minXlmReserve,
+        }));
+    }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
         : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
@@ -35001,7 +35072,7 @@ function formatCommentBody(result, config) {
     if (result.remediation) {
         lines.push('', '### Remediation', '', result.remediation);
     }
-    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
+    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`onboarding_checklist\` | ${config.onboardingChecklist === undefined ? '_default (true)_' : config.onboardingChecklist ? '`true` — checklist section included' : '`false` — checklist omitted'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
     if (config.waitUntilFunded) {
         const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
         const interval = config.waitUntilFundedIntervalMs ?? 5000;
@@ -36088,6 +36159,8 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Onboarding checklist in comments (Issue #154) — default on
+    const onboardingChecklist = (0, inputs_1.parseBooleanInput)(core.getInput('onboarding_checklist'), true);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -36108,6 +36181,7 @@ async function run() {
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
         sep0007DeepLinks,
+        onboardingChecklist,
         trustbridgeConfigPath,
     });
     if (logInputs) {
@@ -36240,6 +36314,7 @@ async function run() {
         waitUntilFunded,
         waitUntilFundedTimeoutMs,
         waitUntilFundedIntervalMs,
+        onboardingChecklist,
         sep0007DeepLinks,
         sep0007OriginDomain,
     });
@@ -36843,13 +36918,39 @@ function emitInputsLogRecord(inputs) {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TROUBLESHOOTING_FAQ_BASE = void 0;
 exports.escapeMarkdownInline = escapeMarkdownInline;
 exports.inlineCode = inlineCode;
+exports.buildOnboardingChecklist = buildOnboardingChecklist;
 function escapeMarkdownInline(value) {
     return value.replace(/([`*_{}[\]()#+.!|>~-])/g, '\\$1');
 }
 function inlineCode(value) {
     return `\`${value.replace(/`/g, '\\`')}\``;
+}
+/** Base URL for FAQ anchors linked from the onboarding checklist. */
+exports.TROUBLESHOOTING_FAQ_BASE = 'https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md';
+/**
+ * Render a GitHub Markdown task-list checklist whose boxes reflect live
+ * `ValidationResult` state (fund → trustline → verify balance).
+ *
+ * Checkboxes are comment-only (no GitHub Projects task-list API sync).
+ */
+function buildOnboardingChecklist(result, options) {
+    const safeAsset = escapeMarkdownInline(options.assetCode);
+    const fundFaq = `${exports.TROUBLESHOOTING_FAQ_BASE}#account-is-reported-unfunded`;
+    const trustFaq = `${exports.TROUBLESHOOTING_FAQ_BASE}#trustline-is-missing`;
+    const reserveFaq = `${exports.TROUBLESHOOTING_FAQ_BASE}#xlm-reserve-too-low`;
+    const lines = [
+        '### Onboarding checklist',
+        '',
+        '_Complete these steps in order. Boxes update automatically from live Horizon checks._',
+        '',
+        `- [${result.accountFunded ? 'x' : ' '}] **Fund account** — Activate the account with XLM. ([FAQ](${fundFaq}))`,
+        `- [${result.trustlineExists ? 'x' : ' '}] **Add ${safeAsset} trustline** — Configure the asset trustline. ([FAQ](${trustFaq}))`,
+        `- [${result.xlmReserveMet ? 'x' : ' '}] **Verify XLM balance** — Meet the **${options.minXlmReserve} XLM** reserve. ([FAQ](${reserveFaq}))`,
+    ];
+    return lines.join('\n');
 }
 
 
