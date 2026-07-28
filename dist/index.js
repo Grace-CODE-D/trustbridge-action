@@ -34098,6 +34098,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35102,7 +35165,6 @@ exports.formatStroops = formatStroops;
 exports.parseHorizonBalance = parseHorizonBalance;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
-const resilience_1 = __nccwpck_require__(2334);
 class HorizonError extends Error {
     constructor(message, statusCode, retryable = false) {
         super(message);
@@ -35185,7 +35247,7 @@ function safeAccountSummary(account) {
         subentryCount: account.subentry_count,
     };
 }
-async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, rateBudgetTracker, retryMaxDelayMs) {
+async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind) {
     const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
     const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
     const safeUrlForLog = (0, logger_1.redactHorizonUrl)(url);
@@ -35267,10 +35329,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                 }
                 if (retryable && attempt < maxRetries) {
                     const retryAfterHeader = parseRetryAfterMs(response);
-                    let retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
-                    if (retryMaxDelayMs !== undefined && retryMaxDelayMs > 0) {
-                        retryAfter = Math.min(retryAfter, retryMaxDelayMs);
-                    }
+                    const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
                     logger_1.logger.debug('Horizon retry scheduled', safeHorizonContext({
                         component: 'horizon',
                         stellarAddress,
@@ -35343,10 +35402,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             }));
             lastError = new HorizonError(message, isAbort ? 408 : 0, true);
             if (attempt < maxRetries) {
-                let backoffMs = 1000 * 2 ** attempt;
-                if (retryMaxDelayMs !== undefined && retryMaxDelayMs > 0) {
-                    backoffMs = Math.min(backoffMs, retryMaxDelayMs);
-                }
+                const backoffMs = 1000 * 2 ** attempt;
                 logger_1.logger.debug('Horizon transport retry scheduled', safeHorizonContext({
                     component: 'horizon',
                     stellarAddress,
@@ -35396,9 +35452,6 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     const cache = options.cache ?? cache_1.defaultCache;
-    const horizonMaxRequests = options.horizonMaxRequests ?? 0;
-    const retryMaxDelayMs = options.retryMaxDelayMs ?? 30000;
-    const rateBudgetTracker = options.rateBudgetTracker ?? new resilience_1.RateBudgetTracker(horizonMaxRequests);
     const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
     const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
     const normalizedFallbackUrl = fallbackCandidate
@@ -35456,7 +35509,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     }
     let primaryError;
     try {
-        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', rateBudgetTracker, retryMaxDelayMs);
+        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary');
         if (cachingEnabled) {
             cache.set(cacheKey, result.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35500,7 +35553,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
     }));
     try {
-        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', rateBudgetTracker, retryMaxDelayMs);
+        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback');
         if (cachingEnabled) {
             cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35774,9 +35827,9 @@ async function run() {
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
-    const horizonMaxRequests = (0, inputs_1.parseNumberInput)(core.getInput('horizon_max_requests'), 0, { min: 0 });
-    const retryMaxDelayMs = (0, inputs_1.parseNumberInput)(core.getInput('retry_max_delay_ms'), 30000, { min: 0 });
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+    const shouldWriteValidationJson = (0, inputs_1.parseBooleanInput)(core.getInput('write_validation_json'), false);
+    const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
@@ -35820,8 +35873,6 @@ async function run() {
             waitUntilFundedIntervalMs,
             horizonCacheTtlMs,
             useCache,
-            horizonMaxRequests,
-            retryMaxDelayMs,
             logInputs,
         });
     }
@@ -35849,16 +35900,12 @@ async function run() {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
     }
     let result;
-    const rateBudgetTracker = new resilience_1.RateBudgetTracker(horizonMaxRequests);
     const horizonOptions = {
         timeoutMs: horizonTimeoutMs,
         horizonUrlFallback: horizonUrlFallback || undefined,
         fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
-        horizonMaxRequests,
-        retryMaxDelayMs,
-        rateBudgetTracker,
     };
     try {
         const account = waitUntilFunded
@@ -35955,7 +36002,15 @@ async function run() {
         const message = (0, inputs_1.getErrorMessage)(commentError);
         core.warning(`Failed to post issue comment: ${message}`);
     }
-    (0, outputs_1.setValidationOutputs)(result, commentUrl, multiAssetResults);
+    (0, outputs_1.setValidationOutputs)(result, commentUrl);
+    if (shouldWriteValidationJson) {
+        try {
+            (0, outputs_1.writeValidationJson)(result, { ...checkConfig, stellarAddress }, validationJsonPath);
+        }
+        catch (error) {
+            core.warning(`Failed to write validation.json: ${(0, inputs_1.getErrorMessage)(error)}`);
+        }
+    }
     if (debugMode) {
         logger_1.logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
         core.debug(metrics_1.globalMetrics.toJSON());
@@ -36503,8 +36558,6 @@ function buildInputsLogRecord(inputs) {
         waitUntilFundedIntervalMs: inputs.waitUntilFundedIntervalMs,
         horizonCacheTtlMs: inputs.horizonCacheTtlMs,
         useCache: inputs.useCache,
-        horizonMaxRequests: inputs.horizonMaxRequests,
-        retryMaxDelayMs: inputs.retryMaxDelayMs,
         logInputs: inputs.logInputs,
     };
 }
@@ -36731,14 +36784,12 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.toActionOutputs = toActionOutputs;
 exports.setValidationOutputs = setValidationOutputs;
+exports.writeValidationJson = writeValidationJson;
 const core = __importStar(__nccwpck_require__(7484));
-function toActionOutputs(result, commentUrl, multiAssetResults) {
-    const assetsTrustlineStatus = multiAssetResults && multiAssetResults.length > 0
-        ? JSON.stringify(multiAssetResults)
-        : '';
-    const trustlinesSummary = multiAssetResults && multiAssetResults.length > 0
-        ? String(multiAssetResults.every((r) => r.trustlineExists))
-        : '';
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
+const checks_1 = __nccwpck_require__(2122);
+function toActionOutputs(result, commentUrl) {
     return {
         // Legacy outputs
         trustline_exists: String(result.trustlineExists),
@@ -36754,6 +36805,25 @@ function setValidationOutputs(result, commentUrl, multiAssetResults) {
     for (const [name, value] of Object.entries(outputs)) {
         core.setOutput(name, value);
     }
+}
+function writeValidationJson(result, config, outputPath) {
+    const payload = {
+        timestamp: new Date().toISOString(),
+        address: config.stellarAddress,
+        asset: {
+            code: config.assetCode,
+            issuer: config.assetIssuer,
+        },
+        horizonUrl: config.horizonUrl,
+        readiness: (0, checks_1.buildValidationGate)(result),
+        checks: result.checks,
+        balances: {
+            xlm: result.xlmBalance,
+        },
+    };
+    const absolutePath = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), outputPath);
+    fs.writeFileSync(absolutePath, JSON.stringify(payload, null, 2), 'utf-8');
+    core.info(`Wrote structured validation artifact to ${absolutePath}`);
 }
 
 

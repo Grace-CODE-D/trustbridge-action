@@ -1,6 +1,9 @@
 import * as core from '@actions/core';
 
-import { AssetTrustlineResult, ValidationResult } from './checks';
+import * as fs from 'fs';
+import * as path from 'path';
+
+import { ValidationResult, CheckConfig, buildValidationGate } from './checks';
 
 export interface ActionOutputs {
   // Legacy outputs — kept for backward compatibility
@@ -47,4 +50,29 @@ export function setValidationOutputs(
   for (const [name, value] of Object.entries(outputs)) {
     core.setOutput(name, value);
   }
+}
+
+export function writeValidationJson(
+  result: ValidationResult,
+  config: CheckConfig & { stellarAddress: string },
+  outputPath: string,
+): void {
+  const payload = {
+    timestamp: new Date().toISOString(),
+    address: config.stellarAddress,
+    asset: {
+      code: config.assetCode,
+      issuer: config.assetIssuer,
+    },
+    horizonUrl: config.horizonUrl,
+    readiness: buildValidationGate(result),
+    checks: result.checks,
+    balances: {
+      xlm: result.xlmBalance,
+    },
+  };
+
+  const absolutePath = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), outputPath);
+  fs.writeFileSync(absolutePath, JSON.stringify(payload, null, 2), 'utf-8');
+  core.info(`Wrote structured validation artifact to ${absolutePath}`);
 }

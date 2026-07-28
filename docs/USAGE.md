@@ -414,6 +414,47 @@ All three inputs (`soroban_rpc_url`, `contract_id`, `github_username`) default t
 
 ---
 
+## Structured Artifacts (Security & Auditing)
+
+TrustBridge can emit a structured JSON artifact summarizing the check results for machine-readability, security reviews, and auditing. This avoids needing to parse markdown comments or action outputs.
+By default, this feature is disabled.
+
+To enable it, set `write_validation_json: 'true'`. You can then upload it using `actions/upload-artifact`:
+
+```yaml
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ github.event.inputs.stellar_address }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          write_validation_json: 'true'
+          validation_json_path: 'validation.json' # Default
+
+      - name: Upload Validation Artifact
+        uses: actions/upload-artifact@v4
+        if: always() # Ensure artifact is uploaded even if validation fails
+        with:
+          name: trustbridge-validation-artifact
+          path: validation.json
+```
+
+**JSON Schema:**
+The `validation.json` file contains:
+- `timestamp`: ISO-8601 string of the validation time
+- `address`: The evaluated Stellar account address
+- `asset`: Object containing `code` and `issuer`
+- `horizonUrl`: The Horizon API URL used for checks
+- `readiness`: Object containing `ready` (boolean), `totalChecks`, `passedChecks`, `failedChecks`, and `failedLabels`
+- `checks`: Array of per-check results
+- `balances`: Object containing `xlm` balance string
+
+> **Security Note:** The generated artifact is strictly filtered and will **never** contain the `github_token` or any authentication headers.
+
+---
+
 ## Pinning versions
 
 | Reference | When to use |

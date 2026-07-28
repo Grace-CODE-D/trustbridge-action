@@ -19,8 +19,8 @@ import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig, parseAssetsJson, dedupeAssets } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
-import { setValidationOutputs } from './outputs';
-import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
+import { setValidationOutputs, writeValidationJson } from './outputs';
+import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, validateUrl, clearSpans, getSpans } from './validation';
 
@@ -72,6 +72,8 @@ async function run(): Promise<void> {
   const horizonMaxRequests = parseNumberInput(core.getInput('horizon_max_requests'), 0, { min: 0 });
   const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms'), 30000, { min: 0 });
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+  const shouldWriteValidationJson = parseBooleanInput(core.getInput('write_validation_json'), false);
+  const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
   const githubToken = core.getInput('github_token', { required: true });
   const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
@@ -363,6 +365,14 @@ async function run(): Promise<void> {
     } catch (webhookError) {
       const message = getErrorMessage(webhookError);
       core.warning(`Failed to POST dashboard webhook: ${message}`);
+    }
+  }
+
+  if (shouldWriteValidationJson) {
+    try {
+      writeValidationJson(result, { ...checkConfig, stellarAddress }, validationJsonPath);
+    } catch (error) {
+      core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
     }
   }
 

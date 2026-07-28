@@ -1,5 +1,4 @@
 import { SimpleCache } from './cache';
-import { RateBudgetTracker } from './resilience';
 export interface HorizonBalanceNative {
     balance: string;
     asset_type: 'native';
@@ -60,9 +59,6 @@ export interface FetchAccountOptions {
     cacheTtlMs?: number;
     cache?: SimpleCache;
     fetchFn?: FetchLike;
-    horizonMaxRequests?: number;
-    retryMaxDelayMs?: number;
-    rateBudgetTracker?: RateBudgetTracker;
 }
 export declare function normalizeHorizonUrl(baseUrl: string): string;
 export declare function isRetryableStatus(status: number): boolean;

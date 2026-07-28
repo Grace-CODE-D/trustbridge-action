@@ -1,4 +1,4 @@
-import { AssetTrustlineResult, ValidationResult } from './checks';
+import { ValidationResult, CheckConfig } from './checks';
 export interface ActionOutputs {
     trustline_exists: string;
     xlm_balance: string;
@@ -9,5 +9,8 @@ export interface ActionOutputs {
     /** "true" if all assets in assets_json have trustlines, "false" otherwise, "" when not used. */
     trustlines_summary: string;
 }
-export declare function toActionOutputs(result: ValidationResult, commentUrl?: string, multiAssetResults?: AssetTrustlineResult[]): ActionOutputs;
-export declare function setValidationOutputs(result: ValidationResult, commentUrl?: string, multiAssetResults?: AssetTrustlineResult[]): void;
+export declare function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs;
+export declare function setValidationOutputs(result: ValidationResult, commentUrl?: string): void;
+export declare function writeValidationJson(result: ValidationResult, config: CheckConfig & {
+    stellarAddress: string;
+}, outputPath: string): void;
