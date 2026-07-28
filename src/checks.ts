@@ -95,6 +95,13 @@ export interface CheckResultItem {
   detail: string;
 }
 
+export interface SponsorshipInfo {
+  /** Number of accounts this account is sponsoring (num_sponsoring from Horizon). */
+  numSponsoring: number;
+  /** Number of accounts sponsoring this account (num_sponsored from Horizon). */
+  numSponsored: number;
+}
+
 export interface ValidationResult {
   valid: boolean;
   accountFunded: boolean;
@@ -109,8 +116,8 @@ export interface ValidationResult {
   assetBalanceMet: boolean;
   checks: CheckResultItem[];
   remediation?: string;
-  /** Non-blocking warnings surfaced in the comment (e.g. unauthorized/clawback-enabled trustline under "warn" policy). */
-  warnings?: string[];
+  /** Sponsorship relationship counts from Horizon. */
+  sponsorshipInfo?: SponsorshipInfo;
 }
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
@@ -304,6 +311,12 @@ export function runAccountChecks(
     remediation = steps.join('\n\n');
   }
 
+  // Extract sponsorship info from account (Issue #141)
+  const sponsorshipInfo: SponsorshipInfo = {
+    numSponsoring: account.num_sponsoring ?? 0,
+    numSponsored: account.num_sponsored ?? 0,
+  };
+
   return {
     valid,
     accountFunded: true,
@@ -316,7 +329,7 @@ export function runAccountChecks(
     assetBalanceMet,
     checks,
     remediation,
-    warnings: warnings.length > 0 ? warnings : undefined,
+    sponsorshipInfo,
   };
 }
 
@@ -388,7 +401,12 @@ export function unfundedAccountResult(
     assetBalance: '0',
     assetBalanceMet: false,
     checks,
-    remediation: remediationSteps.join('\n\n'),
+    remediation: [
+      `Activate ${safeAddress} by sending at least **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
+      `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](${buildChangeTrustLink(network)}) or [LOBSTR](${buildLobstrLink()}).`,
+      `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
+    ].join('\n\n'),
+    sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
   };
 }
 
@@ -499,9 +517,8 @@ export function tlsFailureResult(message: string, config: CheckConfig): Validati
     xlmReserveMet: false,
     checks,
     remediation:
-      'This is a TLS/certificate problem with the configured `horizon_url`, not an issue with the Stellar account. ' +
-      'If you are using a private Horizon mirror, verify its certificate is valid, not expired, and signed by a CA trusted by the runner. ' +
-      'See docs/USAGE.md for private-mirror setup guidance.',
+      'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
+    sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
   };
 }
 

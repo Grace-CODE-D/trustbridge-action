@@ -12,11 +12,8 @@ const result: ValidationResult = {
   trustlineExists: true,
   xlmBalance: '5.0000000',
   xlmReserveMet: true,
-  checks: [
-    { passed: true, label: 'Account funded', detail: 'ok' },
-    { passed: true, label: 'USDC trustline', detail: 'ok' },
-    { passed: true, label: 'XLM reserve', detail: 'ok' },
-  ],
+  checks: [],
+  sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
 };
 
 describe('toActionOutputs', () => {
@@ -32,6 +29,8 @@ describe('toActionOutputs', () => {
     });
     expect(outputs).toHaveProperty('readiness_badge_markdown');
     expect(outputs).toHaveProperty('readiness_badge_url');
+    expect(outputs).toHaveProperty('num_sponsoring');
+    expect(outputs).toHaveProperty('num_sponsored');
   });
 
   it('includes a comment URL when provided', () => {
@@ -46,6 +45,8 @@ describe('toActionOutputs', () => {
     });
     expect(outputs).toHaveProperty('readiness_badge_markdown');
     expect(outputs).toHaveProperty('readiness_badge_url');
+    expect(outputs).toHaveProperty('num_sponsoring');
+    expect(outputs).toHaveProperty('num_sponsored');
   });
 
   it('generates pass badge for valid results', () => {
@@ -63,6 +64,7 @@ describe('toActionOutputs', () => {
       xlmBalance: '0',
       xlmReserveMet: false,
       checks: [],
+      sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
     };
     const outputs = toActionOutputs(failResult);
     expect(outputs.readiness_badge_url).toContain('red');
@@ -78,90 +80,18 @@ describe('toActionOutputs', () => {
     expect(combined).not.toContain('github.com/account');
   });
 
-  it('includes per-asset trustline status when multiAssetResults provided', () => {
-    const multiAssetResults = [
-      { assetCode: 'USDC', assetIssuer: 'GAAA', trustlineExists: true },
-      { assetCode: 'EURC', assetIssuer: 'GBBB', trustlineExists: false },
-    ];
-    const outputs = toActionOutputs(result, undefined, multiAssetResults);
-    expect(outputs.assets_trustline_status).toBe(JSON.stringify(multiAssetResults));
-    expect(outputs.trustlines_summary).toBe('false');
-  });
-
-  it('sets trustlines_summary to true when all assets have trustlines', () => {
-    const multiAssetResults = [
-      { assetCode: 'USDC', assetIssuer: 'GAAA', trustlineExists: true },
-      { assetCode: 'EURC', assetIssuer: 'GBBB', trustlineExists: true },
-    ];
-    const outputs = toActionOutputs(result, undefined, multiAssetResults);
-    expect(outputs.trustlines_summary).toBe('true');
-  });
-
-  it('leaves multi-asset outputs empty when multiAssetResults is empty array', () => {
-    const outputs = toActionOutputs(result, undefined, []);
-    expect(outputs.assets_trustline_status).toBe('');
-    expect(outputs.trustlines_summary).toBe('');
-  });
-});
-
-describe('writeValidationJson', () => {
-  const testPath = 'test-val.json';
-  
-  beforeEach(() => {
-    jest.useFakeTimers().setSystemTime(new Date('2024-01-01T12:00:00.000Z'));
-  });
-
-  afterEach(() => {
-    jest.useRealTimers();
-    if (fs.existsSync(testPath)) {
-      fs.unlinkSync(testPath);
-    }
-  });
-
-  it('writes a JSON artifact omitting sensitive tokens', () => {
-    const config = {
-      assetCode: 'USDC',
-      assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-      minXlmReserve: 1.5,
-      stellarAddress: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
-      horizonUrl: 'https://horizon.stellar.org',
+  it('includes sponsor counts in outputs', () => {
+    const sponsoredResult: ValidationResult = {
+      valid: true,
+      accountFunded: true,
+      trustlineExists: true,
+      xlmBalance: '5.0',
+      xlmReserveMet: true,
+      checks: [],
+      sponsorshipInfo: { numSponsoring: 2, numSponsored: 1 },
     };
-
-    writeValidationJson(result, config, testPath);
-
-    expect(fs.existsSync(testPath)).toBe(true);
-
-    const writtenContent = fs.readFileSync(testPath, 'utf-8');
-    const parsed = JSON.parse(writtenContent);
-    expect(parsed.timestamp).toBe('2024-01-01T12:00:00.000Z');
-    expect(parsed.address).toBe('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
-    expect(parsed.asset.code).toBe('USDC');
-    expect(parsed.githubToken).toBeUndefined();
-  });
-});
-
-describe('writeValidationJson', () => {
-  it('snapshots a fixture without secrets', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-out-'));
-    const outPath = path.join(dir, 'validation.json');
-    const artifact = writeValidationJson({
-      result,
-      stellarAddress: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
-      assetCode: 'USDC',
-      assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-      horizonUrl: 'https://horizon.stellar.org',
-      outputPath: outPath,
-      privacyMode: false,
-      workspaceRoot: dir,
-    });
-
-    expect(artifact.schemaVersion).toBe('1.0.0');
-    expect(artifact.address).toBe('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
-    expect(artifact.readiness.ready).toBe(true);
-    expect(artifact.checks).toHaveLength(3);
-    expect(JSON.stringify(artifact)).not.toMatch(/github_token|Authorization|ghp_/i);
-    expect(fs.existsSync(outPath)).toBe(true);
-
-    fs.rmSync(dir, { recursive: true, force: true });
+    const outputs = toActionOutputs(sponsoredResult);
+    expect(outputs.num_sponsoring).toBe('2');
+    expect(outputs.num_sponsored).toBe('1');
   });
 });

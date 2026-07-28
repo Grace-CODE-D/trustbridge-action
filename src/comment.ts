@@ -170,6 +170,23 @@ export function formatCommentBody(
     );
   }
 
+  // Sponsorship info explainer (Issue #141)
+  if (result.sponsorshipInfo && (result.sponsorshipInfo.numSponsoring > 0 || result.sponsorshipInfo.numSponsored > 0)) {
+    lines.push(
+      '',
+      '### Sponsorship status',
+      '',
+      result.sponsorshipInfo.numSponsored > 0
+        ? `**This account is sponsored.** Another account is covering some or all of its reserve requirements.`
+        : '**This account sponsors other accounts** and may have reduced available balance.',
+      '',
+      `- Accounts this account sponsors: **${result.sponsorshipInfo.numSponsoring}**`,
+      `- Accounts sponsoring this account: **${result.sponsorshipInfo.numSponsored}**`,
+      '',
+      '**Reserve implications:** Sponsored accounts may have different reserve requirements than their balance suggests. The sponsoring account bears the reserve cost. [Learn more about sponsorship.](https://developers.stellar.org/learn/fundamentals/stellar-data-structures/ledger-entries#sponsorships)',
+    );
+  }
+
   if (result.remediation) {
     lines.push('', `### ${strings.remediationHeading}`, '', result.remediation);
   }

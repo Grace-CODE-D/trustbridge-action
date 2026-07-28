@@ -146,7 +146,11 @@ describe('generateBadgeUrl', () => {
 describe('generateBadgeMarkdown', () => {
   it('generates valid Markdown image link for pass state', () => {
     const markdown = generateBadgeMarkdown('pass');
-    expect(markdown).toMatch(/^\!\[.*\]\(https:\/\/img\.shields\.io\/badge\/.*\)\(.*/);
+    // Verify structure: [![alt](imageUrl)](linkUrl)
+    expect(markdown).toContain('[![');
+    expect(markdown).toContain('](https://img.shields.io/badge/');
+    expect(markdown).toContain(')](https://github.com/Stellar-TrustBridge/trustbridge-action)');
+    expect(markdown).toContain('TrustBridge');
     expect(markdown).toContain('github.com/Stellar-TrustBridge/trustbridge-action');
   });
 

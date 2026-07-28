@@ -210,6 +210,10 @@ outputs:
     description: 'Markdown-formatted readiness badge with link to TrustBridge repository'
   readiness_badge_url:
     description: 'Shields.io badge URL reflecting wallet-check readiness status (pass/fail)'
+  num_sponsoring:
+    description: 'Number of accounts this account is sponsoring (from Horizon)'
+  num_sponsored:
+    description: 'Number of accounts sponsoring this account (from Horizon)'
 
 runs:
   using: 'node20'

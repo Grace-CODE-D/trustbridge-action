@@ -34728,6 +34728,166 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 3120:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Readiness badge generation for TrustBridge validation results.
+ *
+ * Generates Markdown and URL-based badge snippets suitable for embedding
+ * in READMEs, maintainer dashboards, or other documentation. The badge
+ * reflects pass/fail/pending states without exposing PII or sensitive data.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.determineBadgeState = determineBadgeState;
+exports.generateBadgeUrl = generateBadgeUrl;
+exports.generateBadgeMarkdown = generateBadgeMarkdown;
+exports.generateBadgeSnippets = generateBadgeSnippets;
+/**
+ * Determine the badge state from a ValidationResult.
+ * - 'pass': All checks passed (valid === true)
+ * - 'fail': One or more checks failed (valid === false)
+ * - 'pending': Result is unknown or in-progress (never set by normal flow, but available for consumer use)
+ */
+function determineBadgeState(result) {
+    return result.valid ? 'pass' : 'fail';
+}
+/**
+ * Get the color code for a Shields.io badge based on state.
+ */
+function getBadgeColor(state) {
+    switch (state) {
+        case 'pass':
+            return 'brightgreen';
+        case 'fail':
+            return 'red';
+        case 'pending':
+            return 'yellow';
+    }
+}
+/**
+ * Get the human-readable label for a badge state.
+ */
+function getBadgeLabel(state) {
+    switch (state) {
+        case 'pass':
+            return 'Ready';
+        case 'fail':
+            return 'Not Ready';
+        case 'pending':
+            return 'Pending';
+    }
+}
+/**
+ * Generate a Shields.io badge URL for the given state.
+ *
+ * Example output:
+ * https://img.shields.io/badge/trustbridge-ready-brightgreen
+ *
+ * The URL is parameterless and contains no sensitive information (no addresses,
+ * balances, or asset details).
+ */
+function generateBadgeUrl(state, label = 'trustbridge') {
+    const color = getBadgeColor(state);
+    const message = getBadgeLabel(state);
+    return `https://img.shields.io/badge/${encodeURIComponent(label)}-${encodeURIComponent(message)}-${color}`;
+}
+/**
+ * Generate a Markdown-formatted badge snippet.
+ *
+ * Example output:
+ * [![TrustBridge](https://img.shields.io/badge/trustbridge-ready-brightgreen)](https://github.com/Stellar-TrustBridge/trustbridge-action)
+ *
+ * The Markdown includes a link to the TrustBridge repository for context.
+ */
+function generateBadgeMarkdown(state, label = 'trustbridge') {
+    const url = generateBadgeUrl(state, label);
+    const altText = `TrustBridge ${getBadgeLabel(state)}`;
+    return `[![${altText}](${url})](https://github.com/Stellar-TrustBridge/trustbridge-action)`;
+}
+/**
+ * Generate both Markdown and URL badge snippets from a ValidationResult.
+ *
+ * Returned object contains:
+ * - markdown: A clickable Markdown badge linking to the TrustBridge repository
+ * - url: A plain Shields.io badge URL suitable for embedding in static contexts
+ */
+function generateBadgeSnippets(result, label = 'trustbridge') {
+    const state = determineBadgeState(result);
+    return {
+        markdown: generateBadgeMarkdown(state, label),
+        url: generateBadgeUrl(state, label),
+    };
+}
+
+
+/***/ }),
+
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -34905,6 +35065,11 @@ function runAccountChecks(account, config) {
         }
         remediation = steps.join('\n\n');
     }
+    // Extract sponsorship info from account (Issue #141)
+    const sponsorshipInfo = {
+        numSponsoring: account.num_sponsoring ?? 0,
+        numSponsored: account.num_sponsored ?? 0,
+    };
     return {
         valid,
         accountFunded: true,
@@ -34915,6 +35080,7 @@ function runAccountChecks(account, config) {
         assetBalanceMet,
         checks,
         remediation,
+        sponsorshipInfo,
     };
 }
 function unfundedAccountResult(stellarAddress, config) {
@@ -34959,6 +35125,7 @@ function unfundedAccountResult(stellarAddress, config) {
             `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](${(0, links_1.buildChangeTrustLink)(network)}) or [LOBSTR](${(0, links_1.buildLobstrLink)()}).`,
             `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
         ].join('\n\n'),
+        sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
     };
 }
 function getFailedCheckLabels(result) {
@@ -35007,6 +35174,7 @@ function horizonFailureResult(message, config) {
         assetBalanceMet: false,
         checks,
         remediation: 'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
+        sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
     };
 }
 function buildReserveRequirement(required, actual) {
@@ -35255,7 +35423,6 @@ const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const links_1 = __nccwpck_require__(3346);
 const markdown_1 = __nccwpck_require__(3758);
-const i18n_1 = __nccwpck_require__(4859);
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -35290,8 +35457,7 @@ function formatCommentBody(result, config) {
     const lines = [
         exports.STICKY_COMMENT_MARKER,
         `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
-        `<!-- trustbridge-action:locale:${locale} -->`,
-        `## ${strings.heading}`,
+        '## TrustBridge — Stellar Account Check',
         '',
         `${strings.checkedAccount} ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
         `${strings.horizon} ${(0, markdown_1.inlineCode)(config.horizonUrl)}`,
@@ -35303,9 +35469,9 @@ function formatCommentBody(result, config) {
     for (const check of result.checks) {
         lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
-    lines.push('', `### ${strings.validationGateHeading}`, '', gate.ready
-        ? `- ${strings.readyToProceed}`
-        : `- ${strings.blockedBy} ${gate.failedLabels.join(', ')}`, `- ${strings.passedChecks} ${gate.passedChecks}/${gate.totalChecks}`, `- ${strings.failedChecks} ${gate.failedChecks}`, '', `### ${strings.balancesHeading}`, '', `- **${strings.xlmBalance}** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **${strings.minimumRequired}** \`${config.minXlmReserve} XLM\``, '', `### ${strings.setupCostHeading}`, '', `- ${strings.minimumAccountBalance} **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- ${strings.baseReservePerTrustline} **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- ${strings.typicalMinimumToFund} **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', `### ${strings.addTrustlineHeading}`, '', `- [${strings.viewAccountOnLab}](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [${strings.openTransactionBuilder}](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [${strings.lobstrWallet}](${(0, links_1.buildLobstrLink)()}) — ${strings.lobstrDescription} **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+    lines.push('', '### Validation gate', '', gate.ready
+        ? '- Ready to proceed: all checks passed.'
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     // SEP-0007 wallet deep links (Issue #44)
     if (config.sep0007DeepLinks) {
         const payLink = (0, links_1.buildSep0007PayLink)({
@@ -35315,22 +35481,28 @@ function formatCommentBody(result, config) {
             network: stellarLabNetwork,
             originDomain: config.sep0007OriginDomain || undefined,
         });
-        lines.push('', `### ${strings.sepWalletActionsHeading}`, '', `_${strings.sepWalletActionsDescription}_`, '', `- [${strings.sendXlmToActivate.replace('{amount}', String(checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM))}](${payLink})`);
+        lines.push('', '### Quick wallet actions (SEP-0007)', '', '_Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup._', '', `- [Send ${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM to activate account](${payLink})`);
+    }
+    // Sponsorship info explainer (Issue #141)
+    if (result.sponsorshipInfo && (result.sponsorshipInfo.numSponsoring > 0 || result.sponsorshipInfo.numSponsored > 0)) {
+        lines.push('', '### Sponsorship status', '', result.sponsorshipInfo.numSponsored > 0
+            ? `**This account is sponsored.** Another account is covering some or all of its reserve requirements.`
+            : '**This account sponsors other accounts** and may have reduced available balance.', '', `- Accounts this account sponsors: **${result.sponsorshipInfo.numSponsoring}**`, `- Accounts sponsoring this account: **${result.sponsorshipInfo.numSponsored}**`, '', '**Reserve implications:** Sponsored accounts may have different reserve requirements than their balance suggests. The sponsoring account bears the reserve cost. [Learn more about sponsorship.](https://developers.stellar.org/learn/fundamentals/stellar-data-structures/ledger-entries#sponsorships)');
     }
     if (result.remediation) {
-        lines.push('', `### ${strings.remediationHeading}`, '', result.remediation);
+        lines.push('', '### Remediation', '', result.remediation);
     }
-    lines.push('', `### ${strings.configurationSummaryHeading}`, '', `| ${strings.inputColumn} | ${strings.valueColumn} |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? strings.failOnMissingTrue : strings.failOnMissingFalse} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? strings.stickyCommentTrue : strings.stickyCommentFalse} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? strings.waitUntilFundedTrue : strings.waitUntilFundedFalse} |`);
+    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
     if (config.waitUntilFunded) {
         const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
         const interval = config.waitUntilFundedIntervalMs ?? 5000;
-        lines.push(`| \`wait_until_funded_timeout_ms\` | ${strings.waitUntilFundedTimeoutMs.replace('{ms}', String(timeout))} |`, `| \`wait_until_funded_interval_ms\` | ${strings.waitUntilFundedIntervalMs.replace('{ms}', String(interval))} |`);
+        lines.push(`| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`, `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`);
     }
-    lines.push('', `### ${strings.outputsHeading}`, '', `_${strings.outputsDescription}_`, '', `| ${strings.outputColumn} | ${strings.valueRunColumn} | ${strings.descriptionColumn} |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | ${strings.accountFundedOutput} |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | ${strings.trustlineExistsOutput.replace('{assetCode}', config.assetCode)} |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | ${strings.xlmBalanceOutput} |`, `| \`comment_url\` | _set after posting_ | ${strings.commentUrlOutput} |`);
+    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
     // Hardened metrics JSON export (Issue #33)
     if (config.metricsSnapshot) {
         const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
-        lines.push('', `### ${strings.metricsHeading}`, '', `_${strings.metricsDescription}_`, '', '```json', metricsJson, '```');
+        lines.push('', '### Metrics', '', '_Machine-readable run metrics. Values are structural counts only — no account addresses or balances._', '', '```json', metricsJson, '```');
     }
     lines.push('', '---', exports.TRUSTBRIDGE_FOOTER);
     return lines.join('\n');
@@ -36973,15 +37145,11 @@ async function run() {
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Internationalization (Issue #59)
-    const localeInput = core.getInput('locale') || 'en';
-    const locale = (0, i18n_1.parseLocaleInput)(localeInput);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -37113,7 +37281,6 @@ async function run() {
         waitUntilFundedIntervalMs,
         sep0007DeepLinks,
         sep0007OriginDomain,
-        locale,
     });
     let commentUrl;
     try {
@@ -38073,18 +38240,19 @@ exports.toActionOutputs = toActionOutputs;
 exports.setValidationOutputs = setValidationOutputs;
 exports.writeValidationJson = writeValidationJson;
 const core = __importStar(__nccwpck_require__(7484));
-const fs = __importStar(__nccwpck_require__(9896));
-const path = __importStar(__nccwpck_require__(6928));
-const delta_1 = __nccwpck_require__(1493);
+const badge_1 = __nccwpck_require__(3120);
 function toActionOutputs(result, commentUrl) {
+    const badgeSnippets = (0, badge_1.generateBadgeSnippets)(result);
     return {
         // Legacy outputs
         trustline_exists: String(result.trustlineExists),
         xlm_balance: result.xlmBalance,
         account_funded: String(result.accountFunded),
         comment_url: commentUrl ?? '',
-        assets_trustline_status: assetsTrustlineStatus,
-        trustlines_summary: trustlinesSummary,
+        readiness_badge_markdown: badgeSnippets.markdown,
+        readiness_badge_url: badgeSnippets.url,
+        num_sponsoring: String(result.sponsorshipInfo?.numSponsoring ?? 0),
+        num_sponsored: String(result.sponsorshipInfo?.numSponsored ?? 0),
     };
 }
 function setValidationOutputs(result, commentUrl, multiAssetResults) {
