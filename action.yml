@@ -95,6 +95,16 @@ inputs:
     description: 'Cache successful Horizon responses in job memory (true/false)'
     required: false
     default: 'false'
+  allow_cross_network_fallback:
+    description: >-
+      By default, the fallback URL (`horizon_url_fallback`/`rpc_fallback_url`)
+      is only used when it resolves to the same Stellar network (public vs
+      testnet, inferred from the URL) as `horizon_url` — a G-address is valid
+      on every network, so a mismatched fallback could otherwise silently
+      return funded/trustline/reserve data for the wrong ledger. Set this to
+      `true` to opt into cross-network fallback anyway. Defaults to false.
+    required: false
+    default: 'false'
   log_inputs:
     description: >-
       Emit a structured JSON log record of all resolved action inputs at run

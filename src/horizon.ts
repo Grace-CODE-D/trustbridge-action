@@ -1,5 +1,6 @@
 import { defaultCache, SimpleCache } from './cache';
 import { logger, redactHorizonUrl, redactString, LogContext } from './logger';
+import { inferStellarNetwork } from './links';
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -24,8 +25,9 @@ export interface HorizonAccount {
   sequence: string;
   subentry_count: number;
   balances: HorizonBalance[];
-  num_sponsoring: number;
-  num_sponsored: number;
+  /** Sponsorship fields (CAP-0033). Omitted by older Horizon snapshots — treat as 0 when absent. */
+  num_sponsoring?: number;
+  num_sponsored?: number;
 }
 
 export interface HorizonErrorResponse {
@@ -60,6 +62,16 @@ export interface FetchAccountOptions {
   cacheTtlMs?: number;
   cache?: SimpleCache;
   fetchFn?: FetchLike;
+  /**
+   * By default, a fallback URL that resolves to a *different* Stellar
+   * network than the primary `horizon_url` (public vs testnet, inferred
+   * from the URL) is never used — a G-address is valid on every network,
+   * so a cross-network fallback can silently return funded/trustline/
+   * reserve data for the wrong ledger instead of failing loudly. Set this
+   * to `true` to opt into cross-network fallback anyway (e.g. deliberate
+   * multi-network setups).
+   */
+  allowCrossNetworkFallback?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -498,12 +510,38 @@ export async function fetchAccount(
     throw primaryError;
   }
 
+  // Network binding rule: a G-address is valid on every Stellar network, so
+  // a fallback URL that resolves to a different network than the primary
+  // could silently return funded/trustline/reserve data for the *wrong*
+  // ledger instead of failing loudly. Compare the inferred networks and
+  // refuse the fallback unless the caller explicitly opted in.
+  const primaryNetwork = inferStellarNetwork(normalizedHorizonUrl);
+  const fallbackNetwork = inferStellarNetwork(normalizedFallbackUrl);
+  const crossNetworkFallback = primaryNetwork !== fallbackNetwork;
+
+  if (crossNetworkFallback && !options.allowCrossNetworkFallback) {
+    logger.debug('Horizon RPC fallback skipped: primary and fallback resolve to different networks', safeHorizonContext({
+      component: 'horizon',
+      stellarAddress,
+      horizonUrl,
+      horizonUrlFallback: normalizedFallbackUrl,
+      primaryNetwork,
+      fallbackNetwork,
+      primaryStatusCode: primaryError?.statusCode,
+      primaryErrorMessage: primaryError ? redactString(primaryError.message) : undefined,
+    }));
+    throw primaryError;
+  }
+
   logger.debug('Horizon RPC fallback: primary exhausted, switching to fallback URL', safeHorizonContext({
     component: 'horizon',
     stellarAddress,
     horizonUrl,
     horizonUrlFallback: normalizedFallbackUrl,
     cacheKey: cachingEnabled ? cacheKey : undefined,
+    primaryNetwork,
+    fallbackNetwork,
+    crossNetworkFallback,
     primaryStatusCode: primaryError?.statusCode,
     primaryRetryable: primaryError?.retryable,
     primaryErrorMessage: primaryError ? redactString(primaryError.message) : undefined,

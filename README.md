@@ -76,12 +76,12 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 
 | Input | Required | Default | Description |
 | -------- | ---------- | --------- | ------------- |
-| `stellar_address_input` | **Yes** | — | Stellar public key (G-address, 56 characters) to validate |
+| `stellar_address_input` | **Yes** | — | Stellar public key (G-address, 56 characters) to validate. Verified against the full StrKey policy (version byte + CRC-16/XMODEM checksum), not just the regex shape. |
 | `github_token` | **Yes** | — | Token with `issues: write` to post comments (`GITHUB_TOKEN` is typical) |
 | `horizon_url` | No | `https://horizon.stellar.org` | Horizon API base URL (use testnet URL for testing) |
 | `asset_code` | No | `USDC` | Asset code for trustline verification |
 | `asset_issuer` | No | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | Issuer address for the asset |
-| `min_xlm_reserve` | No | `1.5` | Minimum native XLM balance required |
+| `min_xlm_reserve` | No | `1.5` | Minimum native XLM balance required, applied as a floor over the Stellar protocol minimum computed from the account's subentries and sponsorship (see below). |
 | `debug_mode` | No | `false` | Enable extra action logs for troubleshooting |
 | `horizon_timeout_ms` | No | `15000` | Horizon request timeout in milliseconds |
 | `sticky_comment` | No | `true` | Update TrustBridge's previous issue comment instead of posting a new one each run |
@@ -90,8 +90,9 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `wait_until_funded_interval_ms` | No | `5000` | Delay between funding polls, in milliseconds (1000-60000) |
 | `horizon_url_fallback` | No | _(empty)_ | Optional fallback Horizon URL. When the primary `horizon_url` fails with a retryable non-404 error (429/502/503/504, timeout), TrustBridge retries the full request against this URL. Use for cross-region or multi-provider resilience. |
 | `rpc_fallback_url` | No | `""` | Comma-separated secondary Horizon or RPC URLs to fail over to if primary node fails |
-| `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
-| `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls |
+| `horizon_cache_ttl_ms` | No | `60000` | In-memory Horizon account cache TTL in milliseconds, used when `use_cache: true`. Cached results skip the network call entirely within the TTL window. Set to `0` to disable caching. Maximum 3,600,000 ms (1 hour). |
+| `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls. Disabled by default; account-not-found (404) responses are never cached. |
+| `allow_cross_network_fallback` | No | `false` | Allow `horizon_url_fallback` / `rpc_fallback_url` to be used even when it resolves to a different Stellar network (public vs testnet) than `horizon_url`. Off by default so a misconfigured fallback can't silently return data for the wrong ledger. |
 | `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
 | `trustbridge_config_path` | No | `.trustbridge.yml` | Path (relative to repository root, or absolute) to a consumer `trustbridge.yml` config file that can supply defaults for `horizon_url`, `asset_code`, `asset_issuer`, `min_xlm_reserve`, and other inputs. Explicit action inputs always override file values. The file is validated for SSRF-safe URLs, injection-clean strings, and secret field redaction before any value is used. Leave empty to skip the file entirely. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
@@ -178,6 +179,18 @@ Set `trustbridge_config_path: ''` to skip the file entirely and rely only on exp
 
 ---
 
+## Sponsor-aware XLM reserve
+
+Horizon account payloads include `subentry_count`, `num_sponsoring`, and `num_sponsored` (CAP-0033). TrustBridge uses these to compute the real Stellar protocol minimum balance instead of only comparing the native balance to a flat floor:
+
+```
+protocol minimum = (2 base reserves + subentries + num_sponsoring − num_sponsored) × 0.5 XLM
+```
+
+`min_xlm_reserve` is then applied as a **floor** over that computed minimum — the account must meet whichever is higher. This avoids two failure modes of a flat threshold: a contributor with sponsored trustlines being flagged "low reserve" when their own funds easily cover their actual requirement, and a contributor with several unsponsored subentries passing a flat check while actually below the real ledger minimum. The issue comment's "XLM reserve" line and `### Balances` section both explain the computed requirement (protocol minimum vs configured floor) alongside the balance. Horizon snapshots that omit `num_sponsoring` / `num_sponsored` (older accounts) are treated as `0` for both fields.
+
+---
+
 ## Waiting for a contributor to fund their account
 
 By default, TrustBridge checks the account once: if Horizon returns 404 (not funded), the run immediately posts an unfunded result. For workflows where a contributor is expected to fund their wallet moments after assignment (e.g. a bot nudges them to send XLM as part of onboarding), set `wait_until_funded: true` to poll instead of failing on the first miss:
@@ -201,15 +214,16 @@ TrustBridge ships with two opt-in resilience features that reduce round-trips to
 
 ### In-memory Horizon account cache
 
-Within a single GitHub Actions job, account lookups are cached in memory by default (60 s TTL, configurable via `horizon_cache_ttl_ms`). Subsequent checks for the same `(horizon_url, stellar_address)` pair return the cached response without issuing another HTTP call:
+Caching is **disabled by default** — set `use_cache: true` to opt in. Once enabled, account lookups are cached in memory for the rest of the job (60 s TTL by default, configurable via `horizon_cache_ttl_ms`). Subsequent checks for the same `(horizon_url, stellar_address)` pair return the cached response without issuing another HTTP call:
 
 ```yaml
 with:
   # ...other inputs...
+  use_cache: true
   horizon_cache_ttl_ms: 120000   # cache for 2 minutes within this job
 ```
 
-Setting `horizon_cache_ttl_ms: 0` disables the cache entirely so every check reaches Horizon live.
+Setting `horizon_cache_ttl_ms: 0` disables the cache entirely so every check reaches Horizon live. Account-not-found (404) responses are never cached, so a contributor who funds their account mid-job is picked up on the next check instead of being stuck behind a stale "unfunded" cache entry.
 
 ### Horizon RPC fallback URL
 
@@ -222,6 +236,15 @@ with:
 ```
 
 When the primary endpoint exhausts its retries on a retryable error (429 / 502 / 503 / 504 / network timeout), TrustBridge transparently re-runs the same request against the fallback URL before surfacing a failure. Account-not-found (404) is **not** retried on the fallback — a missing account on primary is treated as a missing account everywhere, consistent with `wait_until_funded` semantics. Caching is shared between primary and fallback (the cache key is keyed on primary URL), so a fallback success populates the cache for subsequent lookups.
+
+**Network binding rule.** A G-address is valid on every Stellar network, so a fallback URL that resolves to a *different* network than the primary (public vs testnet, inferred from the URL) could silently return funded/trustline/reserve data for the wrong ledger instead of failing loudly. TrustBridge refuses a cross-network fallback by default and fails with the original primary error instead. Set `allow_cross_network_fallback: true` to opt into cross-network fallback anyway (e.g. deliberate multi-network setups):
+
+```yaml
+with:
+  horizon_url: https://horizon.stellar.org
+  horizon_url_fallback: https://horizon-testnet.stellar.org
+  allow_cross_network_fallback: true   # opt in — primary and fallback are on different networks
+```
 
 ---
 
@@ -256,6 +279,7 @@ When `debug_mode: true` is set, TrustBridge emits detailed `core.debug` lines co
 | `Horizon error response parsed` / `Horizon error response missing JSON body` | Non-2xx responses. Upstream `detail`, `title`, `type` strings are scanned and redacted before logging. |
 | `Horizon retry scheduled` / `Horizon transport retry scheduled` | Transient HTTP or transport errors scheduled for retry. |
 | `Horizon non-retryable HTTP error (exhausted retries)` / `Horizon transport error (exhausted retries)` | Primary endpoint giving up. |
+| `Horizon RPC fallback skipped: primary and fallback resolve to different networks` | Fallback refused because `allow_cross_network_fallback` is not set and the fallback URL is on a different Stellar network than the primary. |
 | `Horizon RPC fallback: primary exhausted, switching to fallback URL` | Start of fallback attempt. Primary error message and both URLs are redacted. |
 | `Horizon RPC fallback succeeded` / `Horizon RPC fallback exhausted` | Fallback outcome. Both primary and fallback status/message fields are redacted on exhaustion. |
 

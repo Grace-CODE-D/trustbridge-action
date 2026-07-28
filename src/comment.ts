@@ -103,7 +103,9 @@ export function formatCommentBody(
     '### Balances',
     '',
     `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`,
-    `- **Minimum required:** \`${config.minXlmReserve} XLM\``,
+    result.reserveRequirement
+      ? `- **Minimum required:** \`${result.reserveRequirement.required} XLM\` (protocol minimum \`${result.reserveRequirement.protocolMinimum} XLM\` from ${result.reserveRequirement.subentryCount} subentries/sponsorship, configured floor \`${result.reserveRequirement.configuredFloor} XLM\`)`
+      : `- **Minimum required:** \`${config.minXlmReserve} XLM\``,
     '',
     '### Setup cost estimate',
     '',

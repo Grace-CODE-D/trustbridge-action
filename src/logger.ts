@@ -329,6 +329,7 @@ export interface ActionInputsLogRecord {
   horizonCacheTtlMs: number;
   useCache: boolean;
   logInputs: boolean;
+  allowCrossNetworkFallback?: boolean;
 }
 
 /**
@@ -359,6 +360,7 @@ export function buildInputsLogRecord(inputs: ActionInputsLogRecord): ActionInput
     horizonCacheTtlMs: inputs.horizonCacheTtlMs,
     useCache: inputs.useCache,
     logInputs: inputs.logInputs,
+    allowCrossNetworkFallback: inputs.allowCrossNetworkFallback ?? false,
   };
 }
 

@@ -8,10 +8,11 @@ TrustBridge validates inputs before calling Horizon so failures stay clear and c
 - Must be a 56-character public key.
 - Must start with `G`.
 - Must only use Stellar base32 characters.
+- Must pass StrKey checksum validation (ed25519 version byte + CRC-16/XMODEM), not just the regex shape.
 
 ## Reserve amount
 
-`min_xlm_reserve` should be a non-negative numeric string such as `1.5`. Projects can raise this when contributors need extra ledger entries for trustlines, sponsorship, or app-specific requirements.
+`min_xlm_reserve` should be a non-negative numeric string such as `1.5`. Projects can raise this when contributors need extra ledger entries for trustlines, sponsorship, or app-specific requirements. It is applied as a floor over the Stellar protocol minimum computed from the account's `subentry_count`, `num_sponsoring`, and `num_sponsored` — see [README: Sponsor-aware XLM reserve](../README.md#sponsor-aware-xlm-reserve).
 
 ## Boolean behavior
 
