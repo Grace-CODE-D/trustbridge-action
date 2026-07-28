@@ -121,12 +121,67 @@ test: cover zero-trustline account path
 
 ## Releasing (maintainers)
 
-1. Merge to `main` with passing CI
-2. Tag semver (`v1.0.1`)
-3. Create GitHub Release with changelog
-4. Consumers pin `@v1` or specific patch tag
+### Release checklist
 
-**Build note:** `npm run build` runs TypeScript checking and `@vercel/ncc` to bundle `dist/index.js`. Commit `dist/` when releasing.
+Before cutting a release tag, ensure:
+
+1. **All CI checks pass** — Push to a feature branch and verify CI passes completely
+2. **Run coverage gates** — `npm run test:coverage` must pass (statement/branch/function/line thresholds)
+3. **Build and verify dist/** — Run `npm run build` and commit the rebuilt `dist/`
+4. **dist/ matches src/** — After any code change, `dist/` must be up-to-date. CI enforces this via `git diff --exit-code -- dist`
+5. **Update action.yml if inputs/outputs changed** — Ensure new or changed inputs have descriptions and defaults
+6. **Update docs** — If behavior or inputs changed, update [docs/USAGE.md](docs/USAGE.md) and [README.md](README.md)
+7. **Smoke test via SHA reference** — Clone a fresh copy of the repository and test the action by SHA to ensure the bundled dist/ works as a GitHub Action
+8. **Prepare SBOM** — If releasing with Issue #69 (SBOM attachment), generate the SBOM before tagging
+9. **Create GitHub Release** — Once the tag is pushed, create a Release page with a changelog (use `v1.0.0` format for tag names)
+
+### Packaging essentials
+
+**Why packaging matters:**
+- Consumers pin the action by SHA (`@<commit>`) or tag (`@v1`). Missing or stale `dist/` silently breaks comment posting.
+- GitHub Actions require `dist/index.js` to exist; missing it causes "action not found" errors.
+- `ncc` bundles dependencies so Node.js isn't required at runtime; if `dist/` isn't committed, the compiled code won't be available to runners.
+
+**Build process:**
+```bash
+npm run build
+# Outputs: dist/index.js, dist/index.js.map, dist/licenses.txt
+```
+
+This step:
+1. Runs `tsc --noEmit` to typecheck (fails if there are errors)
+2. Runs `@vercel/ncc` to bundle all dependencies into a single `dist/index.js`
+3. Generates source maps for debugging
+4. Extracts license information
+
+**CI enforcement:**
+- `.github/workflows/ci.yml` runs `npm run build` and verifies `dist/index.js` exists
+- It also runs `git diff --exit-code -- dist/` to fail if committed `dist/` is stale relative to src/
+
+**Manual smoke test:**
+```bash
+# In a fresh clone of the release tag:
+git checkout v1.0.0
+ls -la dist/index.js  # Must exist
+node dist/index.js    # Should not throw (though it needs GitHub env to run fully)
+```
+
+### Release and SBOM workflow
+
+Once packaging is complete and tagged:
+
+1. **Push tag to repository** — `git push origin v1.0.0`
+2. **Wait for release workflow** — `.github/workflows/release.yml` runs `verify-release` job on the tag
+3. **Generate SBOM** (if using Issue #69) — The release workflow can generate and attach an SBOM asset
+4. **Create GitHub Release** — Link to the tag, add changelog, attach SBOM if generated
+
+---
+
+## Semver guidance
+
+- **MAJOR** (v2.0.0) — Breaking changes to inputs, outputs, or behavior; major feature additions
+- **MINOR** (v1.1.0) — New non-breaking features, new locales, new output formats
+- **PATCH** (v1.0.1) — Bug fixes, dependency updates, documentation improvements
 
 ---
 
