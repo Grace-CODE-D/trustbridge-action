@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import {
+  AssetTrustlineResult,
   CheckConfig,
   STELLAR_BASE_RESERVE_XLM,
   STELLAR_MIN_ACCOUNT_BALANCE_XLM,
@@ -15,7 +16,7 @@ import {
   buildSep0007PayLink,
   inferStellarNetwork,
 } from './links';
-import { inlineCode } from './markdown';
+import { inlineCode, escapeMarkdownInline } from './markdown';
 import { MetricsCollector } from './metrics';
 import { displayHorizonUrl } from './horizon';
 
@@ -53,6 +54,8 @@ export interface CommentConfig extends CheckConfig {
    * snapshot so the comment reflects the run that generated it.
    */
   metricsSnapshot?: MetricsCollector;
+  /** Per-asset trustline results from multi-asset validation. */
+  multiAssetResults?: AssetTrustlineResult[];
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
@@ -100,10 +103,13 @@ export function formatCommentBody(
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
   }
 
-  if (result.warnings && result.warnings.length > 0) {
-    lines.push('', '### Warnings', '');
-    for (const warning of result.warnings) {
-      lines.push(`- ⚠️ ${warning}`);
+  // Per-asset trustline breakdown (multi-asset mode)
+  if (config.multiAssetResults && config.multiAssetResults.length > 0) {
+    lines.push('', '### Asset trustlines', '');
+    for (const ar of config.multiAssetResults) {
+      lines.push(
+        `- ${statusIcon(ar.trustlineExists)} **${escapeMarkdownInline(ar.assetCode)}** — issuer: ${inlineCode(ar.assetIssuer)}`,
+      );
     }
   }
 

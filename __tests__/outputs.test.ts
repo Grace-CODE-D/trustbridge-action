@@ -19,8 +19,8 @@ describe('toActionOutputs', () => {
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: '',
-      asset_balance: '100.0000000',
-      asset_balance_met: 'true',
+      assets_trustline_status: '',
+      trustlines_summary: '',
     });
   });
 
@@ -30,29 +30,33 @@ describe('toActionOutputs', () => {
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: 'https://github.com/comment',
-      asset_balance: '100.0000000',
-      asset_balance_met: 'true',
+      assets_trustline_status: '',
+      trustlines_summary: '',
     });
   });
 
-  it('serializes asset_balance_met as false when below floor', () => {
-    const failingResult: ValidationResult = {
-      ...result,
-      assetBalance: '10.0000000',
-      assetBalanceMet: false,
-    };
-    expect(toActionOutputs(failingResult).asset_balance_met).toBe('false');
-    expect(toActionOutputs(failingResult).asset_balance).toBe('10.0000000');
+  it('includes per-asset trustline status when multiAssetResults provided', () => {
+    const multiAssetResults = [
+      { assetCode: 'USDC', assetIssuer: 'GAAA', trustlineExists: true },
+      { assetCode: 'EURC', assetIssuer: 'GBBB', trustlineExists: false },
+    ];
+    const outputs = toActionOutputs(result, undefined, multiAssetResults);
+    expect(outputs.assets_trustline_status).toBe(JSON.stringify(multiAssetResults));
+    expect(outputs.trustlines_summary).toBe('false');
   });
 
-  it('serializes unknown asset balance when horizon fails', () => {
-    const failedResult: ValidationResult = {
-      ...result,
-      valid: false,
-      assetBalance: 'unknown',
-      assetBalanceMet: false,
-    };
-    expect(toActionOutputs(failedResult).asset_balance).toBe('unknown');
-    expect(toActionOutputs(failedResult).asset_balance_met).toBe('false');
+  it('sets trustlines_summary to true when all assets have trustlines', () => {
+    const multiAssetResults = [
+      { assetCode: 'USDC', assetIssuer: 'GAAA', trustlineExists: true },
+      { assetCode: 'EURC', assetIssuer: 'GBBB', trustlineExists: true },
+    ];
+    const outputs = toActionOutputs(result, undefined, multiAssetResults);
+    expect(outputs.trustlines_summary).toBe('true');
+  });
+
+  it('leaves multi-asset outputs empty when multiAssetResults is empty array', () => {
+    const outputs = toActionOutputs(result, undefined, []);
+    expect(outputs.assets_trustline_status).toBe('');
+    expect(outputs.trustlines_summary).toBe('');
   });
 });

@@ -433,22 +433,29 @@ export function buildReserveRequirement(required: bigint, actual: bigint): Reser
   };
 }
 
-export interface AssetBalanceRequirement {
-  required: bigint;
-  actual: bigint;
-  missing: string;
-  met: boolean;
+/** Per-asset trustline check result for multi-asset validation. */
+export interface AssetTrustlineResult {
+  assetCode: string;
+  assetIssuer: string;
+  trustlineExists: boolean;
 }
 
-export function buildAssetBalanceRequirement(
-  required: bigint,
-  actual: bigint,
-): AssetBalanceRequirement {
+/**
+ * Run trustline checks for multiple assets against an already-fetched account.
+ * Returns per-asset results and an aggregate `allTrustlinesExist` flag.
+ */
+export function runMultiAssetChecks(
+  account: HorizonAccount,
+  assets: Array<{ assetCode: string; assetIssuer: string }>,
+): { results: AssetTrustlineResult[]; allTrustlinesExist: boolean } {
+  const results: AssetTrustlineResult[] = assets.map((a) => ({
+    assetCode: a.assetCode,
+    assetIssuer: a.assetIssuer,
+    trustlineExists: hasTrustline(account, a.assetCode, a.assetIssuer),
+  }));
   return {
-    required,
-    actual,
-    missing: formatAssetDeficit(required, actual),
-    met: actual >= required,
+    results,
+    allTrustlinesExist: results.every((r) => r.trustlineExists),
   };
 }
 

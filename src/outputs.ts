@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 
-import { ValidationResult } from './checks';
+import { AssetTrustlineResult, ValidationResult } from './checks';
 
 export interface ActionOutputs {
   // Legacy outputs — kept for backward compatibility
@@ -8,28 +8,42 @@ export interface ActionOutputs {
   xlm_balance: string;
   account_funded: string;
   comment_url: string;
-  // Per-check named outputs (Issue #106)
-  check_account_funded: string;
-  check_trustline: string;
-  check_xlm_reserve: string;
+  /** JSON array of per-asset trustline statuses when assets_json is used. */
+  assets_trustline_status: string;
+  /** "true" if all assets in assets_json have trustlines, "false" otherwise, "" when not used. */
+  trustlines_summary: string;
 }
 
-export function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs {
+export function toActionOutputs(
+  result: ValidationResult,
+  commentUrl?: string,
+  multiAssetResults?: AssetTrustlineResult[],
+): ActionOutputs {
+  const assetsTrustlineStatus =
+    multiAssetResults && multiAssetResults.length > 0
+      ? JSON.stringify(multiAssetResults)
+      : '';
+  const trustlinesSummary =
+    multiAssetResults && multiAssetResults.length > 0
+      ? String(multiAssetResults.every((r) => r.trustlineExists))
+      : '';
   return {
     // Legacy outputs
     trustline_exists: String(result.trustlineExists),
     xlm_balance: result.xlmBalance,
     account_funded: String(result.accountFunded),
     comment_url: commentUrl ?? '',
-    // Per-check named outputs — match ValidationResult fields exactly
-    check_account_funded: String(result.accountFunded),
-    check_trustline: String(result.trustlineExists),
-    check_xlm_reserve: String(result.xlmReserveMet),
+    assets_trustline_status: assetsTrustlineStatus,
+    trustlines_summary: trustlinesSummary,
   };
 }
 
-export function setValidationOutputs(result: ValidationResult, commentUrl?: string): void {
-  const outputs = toActionOutputs(result, commentUrl);
+export function setValidationOutputs(
+  result: ValidationResult,
+  commentUrl?: string,
+  multiAssetResults?: AssetTrustlineResult[],
+): void {
+  const outputs = toActionOutputs(result, commentUrl, multiAssetResults);
   for (const [name, value] of Object.entries(outputs)) {
     core.setOutput(name, value);
   }
