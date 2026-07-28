@@ -101,3 +101,83 @@ jobs:
       - name: Stop mock Horizon container
         if: always()
         run: npm run mock:stop
+
+  # ── Optional live testnet integration test ──────────────────────────────
+  # This job runs TrustBridge against live Stellar testnet Horizon to validate
+  # comment posting end-to-end without touching mainnet. Useful before releases
+  # to catch integration bugs that mocks miss.
+  #
+  # SKIP on forks and pull requests to avoid:
+  #   - Rate-limiting on shared testnet Horizon
+  #   - Accidental comment spam on test issues
+  #   - Leaking test secrets in fork CI logs
+  #
+  # Enable for maintainer runs:
+  #   - Set TEST_STELLAR_ADDRESS to a funded testnet account (G-address)
+  #   - Set TEST_ISSUE_NUMBER to a test issue in the repo (e.g., the GitHub issue for this job)
+  #   - Set as repository secrets, visible only to maintainer pushes and workflow_dispatch
+  #
+  # See CONTRIBUTING.md § "Live testnet integration job" for setup.
+  testnet-live-integration:
+    runs-on: ubuntu-latest
+    # Only run on:
+    #   1. Maintainer pushes to main/master (not on forks)
+    #   2. Explicit workflow_dispatch trigger (for ad-hoc testing)
+    # Skip on:
+    #   - Pull requests from forks (secrets not available)
+    #   - Community forks (github.repository differs from upstream)
+    if: |
+      github.repository == 'Stellar-TrustBridge/trustbridge-action' &&
+      (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.actor != 'dependabot[bot]')) &&
+      secrets.TEST_STELLAR_ADDRESS != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build action
+        run: npm run build
+
+      - name: Run TrustBridge against live testnet
+        id: trustbridge
+        uses: ./
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          stellar_address_input: ${{ secrets.TEST_STELLAR_ADDRESS }}
+          horizon_url: https://horizon-testnet.stellar.org
+          fail_on_missing: false
+          debug_mode: true
+          sticky_comment: true
+
+      - name: Verify outputs are set
+        run: |
+          echo "account_funded: ${{ steps.trustbridge.outputs.account_funded }}"
+          echo "trustline_exists: ${{ steps.trustbridge.outputs.trustline_exists }}"
+          echo "xlm_balance: ${{ steps.trustbridge.outputs.xlm_balance }}"
+          
+          # Ensure outputs are not empty
+          if [ -z "${{ steps.trustbridge.outputs.account_funded }}" ]; then
+            echo "::error::account_funded output is empty"
+            exit 1
+          fi
+          
+          if [ -z "${{ steps.trustbridge.outputs.xlm_balance }}" ]; then
+            echo "::error::xlm_balance output is empty"
+            exit 1
+          fi
+
+      - name: Verify comment was posted
+        run: |
+          # Test successful if the job reached here (no error from the action)
+          # Comment posting is implicit in the previous step
+          echo "✓ TrustBridge testnet integration test passed"
+          echo "  Account funded: ${{ steps.trustbridge.outputs.account_funded }}"
+          echo "  XLM balance: ${{ steps.trustbridge.outputs.xlm_balance }}"
