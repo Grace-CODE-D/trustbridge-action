@@ -123,6 +123,7 @@ with:
   stellar_address_input: ${{ steps.addr.outputs.value }}
   asset_code: EURC
   asset_issuer: GISSUERADDRESSHERE
+  min_asset_balance: '100'
   min_xlm_reserve: '2.0'
   github_token: ${{ secrets.GITHUB_TOKEN }}
 ```

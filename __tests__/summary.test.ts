@@ -7,6 +7,8 @@ const result: ValidationResult = {
   trustlineExists: false,
   xlmBalance: '1.0000000',
   xlmReserveMet: false,
+  assetBalance: '0',
+  assetBalanceMet: true,
   checks: [
     { passed: true, label: 'Account funded', detail: 'ok' },
     { passed: false, label: 'USDC trustline', detail: 'missing' },

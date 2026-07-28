@@ -318,6 +318,7 @@ export interface ActionInputsLogRecord {
   assetCode: string;
   assetIssuer: string;
   minXlmReserve: string;
+  minAssetBalance: string;
   stellarAddress: string;
   failOnMissing: boolean;
   debugMode: boolean;
@@ -348,6 +349,7 @@ export function buildInputsLogRecord(inputs: ActionInputsLogRecord): ActionInput
     assetCode: inputs.assetCode,
     assetIssuer: redactStellarAddress(inputs.assetIssuer) || redactString(inputs.assetIssuer),
     minXlmReserve: inputs.minXlmReserve,
+    minAssetBalance: inputs.minAssetBalance,
     stellarAddress: redactStellarAddress(inputs.stellarAddress),
     failOnMissing: inputs.failOnMissing,
     debugMode: inputs.debugMode,

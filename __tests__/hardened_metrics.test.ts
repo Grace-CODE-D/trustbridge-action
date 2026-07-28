@@ -28,6 +28,8 @@ const failedResult: ValidationResult = {
   trustlineExists: false,
   xlmBalance: '0',
   xlmReserveMet: false,
+  assetBalance: '0',
+  assetBalanceMet: false,
   checks: [
     { passed: false, label: 'Account funded', detail: 'Not found.' },
   ],

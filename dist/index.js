@@ -33887,8 +33887,11 @@ function wrappy (fn, cb) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.normalizeAssetCode = normalizeAssetCode;
 exports.assertValidAssetCode = assertValidAssetCode;
+exports.assertValidAssetIssuer = assertValidAssetIssuer;
 exports.normalizeAssetConfig = normalizeAssetConfig;
 const ASSET_CODE_REGEX = /^[A-Z0-9]{1,12}$/;
+const STELLAR_ISSUER_G_REGEX = /^G[A-Z2-7]{55}$/;
+const STELLAR_ISSUER_C_REGEX = /^C[A-Z2-7]{55}$/;
 function normalizeAssetCode(assetCode) {
     return assetCode.trim().toUpperCase();
 }
@@ -33898,12 +33901,24 @@ function assertValidAssetCode(assetCode) {
         throw new Error(`asset_code must be 1-12 uppercase alphanumeric characters. Received: "${assetCode}"`);
     }
 }
+function assertValidAssetIssuer(assetIssuer) {
+    const trimmed = assetIssuer.trim();
+    if (trimmed.startsWith('G') && STELLAR_ISSUER_G_REGEX.test(trimmed)) {
+        return;
+    }
+    if (trimmed.startsWith('C') && STELLAR_ISSUER_C_REGEX.test(trimmed)) {
+        return;
+    }
+    throw new Error(`asset_issuer must be a valid 56-character Stellar public key starting with "G" or a contract ID starting with "C". Received: "${assetIssuer}"`);
+}
 function normalizeAssetConfig(input) {
     const assetCode = normalizeAssetCode(input.assetCode);
     assertValidAssetCode(assetCode);
+    const assetIssuer = input.assetIssuer.trim();
+    assertValidAssetIssuer(assetIssuer);
     return {
         assetCode,
-        assetIssuer: input.assetIssuer.trim(),
+        assetIssuer,
     };
 }
 
@@ -33985,13 +34000,16 @@ exports.isValidStellarAddress = isValidStellarAddress;
 exports.extractStellarAddressFromText = extractStellarAddressFromText;
 exports.validateStellarAddress = validateStellarAddress;
 exports.parseMinXlmReserve = parseMinXlmReserve;
+exports.parseMinAssetBalance = parseMinAssetBalance;
 exports.estimateTrustlineSetupCost = estimateTrustlineSetupCost;
 exports.formatXlmDeficit = formatXlmDeficit;
+exports.formatAssetDeficit = formatAssetDeficit;
 exports.runAccountChecks = runAccountChecks;
 exports.unfundedAccountResult = unfundedAccountResult;
 exports.getFailedCheckLabels = getFailedCheckLabels;
 exports.horizonFailureResult = horizonFailureResult;
 exports.buildReserveRequirement = buildReserveRequirement;
+exports.buildAssetBalanceRequirement = buildAssetBalanceRequirement;
 exports.buildValidationGate = buildValidationGate;
 const horizon_1 = __nccwpck_require__(9164);
 const markdown_1 = __nccwpck_require__(3758);
@@ -34056,21 +34074,45 @@ function parseMinXlmReserve(value) {
     if (!normalized || !Number.isFinite(parsed) || parsed < 0) {
         throw new Error(`min_xlm_reserve must be a non-negative number. Received: "${value}"`);
     }
-    return parsed;
+    return normalized;
+}
+function parseMinAssetBalance(value) {
+    const normalized = value.trim();
+    if (!normalized) {
+        return undefined;
+    }
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+        throw new Error(`min_asset_balance must be a non-negative number. Received: "${value}"`);
+    }
+    return normalized;
 }
 function estimateTrustlineSetupCost() {
     return exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM + exports.STELLAR_BASE_RESERVE_XLM;
 }
 function formatXlmDeficit(required, actual) {
-    return Math.max(0, required - actual).toFixed(7);
+    const deficit = required > actual ? required - actual : 0n;
+    return (0, horizon_1.formatStroops)(deficit);
+}
+function formatAssetDeficit(required, actual) {
+    const deficit = required > actual ? required - actual : 0n;
+    return (0, horizon_1.formatStroops)(deficit);
 }
 function runAccountChecks(account, config) {
     const xlmBalance = (0, horizon_1.getNativeBalance)(account);
     const xlmNumeric = (0, horizon_1.parseHorizonBalance)(xlmBalance);
     const trustlineExists = (0, horizon_1.hasTrustline)(account, config.assetCode, config.assetIssuer);
-    const reserveRequirement = buildReserveRequirement(config.minXlmReserve, xlmNumeric);
+    const minXlmReserveStroops = (0, horizon_1.parseStroops)(config.minXlmReserve);
+    const reserveRequirement = buildReserveRequirement(minXlmReserveStroops, xlmNumeric);
     const xlmReserveMet = reserveRequirement.met;
     const hasAnyTrustlines = account.balances.some((b) => b.asset_type !== 'native');
+    const assetBalanceRaw = (0, horizon_1.getAssetBalance)(account, config.assetCode, config.assetIssuer);
+    const assetBalanceNumeric = (0, horizon_1.parseHorizonBalance)(assetBalanceRaw);
+    const minAssetBalanceRequired = config.minAssetBalance !== undefined ? config.minAssetBalance : '0';
+    const minAssetBalanceStroops = (0, horizon_1.parseStroops)(minAssetBalanceRequired);
+    const assetBalanceCheckEnabled = minAssetBalanceStroops > 0n;
+    const assetBalanceRequirement = buildAssetBalanceRequirement(minAssetBalanceStroops, assetBalanceNumeric);
+    const assetBalanceMet = !assetBalanceCheckEnabled || assetBalanceRequirement.met;
     const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(config.assetCode);
     const checks = [
         {
@@ -34095,6 +34137,18 @@ function runAccountChecks(account, config) {
                 : `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** is below the required **${config.minXlmReserve} XLM**.`,
         },
     ];
+    if (assetBalanceCheckEnabled) {
+        const assetBalanceCheckDetail = trustlineExists
+            ? assetBalanceRequirement.met
+                ? `Balance **${(0, markdown_1.inlineCode)(assetBalanceRaw)} ${safeAssetCode}** meets the minimum of **${minAssetBalanceRequired} ${safeAssetCode}**.`
+                : `Balance **${(0, markdown_1.inlineCode)(assetBalanceRaw)} ${safeAssetCode}** is below the required **${minAssetBalanceRequired} ${safeAssetCode}**. Deficit: **${assetBalanceRequirement.missing} ${safeAssetCode}**.`
+            : `Cannot verify ${safeAssetCode} balance — trustline is not configured yet.`;
+        checks.push({
+            passed: assetBalanceMet || !trustlineExists,
+            label: `${safeAssetCode} minimum balance`,
+            detail: assetBalanceCheckDetail,
+        });
+    }
     const valid = checks.every((c) => c.passed);
     let remediation;
     if (!valid) {
@@ -34106,6 +34160,9 @@ function runAccountChecks(account, config) {
         if (!xlmReserveMet) {
             steps.push(`Send at least **${reserveRequirement.missing} XLM** to ${(0, markdown_1.inlineCode)(account.account_id)} to meet the reserve requirement.`);
         }
+        if (assetBalanceCheckEnabled && !assetBalanceMet && trustlineExists) {
+            steps.push(`Acquire at least **${assetBalanceRequirement.missing} ${safeAssetCode}** to meet the minimum asset balance requirement of **${minAssetBalanceRequired} ${safeAssetCode}**.`);
+        }
         remediation = steps.join('\n\n');
     }
     return {
@@ -34114,6 +34171,8 @@ function runAccountChecks(account, config) {
         trustlineExists,
         xlmBalance,
         xlmReserveMet,
+        assetBalance: assetBalanceRaw,
+        assetBalanceMet,
         checks,
         remediation,
     };
@@ -34122,6 +34181,7 @@ function unfundedAccountResult(stellarAddress, config) {
     const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(config.assetCode);
     const safeAddress = (0, markdown_1.inlineCode)(stellarAddress);
     const network = (0, links_1.inferStellarNetwork)(config.horizonUrl ?? '');
+    const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
     const checks = [
         {
             passed: false,
@@ -34139,12 +34199,21 @@ function unfundedAccountResult(stellarAddress, config) {
             detail: `Cannot verify XLM balance. Fund the account with at least **${config.minXlmReserve} XLM**.`,
         },
     ];
+    if (assetBalanceCheckEnabled) {
+        checks.push({
+            passed: false,
+            label: `${safeAssetCode} minimum balance`,
+            detail: `Cannot verify ${safeAssetCode} balance. Fund the account and establish a trustline first.`,
+        });
+    }
     return {
         valid: false,
         accountFunded: false,
         trustlineExists: false,
         xlmBalance: '0',
         xlmReserveMet: false,
+        assetBalance: '0',
+        assetBalanceMet: false,
         checks,
         remediation: [
             `Activate ${safeAddress} by sending at least **${exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
@@ -34164,6 +34233,7 @@ function horizonFailureResult(message, config) {
     // the comment structure.
     const safeMessage = (0, markdown_1.escapeMarkdownInline)(message);
     const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(config.assetCode);
+    const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
     const checks = [
         {
             passed: false,
@@ -34181,12 +34251,21 @@ function horizonFailureResult(message, config) {
             detail: 'Check could not be completed.',
         },
     ];
+    if (assetBalanceCheckEnabled) {
+        checks.push({
+            passed: false,
+            label: `${safeAssetCode} minimum balance`,
+            detail: 'Check could not be completed.',
+        });
+    }
     return {
         valid: false,
         accountFunded: false,
         trustlineExists: false,
         xlmBalance: 'unknown',
         xlmReserveMet: false,
+        assetBalance: 'unknown',
+        assetBalanceMet: false,
         checks,
         remediation: 'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
     };
@@ -34196,6 +34275,14 @@ function buildReserveRequirement(required, actual) {
         required,
         actual,
         missing: formatXlmDeficit(required, actual),
+        met: actual >= required,
+    };
+}
+function buildAssetBalanceRequirement(required, actual) {
+    return {
+        required,
+        actual,
+        missing: formatAssetDeficit(required, actual),
         met: actual >= required,
     };
 }
@@ -34276,7 +34363,7 @@ const markdown_1 = __nccwpck_require__(3758);
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-exports.COMMENT_SCHEMA_VERSION = '1.0.0';
+exports.COMMENT_SCHEMA_VERSION = '1.1.0';
 exports.TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
 /**
  * Legacy hidden marker (pre-schema-version). Kept for backward
@@ -34297,6 +34384,7 @@ function statusIcon(passed) {
 function formatCommentBody(result, config) {
     const stellarLabNetwork = (0, links_1.inferStellarNetwork)(config.horizonUrl);
     const gate = (0, checks_1.buildValidationGate)(result);
+    const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
     const lines = [
         exports.STICKY_COMMENT_MARKER,
         `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
@@ -34314,7 +34402,14 @@ function formatCommentBody(result, config) {
     }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
-        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **XLM minimum required:** \`${config.minXlmReserve} XLM\``);
+    if (assetBalanceCheckEnabled) {
+        const assetBalanceDisplay = result.assetBalance === 'unknown'
+            ? '_unknown_'
+            : `\`${result.assetBalance} ${config.assetCode}\``;
+        lines.push(`- **${config.assetCode} balance:** ${assetBalanceDisplay}`, `- **${config.assetCode} minimum required:** \`${config.minAssetBalance} ${config.assetCode}\``);
+    }
+    lines.push('', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     // SEP-0007 wallet deep links (Issue #44)
     if (config.sep0007DeepLinks) {
         const payLink = (0, links_1.buildSep0007PayLink)({
@@ -34330,12 +34425,15 @@ function formatCommentBody(result, config) {
         lines.push('', '### Remediation', '', result.remediation);
     }
     lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
+    if (assetBalanceCheckEnabled) {
+        lines.push(`| \`min_asset_balance\` | \`${config.minAssetBalance} ${config.assetCode}\` |`);
+    }
     if (config.waitUntilFunded) {
         const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
         const interval = config.waitUntilFundedIntervalMs ?? 5000;
         lines.push(`| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`, `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`);
     }
-    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
+    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`asset_balance\` | \`${result.assetBalance}\` | **${config.assetCode}** balance reported by Horizon (from \`action.yml\`) |`, `| \`asset_balance_met\` | \`${String(result.assetBalanceMet)}\` | Whether **${config.assetCode}** balance meets the configured floor (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
     // Hardened metrics JSON export (Issue #33)
     if (config.metricsSnapshot) {
         const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
@@ -34523,7 +34621,11 @@ exports.waitForFundedAccount = waitForFundedAccount;
 exports.isCreditBalance = isCreditBalance;
 exports.getNativeBalance = getNativeBalance;
 exports.hasTrustline = hasTrustline;
+exports.getAssetBalance = getAssetBalance;
+exports.parseStroops = parseStroops;
+exports.formatStroops = formatStroops;
 exports.parseHorizonBalance = parseHorizonBalance;
+exports.fetchNetworkPassphrase = fetchNetworkPassphrase;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
 class HorizonError extends Error {
@@ -34998,9 +35100,88 @@ function hasTrustline(account, assetCode, assetIssuer) {
         balance.asset_code === assetCode &&
         balance.asset_issuer === assetIssuer);
 }
+function getAssetBalance(account, assetCode, assetIssuer) {
+    const credit = account.balances.find((balance) => isCreditBalance(balance) &&
+        balance.asset_code === assetCode &&
+        balance.asset_issuer === assetIssuer);
+    return credit?.balance ?? '0';
+}
+function parseStroops(value) {
+    if (value === undefined || value === null)
+        return 0n;
+    const str = String(value).trim();
+    if (!str)
+        return 0n;
+    if (!/^-?\d+(\.\d+)?$/.test(str))
+        return 0n;
+    const isNegative = str.startsWith('-');
+    const absStr = isNegative ? str.slice(1) : str;
+    const parts = absStr.split('.');
+    const intPart = parts[0] || '0';
+    let fracPart = parts[1] || '';
+    if (fracPart.length > 7) {
+        fracPart = fracPart.slice(0, 7);
+    }
+    else {
+        fracPart = fracPart.padEnd(7, '0');
+    }
+    const absStroops = BigInt(intPart + fracPart);
+    return isNegative ? -absStroops : absStroops;
+}
+function formatStroops(stroops) {
+    const isNegative = stroops < 0n;
+    const absStroops = isNegative ? -stroops : stroops;
+    const str = absStroops.toString().padStart(8, '0');
+    const intPart = str.slice(0, -7);
+    const fracPart = str.slice(-7);
+    // Strip trailing zeros to match typical human formatting, but ensure at least .0
+    const cleanFrac = fracPart.replace(/0+$/, '');
+    return `${isNegative ? '-' : ''}${intPart}.${cleanFrac.padEnd(7, '0')}`;
+}
 function parseHorizonBalance(balance) {
-    const parsed = Number(balance);
-    return Number.isFinite(parsed) ? parsed : 0;
+    return parseStroops(balance);
+}
+/**
+ * Fetches the network_passphrase from the Horizon root endpoint.
+ */
+async function fetchNetworkPassphrase(horizonUrl, options = {}) {
+    const fetchImpl = options.fetchFn ?? (await Promise.resolve().then(() => __importStar(__nccwpck_require__(6705)))).default;
+    const timeoutMs = options.timeoutMs || 15000;
+    const maxRetries = options.maxRetries ?? 3;
+    const retryBaseDelayMs = 1000;
+    let attempt = 0;
+    const normalizedUrl = horizonUrl.replace(/\/$/, '');
+    while (attempt <= maxRetries) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await fetchImpl(normalizedUrl, {
+                method: 'GET',
+                headers: { Accept: 'application/json' },
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+            if (response.ok) {
+                const data = (await response.json());
+                if (data.network_passphrase) {
+                    return data.network_passphrase;
+                }
+                throw new Error('network_passphrase not found in Horizon root response');
+            }
+            if (response.status !== 429 && response.status < 500) {
+                throw new Error(`Horizon returned ${response.status} ${response.statusText}`);
+            }
+        }
+        catch (error) {
+            clearTimeout(timeoutId);
+            if (attempt >= maxRetries) {
+                throw error;
+            }
+        }
+        attempt++;
+        await new Promise((resolve) => setTimeout(resolve, retryBaseDelayMs * Math.pow(2, attempt - 1)));
+    }
+    throw new Error(`Failed to fetch network passphrase from ${(0, logger_1.redactHorizonUrl)(horizonUrl)}`);
 }
 
 
@@ -35063,6 +35244,7 @@ async function run() {
     const assetIssuer = core.getInput('asset_issuer') ||
         'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
     const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+    const minAssetBalanceRaw = core.getInput('min_asset_balance') || '';
     const stellarAddress = core.getInput('stellar_address_input').trim();
     const failOnMissing = (0, inputs_1.parseBooleanInput)(core.getInput('fail_on_missing'), true);
     const debugMode = (0, inputs_1.parseBooleanInput)(core.getInput('debug_mode'), false);
@@ -35087,18 +35269,13 @@ async function run() {
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
+    const networkPassphrase = core.getInput('network_passphrase') || 'Public Global Stellar Network ; September 2015';
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Wave #29: workflow_dispatch issue_number benchmark (Issue #29)
-    const issueNumberRaw = core.getInput('issue_number') || '';
-    const dispatchIssueNumber = issueNumberRaw.trim()
-        ? (0, inputs_1.parseNumberInput)(issueNumberRaw.trim(), 0, { min: 1 })
-        : undefined;
-    // Wave #28: address extraction from issue body (Issue #28)
-    const extractAddressFromIssue = (0, inputs_1.parseBooleanInput)(core.getInput('extract_address_from_issue'), false);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -35111,6 +35288,7 @@ async function run() {
         assetCode,
         assetIssuer,
         minXlmReserveRaw,
+        minAssetBalanceRaw,
         debugMode,
         horizonTimeoutMs,
         stickyComment,
@@ -35120,29 +35298,7 @@ async function run() {
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
         sep0007DeepLinks,
-        extractAddressFromIssue,
-        dispatchIssueNumber: dispatchIssueNumber ?? null,
     });
-    // Wave #28: auto-extract Stellar address from the issue body when
-    // `extract_address_from_issue` is true and no explicit address was given.
-    let resolvedStellarAddress = stellarAddress;
-    if (extractAddressFromIssue && !resolvedStellarAddress) {
-        const issueBody = github.context.payload.issue?.body ?? '';
-        const extraction = (0, checks_1.extractStellarAddressFromText)(issueBody);
-        if (extraction.address) {
-            resolvedStellarAddress = extraction.address;
-            logger_1.logger.debug('Stellar address extracted from issue body', {
-                component: 'index',
-                stellarAddress: resolvedStellarAddress,
-                totalFound: extraction.allAddresses.length,
-            });
-            core.info(`Extracted Stellar address from issue body: ${resolvedStellarAddress}`);
-        }
-        else {
-            throw new Error('extract_address_from_issue is true but no valid Stellar G-address was found in the issue body. ' +
-                'Add a Stellar address to the issue body or supply stellar_address_input explicitly.');
-        }
-    }
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
             horizonUrl,
@@ -35151,7 +35307,8 @@ async function run() {
             assetCode,
             assetIssuer,
             minXlmReserve: minXlmReserveRaw,
-            stellarAddress: resolvedStellarAddress,
+            minAssetBalance: minAssetBalanceRaw,
+            stellarAddress,
             failOnMissing,
             debugMode,
             horizonTimeoutMs,
@@ -35164,23 +35321,25 @@ async function run() {
             logInputs,
         });
     }
-    (0, checks_1.validateStellarAddress)(resolvedStellarAddress);
+    (0, checks_1.validateStellarAddress)(stellarAddress);
     const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
+    const minAssetBalance = (0, checks_1.parseMinAssetBalance)(minAssetBalanceRaw);
     const normalizedAsset = (0, assets_1.normalizeAssetConfig)({ assetCode, assetIssuer });
     // Soroban fungible token contracts (SEP-41) use a "C..." contract address
     // as their issuer instead of a classic "G..." account. Validate that
     // shape up front so a malformed contract address fails fast with a clear
     // error instead of silently reaching Horizon or the metrics/JSON output.
     if (normalizedAsset.assetIssuer.startsWith('C')) {
-        const contractCheck = (0, validation_1.validateContractAddress)(normalizedAsset.assetIssuer);
-        if (!contractCheck.valid) {
-            throw new Error(`Invalid asset_issuer contract address: ${contractCheck.errors.join('; ')}`);
-        }
+        (0, validation_1.validateContractAddress)(normalizedAsset.assetIssuer);
+        // If the contract address format is strictly invalid, normalizeAssetConfig
+        // would have already failed fast above. We still call validateContractAddress
+        // here to ensure validation spans are consistently recorded.
         metrics_1.globalMetrics.recordContractMetric('asset_issuer_contract_validated', 1, normalizedAsset.assetIssuer, 'count');
     }
     const checkConfig = {
         ...normalizedAsset,
         minXlmReserve,
+        minAssetBalance,
         horizonUrl,
     };
     core.info(`Checking Stellar account ${resolvedStellarAddress} via ${horizonUrl}`);
@@ -35192,9 +35351,21 @@ async function run() {
         timeoutMs: horizonTimeoutMs,
         horizonUrlFallback: horizonUrlFallback || undefined,
         fallbackUrls,
-        cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
+        cacheTtlMs: horizonCacheTtlMs,
     };
+    core.info(`Verifying network identity for ${horizonUrl}...`);
+    const actualPassphrase = await (0, horizon_1.fetchNetworkPassphrase)(horizonUrl, horizonOptions);
+    if (actualPassphrase !== networkPassphrase) {
+        throw new Error(`Network identity mismatch. Expected "${networkPassphrase}" but Horizon returned "${actualPassphrase}". ` +
+            `Check your horizon_url and network_passphrase inputs.`);
+    }
+    const PUBLIC_USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+    if (normalizedAsset.assetIssuer === PUBLIC_USDC_ISSUER &&
+        actualPassphrase !== 'Public Global Stellar Network ; September 2015') {
+        throw new Error(`Mismatched configuration: The asset_issuer is the Public Network USDC issuer, ` +
+            `but the network_passphrase indicates a different network.`);
+    }
     try {
         const account = waitUntilFunded
             ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, resolvedStellarAddress, {
@@ -35207,7 +35378,7 @@ async function run() {
                     elapsedMs,
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
-            : await (0, horizon_1.fetchAccount)(horizonUrl, resolvedStellarAddress, horizonOptions);
+            : await (0, horizon_1.fetchAccount)(horizonUrl, stellarAddress, horizonOptions);
         result = (0, checks_1.runAccountChecks)(account, checkConfig);
     }
     catch (error) {
@@ -35789,6 +35960,7 @@ function buildInputsLogRecord(inputs) {
         assetCode: inputs.assetCode,
         assetIssuer: redactStellarAddress(inputs.assetIssuer) || redactString(inputs.assetIssuer),
         minXlmReserve: inputs.minXlmReserve,
+        minAssetBalance: inputs.minAssetBalance,
         stellarAddress: redactStellarAddress(inputs.stellarAddress),
         failOnMissing: inputs.failOnMissing,
         debugMode: inputs.debugMode,
@@ -36032,6 +36204,8 @@ function toActionOutputs(result, commentUrl) {
         xlm_balance: result.xlmBalance,
         account_funded: String(result.accountFunded),
         comment_url: commentUrl ?? '',
+        asset_balance: result.assetBalance,
+        asset_balance_met: String(result.assetBalanceMet),
     };
 }
 function setValidationOutputs(result, commentUrl) {
@@ -36482,7 +36656,7 @@ function validateTrustbridgeConfig(raw) {
         }
     }
     // String fields — injection sanitization
-    for (const strField of ['asset_code', 'asset_issuer', 'min_xlm_reserve']) {
+    for (const strField of ['asset_code', 'asset_issuer', 'min_xlm_reserve', 'min_asset_balance']) {
         const val = raw[strField];
         if (val !== undefined && val !== null && val !== '') {
             if (typeof val !== 'string') {

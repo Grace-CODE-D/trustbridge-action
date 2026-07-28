@@ -7,6 +7,8 @@ export interface ActionOutputs {
   xlm_balance: string;
   account_funded: string;
   comment_url: string;
+  asset_balance: string;
+  asset_balance_met: string;
 }
 
 export function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs {
@@ -15,6 +17,8 @@ export function toActionOutputs(result: ValidationResult, commentUrl?: string): 
     xlm_balance: result.xlmBalance,
     account_funded: String(result.accountFunded),
     comment_url: commentUrl ?? '',
+    asset_balance: result.assetBalance,
+    asset_balance_met: String(result.assetBalanceMet),
   };
 }
 

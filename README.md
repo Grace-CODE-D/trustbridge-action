@@ -81,6 +81,7 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `horizon_url` | No | `https://horizon.stellar.org` | Horizon API base URL (use testnet URL for testing) |
 | `asset_code` | No | `USDC` | Asset code for trustline verification |
 | `asset_issuer` | No | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | Issuer address for the asset |
+| `min_asset_balance` | No | `0` | Minimum required asset balance threshold (number or string). Set to 0 to disable the check. |
 | `min_xlm_reserve` | No | `1.5` | Minimum native XLM balance required |
 | `debug_mode` | No | `false` | Enable extra action logs for troubleshooting |
 | `horizon_timeout_ms` | No | `15000` | Horizon request timeout in milliseconds |
@@ -94,6 +95,7 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `use_cache` | No | `false` | Cache successful Horizon account responses in job memory to minimize redundant calls |
 | `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
 | `trustbridge_config_path` | No | `.trustbridge.yml` | Path (relative to repository root, or absolute) to a consumer `trustbridge.yml` config file that can supply defaults for `horizon_url`, `asset_code`, `asset_issuer`, `min_xlm_reserve`, and other inputs. Explicit action inputs always override file values. The file is validated for SSRF-safe URLs, injection-clean strings, and secret field redaction before any value is used. Leave empty to skip the file entirely. |
+| `network_passphrase` | No | `Public Global Stellar Network ; September 2015` | The expected Stellar network passphrase. Used to verify that the configured Horizon URL matches the intended network identity, ensuring that misconfigured combinations (like using the Public USDC issuer on the Testnet) fail fast. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
 | `issue_number` | No | _(empty)_ | GitHub issue number to post the result comment on. Intended for `workflow_dispatch` benchmark runs where the event context does not carry an issue payload. Must be a positive integer (e.g. `"29"`). Overrides any issue number derived from the event context. |
 | `extract_address_from_issue` | No | `false` | When `true`, scans the issue body for the first valid Stellar G-address and uses it as `stellar_address_input`. Fails fast if no address is found. Set `false` (default) to require an explicit `stellar_address_input`. |
@@ -107,6 +109,8 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `trustline_exists` | boolean (string) | `true` if the configured asset trustline exists |
 | `xlm_balance` | string | Native XLM balance from Horizon (or `0` / `unknown`) |
 | `account_funded` | boolean (string) | `true` if Horizon returned an active account |
+| `asset_balance` | string | Current configured asset (e.g. USDC) balance as reported by Horizon, or `0` / `unknown` |
+| `asset_balance_met` | boolean (string) | `true` when `min_asset_balance` is not set or the balance meets or exceeds the floor, otherwise `false` |
 | `comment_url` | string | URL to the created issue comment when run in issue context |
 
 Use outputs in downstream steps:
@@ -136,6 +140,7 @@ horizon_url: https://horizon.stellar.org
 horizon_url_fallback: https://horizon-alt.stellar.org  # optional
 asset_code: USDC
 asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+min_asset_balance: '10'
 min_xlm_reserve: '1.5'
 fail_on_missing: true
 ```
@@ -174,7 +179,7 @@ Set `trustbridge_config_path: ''` to skip the file entirely and rely only on exp
 
 ## Soroban contract asset issuers
 
-`asset_issuer` normally holds a classic Stellar issuer address (`G...`). If you pass a Soroban contract address (`C...`) instead — e.g. for a SEP-41 fungible token contract — TrustBridge validates it against the Stellar StrKey contract-address policy (56 characters, `C` prefix, base32 alphabet) before proceeding. An invalid contract address fails the run immediately with a clear error instead of reaching Horizon or being written into the metrics/JSON output. Valid contract addresses are recorded as a metric point (`asset_issuer_contract_validated`) tagged with the contract address, visible in the metrics summary logged under `debug_mode: true`.
+`asset_issuer` normally holds a classic Stellar issuer address (`G...`). You can also pass a Soroban contract address (`C...`) instead — e.g. for a SEP-41 fungible token contract. TrustBridge strictly validates all `asset_issuer` inputs against the Stellar StrKey policy (must be exactly 56 characters, use the base32 alphabet, and start with `G` or `C`) during initialization. An invalid issuer fails the run immediately with a clear error instead of reaching Horizon or being written into the metrics/JSON output. Valid contract addresses are additionally recorded as a metric point (`asset_issuer_contract_validated`) tagged with the contract address, visible in the metrics summary logged under `debug_mode: true`.
 
 
 ---

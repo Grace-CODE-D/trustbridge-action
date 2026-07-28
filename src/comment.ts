@@ -25,7 +25,7 @@ import { displayHorizonUrl } from './horizon';
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-export const COMMENT_SCHEMA_VERSION = '1.0.0';
+export const COMMENT_SCHEMA_VERSION = '1.1.0';
 
 export interface CommentConfig extends CheckConfig {
   stellarAddress: string;
@@ -82,6 +82,7 @@ export function formatCommentBody(
 ): string {
   const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
   const gate = buildValidationGate(result);
+  const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
@@ -119,7 +120,20 @@ export function formatCommentBody(
     '### Balances',
     '',
     `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`,
-    `- **Minimum required:** \`${config.minXlmReserve} XLM\``,
+    `- **XLM minimum required:** \`${config.minXlmReserve} XLM\``,
+  );
+
+  if (assetBalanceCheckEnabled) {
+    const assetBalanceDisplay = result.assetBalance === 'unknown'
+      ? '_unknown_'
+      : `\`${result.assetBalance} ${config.assetCode}\``;
+    lines.push(
+      `- **${config.assetCode} balance:** ${assetBalanceDisplay}`,
+      `- **${config.assetCode} minimum required:** \`${config.minAssetBalance} ${config.assetCode}\``,
+    );
+  }
+
+  lines.push(
     '',
     '### Setup cost estimate',
     '',
@@ -170,6 +184,12 @@ export function formatCommentBody(
     `| \`clawback_strict_mode\` | ${config.clawbackStrictMode ? '`true`' : '`false` (default)'} |`,
   );
 
+  if (assetBalanceCheckEnabled) {
+    lines.push(
+      `| \`min_asset_balance\` | \`${config.minAssetBalance} ${config.assetCode}\` |`,
+    );
+  }
+
   if (config.waitUntilFunded) {
     const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
     const interval = config.waitUntilFundedIntervalMs ?? 5000;
@@ -190,6 +210,8 @@ export function formatCommentBody(
     `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`,
     `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`,
     `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`,
+    `| \`asset_balance\` | \`${result.assetBalance}\` | **${config.assetCode}** balance reported by Horizon (from \`action.yml\`) |`,
+    `| \`asset_balance_met\` | \`${String(result.assetBalanceMet)}\` | Whether **${config.assetCode}** balance meets the configured floor (from \`action.yml\`) |`,
     `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`,
   );
 

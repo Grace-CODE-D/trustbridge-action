@@ -4,4 +4,5 @@ export interface AssetConfigInput {
 }
 export declare function normalizeAssetCode(assetCode: string): string;
 export declare function assertValidAssetCode(assetCode: string): void;
+export declare function assertValidAssetIssuer(assetIssuer: string): void;
 export declare function normalizeAssetConfig(input: AssetConfigInput): AssetConfigInput;

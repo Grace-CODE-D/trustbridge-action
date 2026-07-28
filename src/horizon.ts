@@ -75,59 +75,7 @@ export class HorizonError extends Error {
   }
 }
 
-/**
- * Raised when the TLS/certificate handshake to a Horizon endpoint fails
- * (expired cert, self-signed cert, hostname mismatch, untrusted CA, etc).
- * Kept distinct from `HorizonError` so callers can surface a clear
- * "TLS/certificate problem with this endpoint" message instead of
- * attributing the failure to the account being checked. Not retryable —
- * retrying against the same misconfigured endpoint cannot succeed.
- */
-export class HorizonTlsError extends HorizonError {
-  constructor(
-    message: string,
-    public readonly originalCode?: string,
-  ) {
-    super(message, 0, false);
-    this.name = 'HorizonTlsError';
-  }
-}
-
-/**
- * Node/OpenSSL error codes that indicate a TLS handshake or certificate
- * verification failure, as opposed to a generic connection/network error.
- */
-const TLS_ERROR_CODES = new Set<string>([
-  'CERT_HAS_EXPIRED',
-  'CERT_NOT_YET_VALID',
-  'CERT_REVOKED',
-  'CERT_UNTRUSTED',
-  'CERT_CHAIN_TOO_LONG',
-  'DEPTH_ZERO_SELF_SIGNED_CERT',
-  'SELF_SIGNED_CERT_IN_CHAIN',
-  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
-  'UNABLE_TO_GET_ISSUER_CERT',
-  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
-  'UNABLE_TO_GET_CRL',
-  'HOSTNAME_MISMATCH',
-  'ERR_TLS_CERT_ALTNAME_INVALID',
-  'ERR_SSL_WRONG_VERSION_NUMBER',
-  'ERR_TLS_HANDSHAKE_TIMEOUT',
-]);
-
-function tlsErrorCode(error: unknown): string | undefined {
-  if (!(error instanceof Error)) return undefined;
-  const code = (error as NodeJS.ErrnoException).code;
-  if (code && TLS_ERROR_CODES.has(code)) return code;
-  const cause = (error as { cause?: unknown }).cause;
-  if (cause instanceof Error) {
-    const causeCode = (cause as NodeJS.ErrnoException).code;
-    if (causeCode && TLS_ERROR_CODES.has(causeCode)) return causeCode;
-  }
-  return undefined;
-}
-
-type FetchLike = (
+export type FetchLike = (
   url: string | import('node-fetch').Request,
   init?: import('node-fetch').RequestInit,
 ) => Promise<import('node-fetch').Response>;
@@ -794,39 +742,111 @@ export function hasTrustline(
   );
 }
 
-/**
- * Returns the credit trustline balance entry matching `assetCode` +
- * `assetIssuer`, or `undefined` if no such trustline exists. Unlike
- * `hasTrustline`, this exposes the full balance object so callers can
- * inspect per-trustline flags such as `is_authorized` and
- * `is_clawback_enabled`.
- */
-export function findTrustlineBalance(
+export function getAssetBalance(
   account: HorizonAccount,
   assetCode: string,
   assetIssuer: string,
-): HorizonBalanceCredit | undefined {
-  return account.balances.find(
-    (balance): balance is HorizonBalanceCredit =>
+): string {
+  const credit = account.balances.find(
+    (balance) =>
       isCreditBalance(balance) &&
       balance.asset_code === assetCode &&
       balance.asset_issuer === assetIssuer,
   );
+  return credit?.balance ?? '0';
+}
+
+export function parseStroops(value: string | number | undefined): bigint {
+  if (value === undefined || value === null) return 0n;
+  const str = String(value).trim();
+  if (!str) return 0n;
+
+  if (!/^-?\d+(\.\d+)?$/.test(str)) return 0n;
+
+  const isNegative = str.startsWith('-');
+  const absStr = isNegative ? str.slice(1) : str;
+
+  const parts = absStr.split('.');
+  const intPart = parts[0] || '0';
+  let fracPart = parts[1] || '';
+
+  if (fracPart.length > 7) {
+    fracPart = fracPart.slice(0, 7);
+  } else {
+    fracPart = fracPart.padEnd(7, '0');
+  }
+
+  const absStroops = BigInt(intPart + fracPart);
+  return isNegative ? -absStroops : absStroops;
+}
+
+export function formatStroops(stroops: bigint): string {
+  const isNegative = stroops < 0n;
+  const absStroops = isNegative ? -stroops : stroops;
+  
+  const str = absStroops.toString().padStart(8, '0');
+  const intPart = str.slice(0, -7);
+  const fracPart = str.slice(-7);
+  
+  // Strip trailing zeros to match typical human formatting, but ensure at least .0
+  const cleanFrac = fracPart.replace(/0+$/, '');
+  return `${isNegative ? '-' : ''}${intPart}.${cleanFrac.padEnd(7, '0')}`;
+}
+
+export function parseHorizonBalance(balance: string): bigint {
+  return parseStroops(balance);
 }
 
 /**
- * A trustline is considered authorized unless the issuer has explicitly
- * marked it unauthorized (`is_authorized === false`). Horizon omits this
- * field entirely when the issuer's AUTHORIZATION_REQUIRED flag is not set,
- * so "field absent" must be treated as authorized, not as unknown.
+ * Fetches the network_passphrase from the Horizon root endpoint.
  */
-export function isTrustlineAuthorized(balance: HorizonBalanceCredit): boolean {
-  return balance.is_authorized !== false;
-}
+export async function fetchNetworkPassphrase(
+  horizonUrl: string,
+  options: FetchAccountOptions = {},
+): Promise<string> {
+  const fetchImpl = options.fetchFn ?? (await import('node-fetch')).default;
+  const timeoutMs = options.timeoutMs || 15000;
+  const maxRetries = options.maxRetries ?? 3;
+  const retryBaseDelayMs = 1000;
 
-export function parseHorizonBalance(balance: string): number {
-  const parsed = Number(balance);
-  return Number.isFinite(parsed) ? parsed : 0;
+  let attempt = 0;
+  const normalizedUrl = horizonUrl.replace(/\/$/, '');
+
+  while (attempt <= maxRetries) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetchImpl(normalizedUrl, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal as unknown as import('node-fetch').RequestInit['signal'],
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = (await response.json()) as { network_passphrase?: string };
+        if (data.network_passphrase) {
+          return data.network_passphrase;
+        }
+        throw new Error('network_passphrase not found in Horizon root response');
+      }
+
+      if (response.status !== 429 && response.status < 500) {
+        throw new Error(`Horizon returned ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (attempt >= maxRetries) {
+        throw error;
+      }
+    }
+    
+    attempt++;
+    await new Promise((resolve) => setTimeout(resolve, retryBaseDelayMs * Math.pow(2, attempt - 1)));
+  }
+  
+  throw new Error(`Failed to fetch network passphrase from ${redactHorizonUrl(horizonUrl)}`);
 }
 
 export interface HorizonFetchOptions {

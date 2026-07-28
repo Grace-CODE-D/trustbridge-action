@@ -1,7 +1,8 @@
 import { HorizonError, isCreditBalance,
   isRetryableStatus,
   parseRetryAfterMs,
-  parseHorizonBalance, normalizeHorizonUrl } from '../src/horizon';
+  fetchNetworkPassphrase, FetchLike,
+  parseHorizonBalance, normalizeHorizonUrl, getAssetBalance } from '../src/horizon';
 import { fetchAccount, HorizonAccount, waitForFundedAccount, getNativeBalance, hasTrustline } from '../src/horizon';
 import * as loggerModule from '../src/logger';
 import { SimpleCache } from '../src/cache';
@@ -76,7 +77,7 @@ function assertContextHasNoRawAddress(
     if (typeof value === 'string') {
       assertNoRawAddress(value, rawAddress);
     } else if (typeof value === 'object' && value !== null) {
-      const json = JSON.stringify(value);
+      const json = JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
       assertNoRawAddress(json, rawAddress);
     }
   }
@@ -166,9 +167,9 @@ describe('isCreditBalance', () => {
 });
 
 describe('parseHorizonBalance', () => {
-  it('parses numeric balances and falls back to zero', () => {
-    expect(parseHorizonBalance('1.5000000')).toBe(1.5);
-    expect(parseHorizonBalance('bad')).toBe(0);
+  it('returns valid bigints or 0n', () => {
+    expect(parseHorizonBalance('1.5000000')).toBe(15000000n);
+    expect(parseHorizonBalance('bad')).toBe(0n);
   });
 });
 
@@ -188,6 +189,52 @@ describe('getNativeBalance & hasTrustline', () => {
     const account = makeAccount();
     expect(hasTrustline(account, 'USDC', TEST_ADDRESS_2)).toBe(true);
     expect(hasTrustline(account, 'EURT', TEST_ADDRESS_2)).toBe(false);
+  });
+});
+
+describe('getAssetBalance', () => {
+  it('extracts asset balance for matching code and issuer', () => {
+    const account = makeAccount();
+    expect(getAssetBalance(account, 'USDC', TEST_ADDRESS_2)).toBe('5.0000000');
+  });
+
+  it('returns 0 when asset trustline does not exist', () => {
+    const account = makeAccount();
+    expect(getAssetBalance(account, 'EURT', TEST_ADDRESS_2)).toBe('0');
+    expect(getAssetBalance(account, 'USDC', FALLBACK_ADDRESS)).toBe('0');
+  });
+
+  it('returns 0 when balances array is empty', () => {
+    const account = makeAccount();
+    account.balances = [];
+    expect(getAssetBalance(account, 'USDC', TEST_ADDRESS_2)).toBe('0');
+  });
+
+  it('matches asset code and issuer exactly', () => {
+    const account = makeAccount();
+    account.balances.push({
+      balance: '25.0000000',
+      asset_type: 'credit_alphanum4',
+      asset_code: 'USDC',
+      asset_issuer: FALLBACK_ADDRESS,
+      buying_liabilities: '0.0000000',
+      selling_liabilities: '0.0000000',
+    });
+    expect(getAssetBalance(account, 'USDC', TEST_ADDRESS_2)).toBe('5.0000000');
+    expect(getAssetBalance(account, 'USDC', FALLBACK_ADDRESS)).toBe('25.0000000');
+  });
+
+  it('handles 12-character asset codes (credit_alphanum12)', () => {
+    const account = makeAccount();
+    account.balances.push({
+      balance: '99.0000000',
+      asset_type: 'credit_alphanum12',
+      asset_code: 'LONGASSET12',
+      asset_issuer: TEST_ADDRESS_2,
+      buying_liabilities: '0.0000000',
+      selling_liabilities: '0.0000000',
+    });
+    expect(getAssetBalance(account, 'LONGASSET12', TEST_ADDRESS_2)).toBe('99.0000000');
   });
 });
 
@@ -596,220 +643,41 @@ describe('Horizon debug log redaction', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Wave #31 — Auto wallet labels
-// ---------------------------------------------------------------------------
+describe('fetchNetworkPassphrase', () => {
+  it('returns the network passphrase from the root endpoint', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ network_passphrase: 'Public Global Stellar Network ; September 2015' }),
+    });
 
-import {
-  deriveWalletLabel,
-  applyWalletLabels,
-  ALL_WALLET_LABELS,
-  WalletLabel,
-  WalletLabelInput,
-} from '../src/horizon';
-
-describe('deriveWalletLabel', () => {
-  it('returns wallet: horizon-error when horizonError is true', () => {
-    expect(deriveWalletLabel({ accountFunded: false, trustlineExists: false, xlmReserveMet: false, horizonError: true }))
-      .toBe('wallet: horizon-error');
+    const passphrase = await fetchNetworkPassphrase('https://horizon.stellar.org', {
+      fetchFn: mockFetch as unknown as FetchLike,
+    });
+    expect(passphrase).toBe('Public Global Stellar Network ; September 2015');
+    expect(mockFetch).toHaveBeenCalledWith('https://horizon.stellar.org', expect.objectContaining({ method: 'GET' }));
   });
 
-  it('returns wallet: unfunded when account is not funded (no error)', () => {
-    expect(deriveWalletLabel({ accountFunded: false, trustlineExists: false, xlmReserveMet: false }))
-      .toBe('wallet: unfunded');
+  it('retries on retryable errors and succeeds', async () => {
+    const mockFetch = jest
+      .fn()
+      .mockResolvedValueOnce({ status: 429, ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ network_passphrase: 'Test SDF Network ; September 2015' }),
+      });
+
+    const passphrase = await fetchNetworkPassphrase('https://horizon-testnet.stellar.org', {
+      fetchFn: mockFetch as unknown as FetchLike,
+    });
+    expect(passphrase).toBe('Test SDF Network ; September 2015');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('returns wallet: trustline-missing when funded but no trustline', () => {
-    expect(deriveWalletLabel({ accountFunded: true, trustlineExists: false, xlmReserveMet: true }))
-      .toBe('wallet: trustline-missing');
-  });
-
-  it('returns wallet: reserve-low when funded + trustline but reserve not met', () => {
-    expect(deriveWalletLabel({ accountFunded: true, trustlineExists: true, xlmReserveMet: false }))
-      .toBe('wallet: reserve-low');
-  });
-
-  it('returns wallet: funded when all checks pass', () => {
-    expect(deriveWalletLabel({ accountFunded: true, trustlineExists: true, xlmReserveMet: true }))
-      .toBe('wallet: funded');
-  });
-
-  it('horizon-error takes precedence over unfunded', () => {
-    expect(deriveWalletLabel({ accountFunded: false, trustlineExists: false, xlmReserveMet: false, horizonError: true }))
-      .toBe('wallet: horizon-error');
-  });
-});
-
-describe('ALL_WALLET_LABELS', () => {
-  it('contains all five wallet label variants', () => {
-    const expected: WalletLabel[] = [
-      'wallet: funded',
-      'wallet: unfunded',
-      'wallet: trustline-missing',
-      'wallet: reserve-low',
-      'wallet: horizon-error',
-    ];
-    expect(ALL_WALLET_LABELS).toEqual(expected);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// applyWalletLabels
-// ---------------------------------------------------------------------------
-
-function makeOctokit(overrides: {
-  listLabelsOnIssue?: jest.Mock;
-  addLabels?: jest.Mock;
-  removeLabel?: jest.Mock;
-} = {}) {
-  return {
-    rest: {
-      issues: {
-        listLabelsOnIssue: overrides.listLabelsOnIssue ?? jest.fn().mockResolvedValue({ data: [] }),
-        addLabels: overrides.addLabels ?? jest.fn().mockResolvedValue({}),
-        removeLabel: overrides.removeLabel ?? jest.fn().mockResolvedValue({}),
-      },
-    },
-  };
-}
-
-describe('applyWalletLabels', () => {
-  const OWNER = 'test-org';
-  const REPO = 'test-repo';
-  const ISSUE = 42;
-
-  describe('success paths', () => {
-    it('adds the correct label for a fully funded account', async () => {
-      const addLabels = jest.fn().mockResolvedValue({});
-      const octokit = makeOctokit({ addLabels });
-      const input: WalletLabelInput = { accountFunded: true, trustlineExists: true, xlmReserveMet: true };
-      const result = await applyWalletLabels(octokit, OWNER, REPO, ISSUE, input);
-      expect(result.applied).toBe('wallet: funded');
-      expect(result.error).toBeUndefined();
-      expect(addLabels).toHaveBeenCalledWith({
-        owner: OWNER, repo: REPO, issue_number: ISSUE, labels: ['wallet: funded'],
-      });
-    });
-
-    it('adds wallet: unfunded for an unfunded account', async () => {
-      const addLabels = jest.fn().mockResolvedValue({});
-      const octokit = makeOctokit({ addLabels });
-      const result = await applyWalletLabels(octokit, OWNER, REPO, ISSUE, {
-        accountFunded: false, trustlineExists: false, xlmReserveMet: false,
-      });
-      expect(result.applied).toBe('wallet: unfunded');
-    });
-
-    it('adds wallet: trustline-missing when trustline absent', async () => {
-      const result = await applyWalletLabels(makeOctokit(), OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: false, xlmReserveMet: true,
-      });
-      expect(result.applied).toBe('wallet: trustline-missing');
-    });
-
-    it('adds wallet: reserve-low when reserve not met', async () => {
-      const result = await applyWalletLabels(makeOctokit(), OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: false,
-      });
-      expect(result.applied).toBe('wallet: reserve-low');
-    });
-
-    it('adds wallet: horizon-error when Horizon returned an error', async () => {
-      const result = await applyWalletLabels(makeOctokit(), OWNER, REPO, ISSUE, {
-        accountFunded: false, trustlineExists: false, xlmReserveMet: false, horizonError: true,
-      });
-      expect(result.applied).toBe('wallet: horizon-error');
-    });
-  });
-
-  describe('stale label removal', () => {
-    it('removes stale wallet labels that are currently on the issue', async () => {
-      const removeLabel = jest.fn().mockResolvedValue({});
-      const listLabelsOnIssue = jest.fn().mockResolvedValue({
-        data: [
-          { name: 'wallet: unfunded' },
-          { name: 'wallet: reserve-low' },
-          { name: 'bug' },
-        ],
-      });
-      const octokit = makeOctokit({ listLabelsOnIssue, removeLabel });
-      const result = await applyWalletLabels(octokit, OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: true,
-      });
-      expect(result.applied).toBe('wallet: funded');
-      expect(result.removed).toContain('wallet: unfunded');
-      expect(result.removed).toContain('wallet: reserve-low');
-      expect(result.removed).not.toContain('bug');
-      expect(removeLabel).toHaveBeenCalledTimes(2);
-    });
-
-    it('does not remove the label that is about to be applied', async () => {
-      const removeLabel = jest.fn().mockResolvedValue({});
-      const listLabelsOnIssue = jest.fn().mockResolvedValue({
-        data: [{ name: 'wallet: funded' }],
-      });
-      const octokit = makeOctokit({ listLabelsOnIssue, removeLabel });
-      await applyWalletLabels(octokit, OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: true,
-      });
-      expect(removeLabel).not.toHaveBeenCalled();
-    });
-
-    it('skips removal when removeStale is false', async () => {
-      const removeLabel = jest.fn();
-      const listLabelsOnIssue = jest.fn();
-      const octokit = makeOctokit({ removeLabel, listLabelsOnIssue });
-      await applyWalletLabels(octokit, OWNER, REPO, ISSUE,
-        { accountFunded: true, trustlineExists: true, xlmReserveMet: true },
-        { removeStale: false },
-      );
-      expect(listLabelsOnIssue).not.toHaveBeenCalled();
-      expect(removeLabel).not.toHaveBeenCalled();
-    });
-
-    it('continues applying the new label even if a stale removal throws', async () => {
-      const removeLabel = jest.fn().mockRejectedValue(new Error('404 not found'));
-      const addLabels = jest.fn().mockResolvedValue({});
-      const listLabelsOnIssue = jest.fn().mockResolvedValue({
-        data: [{ name: 'wallet: unfunded' }],
-      });
-      const octokit = makeOctokit({ removeLabel, addLabels, listLabelsOnIssue });
-      const result = await applyWalletLabels(octokit, OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: true,
-      });
-      // removal failed silently, add still called
-      expect(addLabels).toHaveBeenCalled();
-      expect(result.error).toBeUndefined();
-    });
-  });
-
-  describe('failure paths', () => {
-    it('returns an error string (not throws) when addLabels fails', async () => {
-      const addLabels = jest.fn().mockRejectedValue(new Error('Resource not accessible by token'));
-      const octokit = makeOctokit({ addLabels });
-      const result = await applyWalletLabels(octokit, OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: true,
-      });
-      expect(result.error).toContain('Resource not accessible');
-      expect(result.applied).toBe('wallet: funded');
-    });
-
-    it('returns an error string when listLabelsOnIssue fails', async () => {
-      const listLabelsOnIssue = jest.fn().mockRejectedValue(new Error('API rate limit exceeded'));
-      const octokit = makeOctokit({ listLabelsOnIssue });
-      const result = await applyWalletLabels(octokit, OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: true,
-      });
-      expect(result.error).toContain('API rate limit');
-    });
-  });
-
-  describe('removed array', () => {
-    it('is empty when no stale labels were present', async () => {
-      const result = await applyWalletLabels(makeOctokit(), OWNER, REPO, ISSUE, {
-        accountFunded: true, trustlineExists: true, xlmReserveMet: true,
-      });
-      expect(result.removed).toEqual([]);
-    });
+  it('throws an error on unrecoverable 404', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({ status: 404, statusText: 'Not Found', ok: false });
+    await expect(fetchNetworkPassphrase('https://horizon.example.com', {
+      fetchFn: mockFetch as unknown as FetchLike,
+      maxRetries: 1,
+    })).rejects.toThrow(/Horizon returned 404/);
   });
 });

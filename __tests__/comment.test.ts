@@ -22,6 +22,8 @@ const validationResult: ValidationResult = {
   trustlineExists: false,
   xlmBalance: '0',
   xlmReserveMet: false,
+  assetBalance: '0',
+  assetBalanceMet: false,
   checks: [
     {
       passed: false,
@@ -52,6 +54,8 @@ describe('formatCommentBody golden snapshots', () => {
       trustlineExists: true,
       xlmBalance: '10.5000000',
       xlmReserveMet: true,
+      assetBalance: '50.0',
+      assetBalanceMet: true,
       checks: [
         { passed: true, label: 'Account funded', detail: 'Account exists on Horizon.' },
         { passed: true, label: 'USDC trustline', detail: 'Trustline exists with balance 50.0.' },
@@ -74,6 +78,8 @@ describe('formatCommentBody golden snapshots', () => {
       trustlineExists: false,
       xlmBalance: '0',
       xlmReserveMet: false,
+      assetBalance: '0',
+      assetBalanceMet: false,
       checks: [
         { passed: false, label: 'Account funded', detail: 'Account was not found on Horizon (404).' },
         { passed: false, label: 'USDC trustline', detail: 'Cannot check trustline without an active account.' },
@@ -97,6 +103,8 @@ describe('formatCommentBody golden snapshots', () => {
       trustlineExists: false,
       xlmBalance: '5.0000000',
       xlmReserveMet: true,
+      assetBalance: '0',
+      assetBalanceMet: false,
       checks: [
         { passed: true, label: 'Account funded', detail: 'Account exists on Horizon.' },
         { passed: false, label: 'USDC trustline', detail: 'Account does not hold a trustline for USDC.' },

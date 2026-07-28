@@ -1,12 +1,4 @@
-import {
-  HorizonAccount,
-  findTrustlineBalance,
-  getNativeBalance,
-  isCreditBalance,
-  isTrustlineAuthorized,
-  parseHorizonBalance,
-} from './horizon';
-import { getAssetClawbackStatus } from './assets';
+import { HorizonAccount, getAssetBalance, getNativeBalance, hasTrustline, parseHorizonBalance, parseStroops, formatStroops } from './horizon';
 import { escapeMarkdownInline, inlineCode } from './markdown';
 import { buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
 import { UnauthorizedTrustlinePolicy } from './inputs';
@@ -20,7 +12,8 @@ export const STELLAR_MIN_ACCOUNT_BALANCE_XLM = 1;
 export interface CheckConfig {
   assetCode: string;
   assetIssuer: string;
-  minXlmReserve: number;
+  minXlmReserve: string | number;
+  minAssetBalance?: string | number;
   horizonUrl?: string;
   /** How to treat a trustline that exists but is not yet authorized by the issuer. Default: "warn". */
   unauthorizedTrustlinePolicy?: UnauthorizedTrustlinePolicy;
@@ -44,6 +37,8 @@ export interface ValidationResult {
   clawbackEnabled?: boolean;
   xlmBalance: string;
   xlmReserveMet: boolean;
+  assetBalance: string;
+  assetBalanceMet: boolean;
   checks: CheckResultItem[];
   remediation?: string;
   /** Non-blocking warnings surfaced in the comment (e.g. unauthorized/clawback-enabled trustline under "warn" policy). */
@@ -118,21 +113,39 @@ export function validateStellarAddress(address: string): void {
   }
 }
 
-export function parseMinXlmReserve(value: string): number {
+export function parseMinXlmReserve(value: string): string {
   const normalized = value.trim();
   const parsed = Number(normalized);
   if (!normalized || !Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`min_xlm_reserve must be a non-negative number. Received: "${value}"`);
   }
-  return parsed;
+  return normalized;
+}
+
+export function parseMinAssetBalance(value: string): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`min_asset_balance must be a non-negative number. Received: "${value}"`);
+  }
+  return normalized;
 }
 
 export function estimateTrustlineSetupCost(): number {
   return STELLAR_MIN_ACCOUNT_BALANCE_XLM + STELLAR_BASE_RESERVE_XLM;
 }
 
-export function formatXlmDeficit(required: number, actual: number): string {
-  return Math.max(0, required - actual).toFixed(7);
+export function formatXlmDeficit(required: bigint, actual: bigint): string {
+  const deficit = required > actual ? required - actual : 0n;
+  return formatStroops(deficit);
+}
+
+export function formatAssetDeficit(required: bigint, actual: bigint): string {
+  const deficit = required > actual ? required - actual : 0n;
+  return formatStroops(deficit);
 }
 
 export function runAccountChecks(
@@ -141,30 +154,25 @@ export function runAccountChecks(
 ): ValidationResult {
   const xlmBalance = getNativeBalance(account);
   const xlmNumeric = parseHorizonBalance(xlmBalance);
-  const trustlineBalance = findTrustlineBalance(account, config.assetCode, config.assetIssuer);
-  const trustlineExistsRaw = trustlineBalance !== undefined;
-  const trustlineAuthorized = trustlineBalance ? isTrustlineAuthorized(trustlineBalance) : undefined;
-  const { clawbackEnabled } = getAssetClawbackStatus(trustlineBalance);
-
-  const unauthorizedPolicy = config.unauthorizedTrustlinePolicy ?? 'warn';
-  const isUnauthorized = trustlineExistsRaw && trustlineAuthorized === false;
-  const authorizationBlocks = isUnauthorized && unauthorizedPolicy === 'fail';
-
-  const clawbackStrictMode = config.clawbackStrictMode ?? false;
-  const clawbackBlocks = trustlineExistsRaw && clawbackEnabled && clawbackStrictMode;
-
-  // "Stricter readiness meaning" (issue #72): under the "fail" policy, an
-  // unauthorized trustline does not count as a satisfied trustline
-  // requirement, so trustlineExists — and any output derived from it —
-  // reflects that.
-  const trustlineExists = trustlineExistsRaw && !authorizationBlocks;
-
-  const reserveRequirement = buildReserveRequirement(config.minXlmReserve, xlmNumeric);
+  const trustlineExists = hasTrustline(account, config.assetCode, config.assetIssuer);
+  const minXlmReserveStroops = parseStroops(config.minXlmReserve);
+  const reserveRequirement = buildReserveRequirement(minXlmReserveStroops, xlmNumeric);
   const xlmReserveMet = reserveRequirement.met;
   // Uses isCreditBalance (not `asset_type !== 'native'`) so liquidity-pool
   // share balances alone don't make an account look like it "has
   // trustlines" for the purposes of this message.
   const hasAnyTrustlines = account.balances.some(isCreditBalance);
+
+  const assetBalanceRaw = getAssetBalance(account, config.assetCode, config.assetIssuer);
+  const assetBalanceNumeric = parseHorizonBalance(assetBalanceRaw);
+  const minAssetBalanceRequired = config.minAssetBalance !== undefined ? config.minAssetBalance : '0';
+  const minAssetBalanceStroops = parseStroops(minAssetBalanceRequired);
+  const assetBalanceCheckEnabled = minAssetBalanceStroops > 0n;
+  const assetBalanceRequirement = buildAssetBalanceRequirement(
+    minAssetBalanceStroops,
+    assetBalanceNumeric,
+  );
+  const assetBalanceMet = !assetBalanceCheckEnabled || assetBalanceRequirement.met;
 
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
 
@@ -201,24 +209,17 @@ export function runAccountChecks(
     },
   ];
 
-  if (trustlineExistsRaw && clawbackEnabled && clawbackStrictMode) {
+  if (assetBalanceCheckEnabled) {
+    const assetBalanceCheckDetail = trustlineExists
+      ? assetBalanceRequirement.met
+        ? `Balance **${inlineCode(assetBalanceRaw)} ${safeAssetCode}** meets the minimum of **${minAssetBalanceRequired} ${safeAssetCode}**.`
+        : `Balance **${inlineCode(assetBalanceRaw)} ${safeAssetCode}** is below the required **${minAssetBalanceRequired} ${safeAssetCode}**. Deficit: **${assetBalanceRequirement.missing} ${safeAssetCode}**.`
+      : `Cannot verify ${safeAssetCode} balance — trustline is not configured yet.`;
     checks.push({
-      passed: false,
-      label: `${safeAssetCode} clawback safety`,
-      detail: `**${safeAssetCode}** has **clawback enabled** for this trustline (${inlineCode(config.assetIssuer)}) — blocked by \`clawback_strict_mode: true\`.`,
+      passed: assetBalanceMet || !trustlineExists,
+      label: `${safeAssetCode} minimum balance`,
+      detail: assetBalanceCheckDetail,
     });
-  }
-
-  const warnings: string[] = [];
-  if (isUnauthorized && unauthorizedPolicy === 'warn') {
-    warnings.push(
-      `**${safeAssetCode} trustline is not authorized** by the issuer (${inlineCode(config.assetIssuer)}). The issuer has AUTHORIZATION_REQUIRED enabled and has not authorized this account yet — payments in this asset will fail until authorized. Contact the issuer to request authorization.`,
-    );
-  }
-  if (trustlineExistsRaw && clawbackEnabled && !clawbackStrictMode) {
-    warnings.push(
-      `**${safeAssetCode} has clawback enabled** for this trustline (${inlineCode(config.assetIssuer)}) — the issuer can revoke (claw back) funds from this account at any time. Review custody/security implications before gating payouts on this asset.`,
-    );
   }
 
   const valid = checks.every((c) => c.passed);
@@ -241,9 +242,9 @@ export function runAccountChecks(
         `Send at least **${reserveRequirement.missing} XLM** to ${inlineCode(account.account_id)} to meet the reserve requirement.`,
       );
     }
-    if (clawbackBlocks) {
+    if (assetBalanceCheckEnabled && !assetBalanceMet && trustlineExists) {
       steps.push(
-        `This asset has clawback enabled, which is blocked by \`clawback_strict_mode: true\`. Choose a different asset, or set \`clawback_strict_mode: false\` to proceed with a warning instead.`,
+        `Acquire at least **${assetBalanceRequirement.missing} ${safeAssetCode}** to meet the minimum asset balance requirement of **${minAssetBalanceRequired} ${safeAssetCode}**.`,
       );
     }
     remediation = steps.join('\n\n');
@@ -257,6 +258,8 @@ export function runAccountChecks(
     clawbackEnabled: trustlineExistsRaw ? clawbackEnabled : undefined,
     xlmBalance,
     xlmReserveMet,
+    assetBalance: assetBalanceRaw,
+    assetBalanceMet,
     checks,
     remediation,
     warnings: warnings.length > 0 ? warnings : undefined,
@@ -270,6 +273,7 @@ export function unfundedAccountResult(
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
   const safeAddress = inlineCode(stellarAddress);
   const network = inferStellarNetwork(config.horizonUrl ?? '');
+  const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
 
   const checks: CheckResultItem[] = [
     {
@@ -289,12 +293,22 @@ export function unfundedAccountResult(
     },
   ];
 
+  if (assetBalanceCheckEnabled) {
+    checks.push({
+      passed: false,
+      label: `${safeAssetCode} minimum balance`,
+      detail: `Cannot verify ${safeAssetCode} balance. Fund the account and establish a trustline first.`,
+    });
+  }
+
   return {
     valid: false,
     accountFunded: false,
     trustlineExists: false,
     xlmBalance: '0',
     xlmReserveMet: false,
+    assetBalance: '0',
+    assetBalanceMet: false,
     checks,
     remediation: [
       `Activate ${safeAddress} by sending at least **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
@@ -330,6 +344,7 @@ export function horizonFailureResult(message: string, config: CheckConfig): Vali
   // formatting/links, or break out of the comment structure.
   const safeMessage = escapeMarkdownInline(sanitizeErrorMessageForComment(message));
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
+  const assetBalanceCheckEnabled = Number(config.minAssetBalance ?? 0) > 0;
 
   const checks: CheckResultItem[] = [
     {
@@ -349,12 +364,22 @@ export function horizonFailureResult(message: string, config: CheckConfig): Vali
     },
   ];
 
+  if (assetBalanceCheckEnabled) {
+    checks.push({
+      passed: false,
+      label: `${safeAssetCode} minimum balance`,
+      detail: 'Check could not be completed.',
+    });
+  }
+
   return {
     valid: false,
     accountFunded: false,
     trustlineExists: false,
     xlmBalance: 'unknown',
     xlmReserveMet: false,
+    assetBalance: 'unknown',
+    assetBalanceMet: false,
     checks,
     remediation:
       'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
@@ -407,17 +432,36 @@ export function tlsFailureResult(message: string, config: CheckConfig): Validati
 }
 
 export interface ReserveRequirement {
-  required: number;
-  actual: number;
+  required: bigint;
+  actual: bigint;
   missing: string;
   met: boolean;
 }
 
-export function buildReserveRequirement(required: number, actual: number): ReserveRequirement {
+export function buildReserveRequirement(required: bigint, actual: bigint): ReserveRequirement {
   return {
     required,
     actual,
     missing: formatXlmDeficit(required, actual),
+    met: actual >= required,
+  };
+}
+
+export interface AssetBalanceRequirement {
+  required: bigint;
+  actual: bigint;
+  missing: string;
+  met: boolean;
+}
+
+export function buildAssetBalanceRequirement(
+  required: bigint,
+  actual: bigint,
+): AssetBalanceRequirement {
+  return {
+    required,
+    actual,
+    missing: formatAssetDeficit(required, actual),
     met: actual >= required,
   };
 }

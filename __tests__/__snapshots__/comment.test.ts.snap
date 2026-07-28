@@ -1,8 +1,8 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`formatCommentBody golden snapshots matches golden snapshot for missing trustline failure path 1`] = `
-"<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
-<!-- trustbridge-action:schema-version:1.0.0 -->
+"<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->
+<!-- trustbridge-action:schema-version:1.1.0 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -24,7 +24,7 @@ Asset: **USDC** · Issuer: \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K
 ### Balances
 
 - **XLM balance:** \`5.0000000 XLM\`
-- **Minimum required:** \`1.5 XLM\`
+- **XLM minimum required:** \`1.5 XLM\`
 
 ### Setup cost estimate
 
@@ -59,6 +59,8 @@ _Use these output names in downstream workflow steps via \`steps.<id>.outputs.<n
 | \`account_funded\` | \`true\` | Whether the account exists on the Stellar network (from \`action.yml\`) |
 | \`trustline_exists\` | \`false\` | Whether the **USDC** trustline is configured (from \`action.yml\`) |
 | \`xlm_balance\` | \`5.0000000\` | Native XLM balance reported by Horizon (from \`action.yml\`) |
+| \`asset_balance\` | \`0\` | **USDC** balance reported by Horizon (from \`action.yml\`) |
+| \`asset_balance_met\` | \`false\` | Whether **USDC** balance meets the configured floor (from \`action.yml\`) |
 | \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |
 
 ---
@@ -66,8 +68,8 @@ _Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbrid
 `;
 
 exports[`formatCommentBody golden snapshots matches golden snapshot for successful validation result 1`] = `
-"<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
-<!-- trustbridge-action:schema-version:1.0.0 -->
+"<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->
+<!-- trustbridge-action:schema-version:1.1.0 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -89,7 +91,7 @@ Asset: **USDC** · Issuer: \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K
 ### Balances
 
 - **XLM balance:** \`10.5000000 XLM\`
-- **Minimum required:** \`1.5 XLM\`
+- **XLM minimum required:** \`1.5 XLM\`
 
 ### Setup cost estimate
 
@@ -120,6 +122,8 @@ _Use these output names in downstream workflow steps via \`steps.<id>.outputs.<n
 | \`account_funded\` | \`true\` | Whether the account exists on the Stellar network (from \`action.yml\`) |
 | \`trustline_exists\` | \`true\` | Whether the **USDC** trustline is configured (from \`action.yml\`) |
 | \`xlm_balance\` | \`10.5000000\` | Native XLM balance reported by Horizon (from \`action.yml\`) |
+| \`asset_balance\` | \`50.0\` | **USDC** balance reported by Horizon (from \`action.yml\`) |
+| \`asset_balance_met\` | \`true\` | Whether **USDC** balance meets the configured floor (from \`action.yml\`) |
 | \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |
 
 ---
@@ -127,8 +131,8 @@ _Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbrid
 `;
 
 exports[`formatCommentBody golden snapshots matches golden snapshot for unfunded account failure path 1`] = `
-"<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
-<!-- trustbridge-action:schema-version:1.0.0 -->
+"<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->
+<!-- trustbridge-action:schema-version:1.1.0 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -150,7 +154,7 @@ Asset: **USDC** · Issuer: \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K
 ### Balances
 
 - **XLM balance:** \`0 XLM\`
-- **Minimum required:** \`1.5 XLM\`
+- **XLM minimum required:** \`1.5 XLM\`
 
 ### Setup cost estimate
 
@@ -185,6 +189,8 @@ _Use these output names in downstream workflow steps via \`steps.<id>.outputs.<n
 | \`account_funded\` | \`false\` | Whether the account exists on the Stellar network (from \`action.yml\`) |
 | \`trustline_exists\` | \`false\` | Whether the **USDC** trustline is configured (from \`action.yml\`) |
 | \`xlm_balance\` | \`0\` | Native XLM balance reported by Horizon (from \`action.yml\`) |
+| \`asset_balance\` | \`0\` | **USDC** balance reported by Horizon (from \`action.yml\`) |
+| \`asset_balance_met\` | \`false\` | Whether **USDC** balance meets the configured floor (from \`action.yml\`) |
 | \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |
 
 ---
