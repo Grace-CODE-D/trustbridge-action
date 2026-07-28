@@ -1,7 +1,5 @@
 import { defaultCache, SimpleCache } from './cache';
 import { logger, redactHorizonUrl, redactString, LogContext } from './logger';
-import { validateHorizonUrl } from './validation';
-
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -710,6 +708,10 @@ export interface WaitForFundedAccountOptions {
   maxRetries?: number;
   /** Called after each unfunded (404) poll, before sleeping for the next attempt. */
   onPoll?: (attempt: number, elapsedMs: number) => void;
+  /** Fallback Horizon/RPC URLs passed through to each `fetchAccount` call. */
+  fallbackUrls?: string[];
+  /** Whether to use in-memory cache on each poll request. */
+  useCache?: boolean;
 }
 
 const DEFAULT_WAIT_TIMEOUT_MS = 120_000;
@@ -830,4 +832,157 @@ export function parseHorizonBalance(balance: string): number {
 export interface HorizonFetchOptions {
   maxRetries?: number;
   retryBaseDelayMs?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Auto wallet labels  (Wave #31)
+// ---------------------------------------------------------------------------
+
+/**
+ * Labels automatically applied to a GitHub issue based on the Stellar
+ * wallet state discovered during an account check.
+ *
+ * - `wallet: funded`           — account exists and XLM balance ≥ reserve.
+ * - `wallet: unfunded`         — Horizon returned 404 (account not yet created).
+ * - `wallet: trustline-missing`— account funded but missing the required trustline.
+ * - `wallet: reserve-low`      — account funded + trustline present but XLM reserve not met.
+ * - `wallet: horizon-error`    — Horizon returned a non-404 error; state unknown.
+ */
+export type WalletLabel =
+  | 'wallet: funded'
+  | 'wallet: unfunded'
+  | 'wallet: trustline-missing'
+  | 'wallet: reserve-low'
+  | 'wallet: horizon-error';
+
+/**
+ * All wallet label strings — useful for bulk removal before re-applying
+ * the current state so stale labels never linger on an issue.
+ */
+export const ALL_WALLET_LABELS: WalletLabel[] = [
+  'wallet: funded',
+  'wallet: unfunded',
+  'wallet: trustline-missing',
+  'wallet: reserve-low',
+  'wallet: horizon-error',
+];
+
+export interface WalletLabelInput {
+  /** Whether Horizon returned an active account (HTTP 200). */
+  accountFunded: boolean;
+  /** Whether the required asset trustline exists on the account. */
+  trustlineExists: boolean;
+  /** Whether the native XLM balance meets the configured minimum. */
+  xlmReserveMet: boolean;
+  /** Whether a Horizon error (non-404) occurred during the check. */
+  horizonError?: boolean;
+}
+
+/**
+ * Derive the single wallet label that best describes the current account
+ * state. Priority order:
+ *
+ * 1. `wallet: horizon-error`    — any Horizon error takes precedence.
+ * 2. `wallet: unfunded`         — account not found (404).
+ * 3. `wallet: trustline-missing`— funded but trustline absent.
+ * 4. `wallet: reserve-low`      — funded + trustline but XLM below reserve.
+ * 5. `wallet: funded`           — all checks passed.
+ */
+export function deriveWalletLabel(input: WalletLabelInput): WalletLabel {
+  if (input.horizonError) return 'wallet: horizon-error';
+  if (!input.accountFunded) return 'wallet: unfunded';
+  if (!input.trustlineExists) return 'wallet: trustline-missing';
+  if (!input.xlmReserveMet) return 'wallet: reserve-low';
+  return 'wallet: funded';
+}
+
+/**
+ * Options for `applyWalletLabels`.
+ */
+export interface ApplyWalletLabelsOptions {
+  /**
+   * Remove all other wallet labels before applying the new one.
+   * Default: `true`. Set to `false` to only add (never remove) labels.
+   */
+  removeStale?: boolean;
+}
+
+/**
+ * Apply the appropriate wallet label to a GitHub issue via Octokit,
+ * optionally removing stale wallet labels first.
+ *
+ * Errors are non-fatal: label failures are caught and returned as a
+ * descriptive string so the main check result is never blocked by a
+ * labelling permission issue.
+ *
+ * @param octokit       Authenticated Octokit instance.
+ * @param owner         Repository owner.
+ * @param repo          Repository name.
+ * @param issueNumber   Issue to label.
+ * @param input         Wallet state derived from the Horizon check.
+ * @param options       Labelling behaviour options.
+ * @returns             The label that was applied, or an error string.
+ */
+export async function applyWalletLabels(
+  octokit: {
+    rest: {
+      issues: {
+        addLabels: (params: { owner: string; repo: string; issue_number: number; labels: string[] }) => Promise<unknown>;
+        removeLabel: (params: { owner: string; repo: string; issue_number: number; name: string }) => Promise<unknown>;
+        listLabelsOnIssue: (params: { owner: string; repo: string; issue_number: number; per_page: number }) => Promise<{ data: Array<{ name: string }> }>;
+      };
+    };
+  },
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  input: WalletLabelInput,
+  options: ApplyWalletLabelsOptions = {},
+): Promise<{ applied: WalletLabel; removed: string[]; error?: string }> {
+  const removeStale = options.removeStale ?? true;
+  const targetLabel = deriveWalletLabel(input);
+  const removed: string[] = [];
+
+  try {
+    if (removeStale) {
+      // Fetch current labels to avoid 404s on removeLabel for non-present labels.
+      const currentLabelsResponse = await octokit.rest.issues.listLabelsOnIssue({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        per_page: 100,
+      });
+      const currentNames = currentLabelsResponse.data.map((l) => l.name);
+
+      const stale = ALL_WALLET_LABELS.filter(
+        (l) => l !== targetLabel && currentNames.includes(l),
+      );
+
+      for (const label of stale) {
+        try {
+          await octokit.rest.issues.removeLabel({
+            owner,
+            repo,
+            issue_number: issueNumber,
+            name: label,
+          });
+          removed.push(label);
+        } catch {
+          // Ignore individual remove failures — the add still proceeds.
+        }
+      }
+    }
+
+    await octokit.rest.issues.addLabels({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      labels: [targetLabel],
+    });
+
+    return { applied: targetLabel, removed };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { applied: targetLabel, removed, error: message };
+  }
 }

@@ -119,36 +119,12 @@ inputs:
   github_token:
     description: 'GitHub token used to post issue comments'
     required: true
-  sep0007_deep_links:
+  auto_wallet_labels:
     description: >-
-      Emit SEP-0007 wallet deep links (web+stellar:pay / web+stellar:tx) in
-      the issue comment so contributors can open a pre-filled wallet screen
-      directly from the comment. Requires a funded account on the same network
-      as horizon_url to be useful. Default false.
-    required: false
-    default: 'false'
-  sep0007_origin_domain:
-    description: >-
-      Optional origin domain embedded in SEP-0007 URIs for wallet validation
-      (SEP-0007 §3.4). Leave empty to omit the field.
-    required: false
-    default: ''
-  unauthorized_trustline_policy:
-    description: >-
-      How to treat a trustline that exists but has not been authorized by
-      the issuer (AUTHORIZATION_REQUIRED). "fail" treats it as not
-      satisfying the trustline requirement (stricter readiness outputs);
-      "warn" surfaces a comment warning but still passes the check
-      (default); "ignore" restores pre-#72 behavior with no additional
-      check or warning.
-    required: false
-    default: 'warn'
-  clawback_strict_mode:
-    description: >-
-      When true, a clawback-enabled trustline (issuer can revoke balances
-      at any time) fails validation instead of only warning. Default false
-      (warn only) so vanilla assets without clawback enabled are
-      unaffected.
+      Automatically apply a wallet state label to the issue
+      (wallet: funded | wallet: unfunded | wallet: trustline-missing |
+      wallet: reserve-low | wallet: horizon-error). Requires
+      `issues: write` permission. Default false.
     required: false
     default: 'false'
 
