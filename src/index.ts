@@ -15,7 +15,7 @@ import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
-import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { validateContractAddress, validateUrl, clearSpans, getSpans } from './validation';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
