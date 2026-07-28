@@ -58,11 +58,11 @@ Stellar accounts must receive a minimum XLM funding transaction before they exis
 
 Horizon may return `Retry-After`. The client:
 
-1. Waits for `Retry-After` or exponential backoff (1s, 2s, 4s)
-2. Retries up to **3** times
+1. Waits for `Retry-After` or exponential backoff (1s, 2s, 4s), capped at `retry_max_delay_ms` (default 30s).
+2. Retries up to **3** times per request.
 3. If still failing → `horizonFailureResult`
 
-**Operator tip:** For high-volume orgs, consider self-hosted Horizon or caching.
+**Operator tip:** For high-volume orgs or mass assignments (Waves), consider configuring `horizon_max_requests` to cap the total requests per run. Once this budget is exhausted, the action will fail fast with a `RateBudgetExhaustedError` rather than stampeding the public Horizon API. Consider self-hosted Horizon or caching for extremely high concurrency workflows.
 
 ### 503 / 502 / 504 — Service degradation
 

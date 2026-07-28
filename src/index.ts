@@ -8,6 +8,7 @@ import {
   validateStellarAddress,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
+import { RateBudgetTracker } from './resilience';
 import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
@@ -56,6 +57,8 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
+  const horizonMaxRequests = parseNumberInput(core.getInput('horizon_max_requests'), 0, { min: 0 });
+  const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms'), 30000, { min: 0 });
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
 
@@ -104,6 +107,8 @@ async function run(): Promise<void> {
       waitUntilFundedIntervalMs,
       horizonCacheTtlMs,
       useCache,
+      horizonMaxRequests,
+      retryMaxDelayMs,
       logInputs,
     });
   }
@@ -145,6 +150,8 @@ async function run(): Promise<void> {
   }
 
   let result;
+  
+  const rateBudgetTracker = new RateBudgetTracker(horizonMaxRequests);
 
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
@@ -152,6 +159,9 @@ async function run(): Promise<void> {
     fallbackUrls,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
+    horizonMaxRequests,
+    retryMaxDelayMs,
+    rateBudgetTracker,
   };
 
   try {

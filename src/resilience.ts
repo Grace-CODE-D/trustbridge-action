@@ -10,6 +10,47 @@
  */
 
 // ---------------------------------------------------------------------------
+// Rate Budget Tracker
+// ---------------------------------------------------------------------------
+
+export class RateBudgetExhaustedError extends Error {
+  statusCode: number;
+  retryable: boolean;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'RateBudgetExhaustedError';
+    this.statusCode = 0;
+    this.retryable = false;
+  }
+}
+
+export class RateBudgetTracker {
+  private count = 0;
+
+  constructor(private readonly maxRequests: number) {}
+
+  /**
+   * Records a request. Throws RateBudgetExhaustedError if the budget is exceeded.
+   * If maxRequests is 0, the budget is considered unlimited.
+   */
+  recordRequest(): void {
+    if (this.maxRequests > 0) {
+      this.count++;
+      if (this.count > this.maxRequests) {
+        throw new RateBudgetExhaustedError(
+          `Rate budget exhausted: exceeded ${this.maxRequests} maximum Horizon requests per run.`,
+        );
+      }
+    }
+  }
+
+  get requestsMade(): number {
+    return this.count;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI check command types
 // ---------------------------------------------------------------------------
 
