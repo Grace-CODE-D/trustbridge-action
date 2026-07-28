@@ -68,6 +68,17 @@ export interface UpsertCommentOptions {
      * lookup itself fails (e.g. transient GitHub API error).
      */
     sticky?: boolean;
+    /**
+     * When true, post the comment normally even if snoozed.
+     * Useful for maintainers forcing an immediate re-alert.
+     */
+    forceComment?: boolean;
+    /**
+     * Snooze window in milliseconds for suppressing duplicate failure comments.
+     * When result failed and last check failed within this window, skip the
+     * comment post (unless forceComment is true). Always update outputs.
+     */
+    snoozeWindowMs?: number;
 }
 type Octokit = ReturnType<typeof github.getOctokit>;
 /**

@@ -45,6 +45,15 @@ describe('TRUSTBRIDGE_FOOTER', () => {
 });
 
 describe('formatCommentBody golden snapshots', () => {
+  beforeAll(() => {
+    // Mock Date.now() to return a fixed timestamp for snapshot consistency
+    jest.spyOn(Date, 'now').mockReturnValue(1000000000000);
+  });
+
+  afterAll(() => {
+    jest.restoreAllMocks();
+  });
+
   it('matches golden snapshot for successful validation result', () => {
     const successResult: ValidationResult = {
       valid: true,

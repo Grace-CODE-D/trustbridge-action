@@ -34368,6 +34368,7 @@ const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const links_1 = __nccwpck_require__(3346);
 const markdown_1 = __nccwpck_require__(3758);
+const snooze_1 = __nccwpck_require__(3286);
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -34395,9 +34396,12 @@ function statusIcon(passed) {
 function formatCommentBody(result, config) {
     const stellarLabNetwork = (0, links_1.inferStellarNetwork)(config.horizonUrl);
     const gate = (0, checks_1.buildValidationGate)(result);
+    // Generate snooze marker with current check status (Issue #155)
+    const snoozeMarker = (0, snooze_1.formatSnoozeMarker)(result.valid ? 'pass' : 'fail');
     const lines = [
         exports.STICKY_COMMENT_MARKER,
         `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
+        snoozeMarker,
         '## TrustBridge — Stellar Account Check',
         '',
         `Checked account: ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
@@ -34533,6 +34537,8 @@ async function findStickyComment(octokit, owner, repo, issueNumber) {
 }
 async function postIssueComment(token, body, options = {}) {
     const sticky = options.sticky ?? true;
+    const forceComment = options.forceComment ?? false;
+    const snoozeWindowMs = options.snoozeWindowMs ?? 0;
     const context = github.context;
     const issueNumber = context.payload.issue?.number;
     if (!issueNumber) {
@@ -34542,13 +34548,40 @@ async function postIssueComment(token, body, options = {}) {
     const octokit = github.getOctokit(token);
     const { owner, repo } = context.repo;
     let existingCommentId;
+    let existingCommentBody;
     if (sticky) {
         try {
             existingCommentId = await findStickyComment(octokit, owner, repo, issueNumber);
+            // Fetch the comment body to check snooze status (Issue #155)
+            if (existingCommentId && snoozeWindowMs > 0 && !forceComment) {
+                try {
+                    const commentResponse = await octokit.rest.issues.getComment({
+                        owner,
+                        repo,
+                        comment_id: existingCommentId,
+                    });
+                    existingCommentBody = commentResponse.data.body;
+                }
+                catch (error) {
+                    core.debug(`Could not fetch existing comment body for snooze check: ${error}`);
+                }
+            }
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             core.warning(`Could not look up existing TrustBridge comment, falling back to a new comment: ${message}`);
+        }
+    }
+    // Check snooze state (Issue #155)
+    if (existingCommentBody && snoozeWindowMs > 0 && !forceComment) {
+        const lastMarker = (0, snooze_1.parseSnoozeMarker)(existingCommentBody);
+        // Determine if current check is passing by looking at body content
+        // The snooze marker we just added to body indicates 'pass' or 'fail'
+        const currentPassed = body.includes('<!-- trustbridge-action:snooze:status=pass');
+        const snoozeState = (0, snooze_1.evaluateSnoozeState)(currentPassed, lastMarker, snoozeWindowMs);
+        if (snoozeState.isSnoozed) {
+            core.info(`Snooze window active (${Math.round((snoozeState.elapsedMs ?? 0) / 1000)}s elapsed). Suppressing comment update. Outputs remain updated.`);
+            return existingCommentId ? `https://github.com/${owner}/${repo}/issues/${issueNumber}#issuecomment-${existingCommentId}` : undefined;
         }
     }
     if (existingCommentId) {
@@ -35193,6 +35226,13 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Failure snooze window (Issue #155)
+    const snoozeWindowMinutes = (0, inputs_1.parseNumberInput)(core.getInput('snooze_window_minutes'), 30, {
+        min: 0,
+        max: 10080, // 7 days
+    });
+    const forceComment = (0, inputs_1.parseBooleanInput)(core.getInput('force_comment'), false);
+    const snoozeWindowMs = snoozeWindowMinutes * 60 * 1000;
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -35314,7 +35354,11 @@ async function run() {
     });
     let commentUrl;
     try {
-        commentUrl = await (0, comment_1.postIssueComment)(githubToken, commentBody, { sticky: stickyComment });
+        commentUrl = await (0, comment_1.postIssueComment)(githubToken, commentBody, {
+            sticky: stickyComment,
+            forceComment,
+            snoozeWindowMs,
+        });
         if (commentUrl) {
             logger_1.logger.info('Issue comment created', { component: 'index', commentUrl });
         }
@@ -36101,6 +36145,127 @@ function setValidationOutputs(result, commentUrl) {
     for (const [name, value] of Object.entries(outputs)) {
         core.setOutput(name, value);
     }
+}
+
+
+/***/ }),
+
+/***/ 3286:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Failure snooze window (Issue #155).
+ *
+ * Prevents repeated validation failure comments from spamming an issue
+ * within a configurable time window. Stores state in TrustBridge's sticky
+ * comment to avoid external dependencies while maintaining per-issue snooze
+ * isolation.
+ *
+ * ## Design
+ *
+ * **State Storage**: The previous check result (pass/fail) and timestamp are
+ * encoded in a hidden marker in TrustBridge's sticky comment. When the action
+ * runs, we parse the marker to detect snooze status.
+ *
+ * **Snooze Trigger**: If the current check fails AND the last check failed
+ * AND we're still within the snooze window, suppress the comment update.
+ * This prevents comment spam when contributors re-run workflows repeatedly
+ * while fixing wallet issues.
+ *
+ * **Status Changes**: If the current check passes OR we're outside the
+ * snooze window, post/update the comment normally. This surfaces both
+ * fixes and persistent failures (user is reminded after timeout).
+ *
+ * **Always Update Outputs**: Even when snoozed, outputs are always set so
+ * downstream workflow steps (like badge updates) reflect current state.
+ *
+ * **Force Post**: An optional `force_comment` input bypasses snooze logic
+ * so maintainers can force an immediate comment post if needed.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SNOOZE_MARKER_PATTERN = void 0;
+exports.parseSnoozeMarker = parseSnoozeMarker;
+exports.formatSnoozeMarker = formatSnoozeMarker;
+exports.evaluateSnoozeState = evaluateSnoozeState;
+/**
+ * Hidden marker format in comment body:
+ * <!-- trustbridge-action:snooze:status={pass|fail},timestamp={unix-ms} -->
+ */
+exports.SNOOZE_MARKER_PATTERN = /<!-- trustbridge-action:snooze:status=(pass|fail),timestamp=(\d+) -->/;
+/**
+ * Extract snooze marker from a comment body. Returns undefined if marker
+ * not found (backward compatible with older comments).
+ */
+function parseSnoozeMarker(commentBody) {
+    if (!commentBody)
+        return undefined;
+    const match = commentBody.match(exports.SNOOZE_MARKER_PATTERN);
+    if (!match)
+        return undefined;
+    return {
+        status: match[1],
+        timestamp: Number(match[2]),
+    };
+}
+/**
+ * Generate a snooze marker string to embed in comment body.
+ */
+function formatSnoozeMarker(status, timestamp = Date.now()) {
+    return `<!-- trustbridge-action:snooze:status=${status},timestamp=${timestamp} -->`;
+}
+/**
+ * Determine snooze state based on current result, last marker, and snooze duration.
+ *
+ * ### Decision Logic
+ *
+ * - If current result **passes**: always post (unsnooze on success).
+ * - If current result **fails** AND no prior marker: always post (first failure).
+ * - If current result **fails** AND prior status **passed**: always post (status changed).
+ * - If current result **fails** AND prior status **failed** AND elapsed < snoozeMs:
+ *   - **Snoozed** (suppress comment, but still update outputs).
+ * - If current result **fails** AND prior status **failed** AND elapsed >= snoozeMs:
+ *   - **Post** (reminder after timeout; reset timer).
+ */
+function evaluateSnoozeState(currentPassed, lastMarker, snoozeWindowMs) {
+    const now = Date.now();
+    // If current check passes, always post (unsnooze).
+    if (currentPassed) {
+        return {
+            isSnoozed: false,
+            lastStatus: lastMarker?.status,
+            lastTimestamp: lastMarker?.timestamp,
+        };
+    }
+    // Current check failed.
+    // If no prior marker, this is the first failure — post it.
+    if (!lastMarker) {
+        return {
+            isSnoozed: false,
+            lastStatus: undefined,
+            lastTimestamp: undefined,
+        };
+    }
+    // Current failed, prior status known.
+    const elapsedMs = now - lastMarker.timestamp;
+    // Status changed from pass to fail — post it.
+    if (lastMarker.status === 'pass') {
+        return {
+            isSnoozed: false,
+            lastStatus: lastMarker.status,
+            lastTimestamp: lastMarker.timestamp,
+            elapsedMs,
+        };
+    }
+    // Status remains failed.
+    const withinWindow = elapsedMs < snoozeWindowMs;
+    return {
+        isSnoozed: withinWindow,
+        lastStatus: lastMarker.status,
+        lastTimestamp: lastMarker.timestamp,
+        elapsedMs,
+    };
 }
 
 

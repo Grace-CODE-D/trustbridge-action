@@ -140,6 +140,22 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  snooze_window_minutes:
+    description: >-
+      Time window (in minutes) to suppress duplicate validation failure comments
+      on the same issue. When a check fails and the last check also failed
+      within this window, the comment update is suppressed to reduce notification
+      noise. Outputs are always updated even when snoozed. Set to 0 to disable
+      snoozing (always post). Default 30 minutes. (Issue #155)
+    required: false
+    default: '30'
+  force_comment:
+    description: >-
+      Bypass snooze logic and force an immediate comment post, even if within
+      the snooze window. Useful for maintainers who want to re-alert after
+      a fix attempt. Default false. (Issue #155)
+    required: false
+    default: 'false'
 
 outputs:
   trustline_exists:

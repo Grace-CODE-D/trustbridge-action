@@ -63,6 +63,14 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
+  // Failure snooze window (Issue #155)
+  const snoozeWindowMinutes = parseNumberInput(core.getInput('snooze_window_minutes'), 30, {
+    min: 0,
+    max: 10080, // 7 days
+  });
+  const forceComment = parseBooleanInput(core.getInput('force_comment'), false);
+  const snoozeWindowMs = snoozeWindowMinutes * 60 * 1000;
+
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
 
@@ -208,7 +216,11 @@ async function run(): Promise<void> {
 
   let commentUrl: string | undefined;
   try {
-    commentUrl = await postIssueComment(githubToken, commentBody, { sticky: stickyComment });
+    commentUrl = await postIssueComment(githubToken, commentBody, { 
+      sticky: stickyComment,
+      forceComment,
+      snoozeWindowMs,
+    });
     if (commentUrl) {
       logger.info('Issue comment created', { component: 'index', commentUrl });
     }
