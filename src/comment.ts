@@ -21,7 +21,7 @@ import {
 } from './links';
 import { buildOnboardingChecklist, inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
-import { Locale, getStrings } from './i18n';
+import { formatSnoozeMarker, parseSnoozeMarker, evaluateSnoozeState } from './snooze';
 
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
@@ -100,14 +100,15 @@ export function formatCommentBody(
 ): string {
   const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
   const gate = buildValidationGate(result);
-  const locale = config.locale || 'en';
-  const strings = getStrings(locale);
-
+  
+  // Generate snooze marker with current check status (Issue #155)
+  const snoozeMarker = formatSnoozeMarker(result.valid ? 'pass' : 'fail');
+  
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
-    `<!-- trustbridge-action:locale:${locale} -->`,
-    `## ${strings.heading}`,
+    snoozeMarker,
+    '## TrustBridge — Stellar Account Check',
     '',
     `${strings.checkedAccount} ${inlineCode(config.stellarAddress)}`,
     `${strings.horizon} ${inlineCode(config.horizonUrl)}`,
@@ -429,13 +430,16 @@ export interface UpsertCommentOptions {
    */
   sticky?: boolean;
   /**
-   * Explicit issue number to target. Used by `workflow_dispatch` runs that
-   * pass `issue_number` as an input so the action can post a comment on a
-   * specific issue even when the event context does not carry an issue
-   * payload. When provided, this overrides any issue number derived from
-   * `github.context.payload.issue.number`.
+   * When true, post the comment normally even if snoozed.
+   * Useful for maintainers forcing an immediate re-alert.
    */
-  issueNumber?: number;
+  forceComment?: boolean;
+  /**
+   * Snooze window in milliseconds for suppressing duplicate failure comments.
+   * When result failed and last check failed within this window, skip the
+   * comment post (unless forceComment is true). Always update outputs.
+   */
+  snoozeWindowMs?: number;
 }
 
 type Octokit = ReturnType<typeof github.getOctokit>;
@@ -490,6 +494,8 @@ export async function postIssueComment(
   options: UpsertCommentOptions = {},
 ): Promise<string | undefined> {
   const sticky = options.sticky ?? true;
+  const forceComment = options.forceComment ?? false;
+  const snoozeWindowMs = options.snoozeWindowMs ?? 0;
   const context = github.context;
   // Prefer an explicitly-supplied issue number (e.g. from workflow_dispatch
   // input) over the event context payload so manual benchmark runs can
@@ -513,14 +519,48 @@ export async function postIssueComment(
   const { owner, repo } = context.repo;
 
   let existingCommentId: number | undefined;
+  let existingCommentBody: string | undefined;
+  
   if (sticky) {
     try {
       existingCommentId = await findStickyComment(octokit, owner, repo, issueNumber);
+      
+      // Fetch the comment body to check snooze status (Issue #155)
+      if (existingCommentId && snoozeWindowMs > 0 && !forceComment) {
+        try {
+          const commentResponse = await octokit.rest.issues.getComment({
+            owner,
+            repo,
+            comment_id: existingCommentId,
+          });
+          existingCommentBody = commentResponse.data.body;
+        } catch (error) {
+          core.debug(`Could not fetch existing comment body for snooze check: ${error}`);
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       core.warning(
         `Could not look up existing TrustBridge comment, falling back to a new comment: ${message}`,
       );
+    }
+  }
+
+  // Check snooze state (Issue #155)
+  if (existingCommentBody && snoozeWindowMs > 0 && !forceComment) {
+    const lastMarker = parseSnoozeMarker(existingCommentBody);
+    
+    // Determine if current check is passing by looking at body content
+    // The snooze marker we just added to body indicates 'pass' or 'fail'
+    const currentPassed = body.includes('<!-- trustbridge-action:snooze:status=pass');
+    
+    const snoozeState = evaluateSnoozeState(currentPassed, lastMarker, snoozeWindowMs);
+    
+    if (snoozeState.isSnoozed) {
+      core.info(
+        `Snooze window active (${Math.round((snoozeState.elapsedMs ?? 0) / 1000)}s elapsed). Suppressing comment update. Outputs remain updated.`,
+      );
+      return existingCommentId ? `https://github.com/${owner}/${repo}/issues/${issueNumber}#issuecomment-${existingCommentId}` : undefined;
     }
   }
 

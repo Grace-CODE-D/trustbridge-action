@@ -69,13 +69,16 @@ export interface UpsertCommentOptions {
      */
     sticky?: boolean;
     /**
-     * Explicit issue number to target. Used by `workflow_dispatch` runs that
-     * pass `issue_number` as an input so the action can post a comment on a
-     * specific issue even when the event context does not carry an issue
-     * payload. When provided, this overrides any issue number derived from
-     * `github.context.payload.issue.number`.
+     * When true, post the comment normally even if snoozed.
+     * Useful for maintainers forcing an immediate re-alert.
      */
-    issueNumber?: number;
+    forceComment?: boolean;
+    /**
+     * Snooze window in milliseconds for suppressing duplicate failure comments.
+     * When result failed and last check failed within this window, skip the
+     * comment post (unless forceComment is true). Always update outputs.
+     */
+    snoozeWindowMs?: number;
 }
 type Octokit = ReturnType<typeof github.getOctokit>;
 /**

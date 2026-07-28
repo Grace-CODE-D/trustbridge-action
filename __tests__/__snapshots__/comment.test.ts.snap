@@ -3,7 +3,7 @@
 exports[`formatCommentBody golden snapshots matches golden snapshot for missing trustline failure path 1`] = `
 "<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
 <!-- trustbridge-action:schema-version:1.0.0 -->
-<!-- trustbridge-action:locale:en -->
+<!-- trustbridge-action:snooze:status=fail,timestamp=1000000000000 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -80,7 +80,7 @@ _Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbrid
 exports[`formatCommentBody golden snapshots matches golden snapshot for successful validation result 1`] = `
 "<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
 <!-- trustbridge-action:schema-version:1.0.0 -->
-<!-- trustbridge-action:locale:en -->
+<!-- trustbridge-action:snooze:status=pass,timestamp=1000000000000 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -153,7 +153,7 @@ _Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbrid
 exports[`formatCommentBody golden snapshots matches golden snapshot for unfunded account failure path 1`] = `
 "<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
 <!-- trustbridge-action:schema-version:1.0.0 -->
-<!-- trustbridge-action:locale:en -->
+<!-- trustbridge-action:snooze:status=fail,timestamp=1000000000000 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`

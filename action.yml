@@ -186,15 +186,22 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  report_output_path:
+  snooze_window_minutes:
     description: >-
-      Workspace-relative (or absolute) path where the full validation report
-      is written when the comment body exceeds GitHub's size limit.  The file
-      can then be uploaded as a workflow artifact using
-      `actions/upload-artifact`.  Has no effect when the comment is within
-      the size limit.  Defaults to `trustbridge-report.md`.
+      Time window (in minutes) to suppress duplicate validation failure comments
+      on the same issue. When a check fails and the last check also failed
+      within this window, the comment update is suppressed to reduce notification
+      noise. Outputs are always updated even when snoozed. Set to 0 to disable
+      snoozing (always post). Default 30 minutes. (Issue #155)
     required: false
-    default: 'trustbridge-report.md'
+    default: '30'
+  force_comment:
+    description: >-
+      Bypass snooze logic and force an immediate comment post, even if within
+      the snooze window. Useful for maintainers who want to re-alert after
+      a fix attempt. Default false. (Issue #155)
+    required: false
+    default: 'false'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
