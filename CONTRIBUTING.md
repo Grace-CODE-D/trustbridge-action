@@ -2,7 +2,7 @@
 
 Thank you for helping improve **trustbridge-action**! This guide covers local setup, coding standards, and the pull request process.
 
-Related docs: [README](README.md) · [Structure](docs/STRUCTURE.md) · [Architecture](docs/ARCHITECTURE.md)
+Related docs: [README](README.md) · [Structure](docs/STRUCTURE.md) · [Architecture](docs/ARCHITECTURE.md) · [Breaking Changes](docs/BREAKING_CHANGES.md)
 
 ---
 
@@ -102,6 +102,7 @@ Do not import `@actions/github` outside `comment.ts` / `index.ts`.
 - [ ] Build succeeds (`npm run build`)
 - [ ] `dist/` updated if runtime code changed (commit compiled output for releases)
 - [ ] README / docs updated if behavior or inputs changed
+- [ ] `docs/BREAKING_CHANGES.md` consulted — change classified as breaking or non-breaking and version bump applied accordingly
 - [ ] No secrets or real contributor addresses in commits
 
 ---
@@ -122,9 +123,11 @@ test: cover zero-trustline account path
 ## Releasing (maintainers)
 
 1. Merge to `main` with passing CI
-2. Tag semver (`v1.0.1`)
-3. Create GitHub Release with changelog
-4. Consumers pin `@v1` or specific patch tag
+2. Consult [docs/BREAKING_CHANGES.md](docs/BREAKING_CHANGES.md) — determine whether the release is a patch, minor, or major bump
+3. Tag semver (`v1.0.1`)
+4. Move the major tag (`v1`) to the new commit **only** if the release is on the same major line; create a new tag (`v2`) for a breaking release
+5. Create GitHub Release with changelog — note any input/output changes and link to `docs/BREAKING_CHANGES.md` if inputs or outputs changed
+6. Consumers pin `@v1` or specific patch tag
 
 **Build note:** `npm run build` runs TypeScript checking and `@vercel/ncc` to bundle `dist/index.js`. Commit `dist/` when releasing.
 
