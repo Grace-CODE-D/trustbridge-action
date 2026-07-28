@@ -35,8 +35,23 @@ inputs:
     required: false
     default: '1.5'
   stellar_address_input:
-    description: 'Stellar account address (G-address) to validate'
-    required: true
+    description: >-
+      Stellar account address (G-address) to validate. Required unless
+      assignee_address_map is set, in which case the address is resolved
+      from the map using the GitHub assignee login.
+    required: false
+    default: ''
+  assignee_address_map:
+    description: >-
+      Optional JSON object (or path to a JSON file) mapping GitHub usernames
+      (assignees) to Stellar G-addresses. When set, TrustBridge resolves the
+      assignee login from the GitHub event context and looks up their address
+      before calling Horizon — so assignment workflows do not need to parse
+      the issue body. Example: '{"alice":"G...","bob":"G..."}' or
+      'rosters/wallets.json'. Do not commit private rosters to public repos;
+      prefer org/repo secrets or a private path.
+    required: false
+    default: ''
   fail_on_missing:
     description: 'Fail the workflow step when checks do not pass (true) or only warn (false)'
     required: false

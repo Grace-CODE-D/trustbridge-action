@@ -238,6 +238,54 @@ Parse a labeled line from the issue body:
 
 Fetch a custom field or org profile via your own API step, then pass the result to `stellar_address_input`.
 
+### Assignee → address roster map (`assignee_address_map`)
+
+When wallets are stored out-of-band (org variable, private roster file, Actions secret), pass a JSON map of **GitHub username → Stellar G-address**. TrustBridge reads the assignee login from the GitHub event context (`payload.assignee` on `issues.assigned`, otherwise the first issue assignee) and resolves the address **before** calling Horizon — no issue-body parsing required.
+
+**Inline JSON** (small public rosters or values injected from a secret):
+
+```yaml
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer injecting from a secret/org variable rather than hard-coding:
+          assignee_address_map: ${{ vars.STELLAR_ASSIGNEE_ROSTER }}
+          # Example shape: {"alice":"GABC...","bob":"GDEF..."}
+```
+
+**JSON file path** (checked out in the job workspace):
+
+```json
+{
+  "alice": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  "bob": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
+}
+```
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: Stellar-TrustBridge/trustbridge-action@v1
+    with:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      assignee_address_map: rosters/wallets.json
+```
+
+Usernames are matched **case-insensitively**. When the map is set, `stellar_address_input` is not required. Missing assignees fail with an actionable error; invalid G-addresses still go through the existing address validation before Horizon.
+
+> **Security:** Do **not** commit private or sensitive rosters to a public repository. Prefer GitHub Actions secrets / org variables, a private repo path, or a checkout of a restricted artifact. Public exposure of username↔wallet links can deanonymize contributors.
+
 ---
 
 ## Outputs in downstream jobs

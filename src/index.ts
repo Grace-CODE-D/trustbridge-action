@@ -1,4 +1,5 @@
 import * as core from '@actions/core';
+import * as github from '@actions/github';
 import {
   CheckConfig,
   horizonFailureResult,
@@ -10,12 +11,74 @@ import {
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
-import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
+import {
+  getErrorMessage,
+  parseAssigneeAddressMap,
+  parseBooleanInput,
+  parseNumberInput,
+  resolveAddressFromAssigneeMap,
+} from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+
+/**
+ * Resolve the GitHub assignee login from the current Actions event payload.
+ * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
+ */
+function resolveAssigneeLoginFromContext(): string | undefined {
+  const payload = github.context.payload as {
+    assignee?: { login?: string };
+    issue?: { assignees?: Array<{ login?: string }> };
+  };
+
+  const fromEvent = payload.assignee?.login?.trim();
+  if (fromEvent) {
+    return fromEvent;
+  }
+
+  const assignees = payload.issue?.assignees;
+  if (Array.isArray(assignees)) {
+    for (const entry of assignees) {
+      const login = entry?.login?.trim();
+      if (login) {
+        return login;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Resolve the Stellar G-address to validate: either from assignee_address_map
+ * (GitHub username → address roster) or from stellar_address_input.
+ */
+function resolveStellarAddressInput(
+  stellarAddressInput: string,
+  assigneeAddressMapRaw: string,
+): string {
+  const mapRaw = assigneeAddressMapRaw.trim();
+  if (mapRaw) {
+    const map = parseAssigneeAddressMap(mapRaw, {
+      workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
+    });
+    const assigneeLogin = resolveAssigneeLoginFromContext();
+    return resolveAddressFromAssigneeMap(map, assigneeLogin);
+  }
+
+  const direct = stellarAddressInput.trim();
+  if (direct) {
+    return direct;
+  }
+
+  throw new Error(
+    'Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
+      '(JSON / file path mapping GitHub usernames to G-addresses).',
+  );
+}
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -24,7 +87,9 @@ async function run(): Promise<void> {
     core.getInput('asset_issuer') ||
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
   const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
-  const stellarAddress = core.getInput('stellar_address_input').trim();
+  const stellarAddressInput = core.getInput('stellar_address_input');
+  const assigneeAddressMapRaw = core.getInput('assignee_address_map');
+  const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
   const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
@@ -83,6 +148,7 @@ async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
+    trustbridgeConfigPath,
     sep0007DeepLinks,
   });
 
