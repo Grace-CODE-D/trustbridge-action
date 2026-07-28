@@ -1081,4 +1081,21 @@ Set `preflight_only: true` to run only the permission check and exit without cal
 
 ---
 
+## Integrations and extension examples
+
+### KYC gate (optional consumer logic)
+
+Wave programs that require identity verification before payout can add an
+optional KYC check via the [plugin architecture](PLUGIN_ARCHITECTURE.md).
+A hardened reference example — with safe comment output, no PII in logs,
+and full Markdown escaping — is available at:
+
+- **Plugin source:** [`docs/examples/kyc-plugin.ts`](examples/kyc-plugin.ts)
+- **Guide:** [`docs/examples/kyc-plugin.md`](examples/kyc-plugin.md)
+
+The KYC plugin is **never enforced by default**. It only runs when you
+explicitly register it alongside the core checks.
+
+---
+
 [← Back to README](../README.md)
