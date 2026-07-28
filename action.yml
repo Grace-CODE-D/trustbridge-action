@@ -133,6 +133,22 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  locale:
+    description: >-
+      Locale for issue comment strings (e.g., 'en', 'es', 'pt').
+      Defaults to 'en' (English) if unset or invalid. See docs/USAGE.md for
+      supported locales and examples.
+    required: false
+    default: 'en'
+  sarif_output_path:
+    description: >-
+      Optional path where TrustBridge will write SARIF 2.1.0 results for
+      GitHub Advanced Security / code scanning integration. When set, the
+      action generates a SARIF file that can be uploaded via
+      github/codeql-action/upload-sarif. Leave empty to skip SARIF generation.
+      Example: 'trustbridge-sarif.json'
+    required: false
+    default: ''
 
 outputs:
   trustline_exists:
