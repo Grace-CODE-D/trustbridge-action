@@ -49,6 +49,7 @@ export interface RetryPolicy {
     maxDelayMs: number;
     backoffMultiplier: number;
     timeoutMs: number;
+    maxTotalWaitMs: number;
 }
 /**
  * Default retry policy for API calls.

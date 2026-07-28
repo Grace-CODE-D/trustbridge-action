@@ -106,6 +106,7 @@ export interface RetryPolicy {
   maxDelayMs: number;
   backoffMultiplier: number;
   timeoutMs: number;
+  maxTotalWaitMs: number;
 }
 
 /**
@@ -117,6 +118,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxDelayMs: 30000,
   backoffMultiplier: 2,
   timeoutMs: 15000,
+  maxTotalWaitMs: 120000,
 };
 
 /**
@@ -241,6 +243,7 @@ export async function retryWithBackoff<T>(
   shouldRetry: (error: unknown, attempt: number) => boolean = () => true,
 ): Promise<T> {
   let lastError: unknown;
+  let totalWaitMs = 0;
 
   for (let attempt = 0; attempt <= policy.maxRetries; attempt++) {
     try {
@@ -258,6 +261,12 @@ export async function retryWithBackoff<T>(
 
       const delayMs = calculateBackoffDelay(attempt, policy);
       const delayWithJitter = addJitter(delayMs);
+      
+      if (delayWithJitter > policy.maxDelayMs || totalWaitMs + delayWithJitter > policy.maxTotalWaitMs) {
+        throw new Error(`Rate limit cap exceeded (attempted wait ${delayWithJitter}ms, max delay ${policy.maxDelayMs}ms, total wait ${totalWaitMs}ms, max total ${policy.maxTotalWaitMs}ms)`);
+      }
+      
+      totalWaitMs += delayWithJitter;
       await sleep(delayWithJitter);
     }
   }

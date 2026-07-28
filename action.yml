@@ -180,39 +180,14 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  soroban_rpc_url:
-    description: >-
-      Soroban RPC endpoint URL used to query the trustbridge-contract on-chain
-      registry (e.g. https://soroban-testnet.stellar.org). Leave empty to skip
-      the registry lookup and rely solely on stellar_address_input.
+  retry_max_delay_ms:
+    description: 'Maximum sleep per retry (ms). Overrides Retry-After if it exceeds this cap.'
     required: false
-    default: ''
-  contract_id:
-    description: >-
-      Contract ID (C-address) of the trustbridge-contract registry. Required
-      when soroban_rpc_url is set. Ignored when soroban_rpc_url is empty.
+    default: '60000'
+  retry_max_total_wait_ms:
+    description: 'Maximum total wait time across all retries (ms). Fails if exceeded.'
     required: false
-    default: ''
-  github_username:
-    description: >-
-      GitHub username to resolve via the trustbridge-contract registry.
-      When provided alongside soroban_rpc_url and contract_id, the action
-      looks up the on-chain mapping first and uses the resolved G-address
-      instead of stellar_address_input. Falls back to stellar_address_input
-      if the registry is unavailable or the username is not registered.
-    required: false
-    default: ''
-
-  write_validation_json:
-    description: >-
-      Write a validation.json artifact to the workspace summarizing check results
-      for security review, auditing, and downstream gates. Defaults to false.
-    required: false
-    default: 'false'
-  validation_json_path:
-    description: 'Path relative to the workspace to write the validation.json artifact.'
-    required: false
-    default: 'validation.json'
+    default: '120000'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

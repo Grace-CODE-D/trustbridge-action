@@ -72,8 +72,8 @@ async function run(): Promise<void> {
   const horizonMaxRequests = parseNumberInput(core.getInput('horizon_max_requests'), 0, { min: 0 });
   const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms'), 30000, { min: 0 });
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
-  const shouldWriteValidationJson = parseBooleanInput(core.getInput('write_validation_json'), false);
-  const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
+  const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms'), 60000, { min: 1000 });
+  const retryMaxTotalWaitMs = parseNumberInput(core.getInput('retry_max_total_wait_ms'), 120000, { min: 1000 });
   const githubToken = core.getInput('github_token', { required: true });
   const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
@@ -227,9 +227,8 @@ async function run(): Promise<void> {
     fallbackUrls,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
-    horizonMaxRequests,
     retryMaxDelayMs,
-    rateBudgetTracker,
+    retryMaxTotalWaitMs,
   };
 
   try {

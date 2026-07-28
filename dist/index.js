@@ -34161,6 +34161,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35150,7 +35213,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.HorizonError = void 0;
+exports.HorizonRateLimitError = exports.HorizonError = void 0;
 exports.normalizeHorizonUrl = normalizeHorizonUrl;
 exports.isRetryableStatus = isRetryableStatus;
 exports.parseRetryAfterMs = parseRetryAfterMs;
@@ -35174,9 +35237,19 @@ class HorizonError extends Error {
     }
 }
 exports.HorizonError = HorizonError;
+class HorizonRateLimitError extends HorizonError {
+    constructor(message, retryAfterMs) {
+        super(message, 429, true);
+        this.retryAfterMs = retryAfterMs;
+        this.name = 'HorizonRateLimitError';
+    }
+}
+exports.HorizonRateLimitError = HorizonRateLimitError;
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_CACHE_TTL_MS = 60000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 60000;
+const DEFAULT_RETRY_MAX_TOTAL_WAIT_MS = 120000;
 function normalizeHorizonUrl(baseUrl) {
     const trimmed = baseUrl.trim();
     if (!trimmed) {
@@ -35247,11 +35320,12 @@ function safeAccountSummary(account) {
         subentryCount: account.subentry_count,
     };
 }
-async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind) {
+async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, retryMaxDelayMs, retryMaxTotalWaitMs) {
     const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
     const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
     const safeUrlForLog = (0, logger_1.redactHorizonUrl)(url);
     let attempt = 0;
+    let totalWaitMs = 0;
     let lastError;
     while (attempt <= maxRetries) {
         const requestStartedAt = Date.now();
@@ -35330,6 +35404,10 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                 if (retryable && attempt < maxRetries) {
                     const retryAfterHeader = parseRetryAfterMs(response);
                     const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
+                    if (retryAfter > retryMaxDelayMs || totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
+                        throw new HorizonRateLimitError(`Horizon rate limit exceeded (Retry-After ${retryAfter}ms exceeds cap of ${retryMaxDelayMs}ms per-retry or ${retryMaxTotalWaitMs}ms total). Please try again later.`, retryAfter);
+                    }
+                    totalWaitMs += retryAfter;
                     logger_1.logger.debug('Horizon retry scheduled', safeHorizonContext({
                         component: 'horizon',
                         stellarAddress,
@@ -35403,6 +35481,10 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             lastError = new HorizonError(message, isAbort ? 408 : 0, true);
             if (attempt < maxRetries) {
                 const backoffMs = 1000 * 2 ** attempt;
+                if (backoffMs > retryMaxDelayMs || totalWaitMs + backoffMs > retryMaxTotalWaitMs) {
+                    throw lastError;
+                }
+                totalWaitMs += backoffMs;
                 logger_1.logger.debug('Horizon transport retry scheduled', safeHorizonContext({
                     component: 'horizon',
                     stellarAddress,
@@ -35451,6 +35533,8 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    const retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+    const retryMaxTotalWaitMs = options.retryMaxTotalWaitMs ?? DEFAULT_RETRY_MAX_TOTAL_WAIT_MS;
     const cache = options.cache ?? cache_1.defaultCache;
     const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
     const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
@@ -35509,7 +35593,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     }
     let primaryError;
     try {
-        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary');
+        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', retryMaxDelayMs, retryMaxTotalWaitMs);
         if (cachingEnabled) {
             cache.set(cacheKey, result.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35553,7 +35637,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
     }));
     try {
-        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback');
+        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', retryMaxDelayMs, retryMaxTotalWaitMs);
         if (cachingEnabled) {
             cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35828,8 +35912,8 @@ async function run() {
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
-    const shouldWriteValidationJson = (0, inputs_1.parseBooleanInput)(core.getInput('write_validation_json'), false);
-    const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
+    const retryMaxDelayMs = (0, inputs_1.parseNumberInput)(core.getInput('retry_max_delay_ms'), 60000, { min: 1000 });
+    const retryMaxTotalWaitMs = (0, inputs_1.parseNumberInput)(core.getInput('retry_max_total_wait_ms'), 120000, { min: 1000 });
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
@@ -35906,6 +35990,8 @@ async function run() {
         fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
+        retryMaxDelayMs,
+        retryMaxTotalWaitMs,
     };
     try {
         const account = waitUntilFunded
