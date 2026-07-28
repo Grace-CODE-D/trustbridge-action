@@ -1,4 +1,4 @@
-import { ValidationResult } from './checks';
+import { ValidationResult, CheckConfig } from './checks';
 export interface ActionOutputs {
     trustline_exists: string;
     xlm_balance: string;
@@ -7,3 +7,6 @@ export interface ActionOutputs {
 }
 export declare function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs;
 export declare function setValidationOutputs(result: ValidationResult, commentUrl?: string): void;
+export declare function writeValidationJson(result: ValidationResult, config: CheckConfig & {
+    stellarAddress: string;
+}, outputPath: string): void;

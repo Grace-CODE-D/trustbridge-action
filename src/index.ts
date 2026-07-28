@@ -12,7 +12,7 @@ import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
-import { setValidationOutputs } from './outputs';
+import { setValidationOutputs, writeValidationJson } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
@@ -57,6 +57,8 @@ async function run(): Promise<void> {
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+  const shouldWriteValidationJson = parseBooleanInput(core.getInput('write_validation_json'), false);
+  const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
   const githubToken = core.getInput('github_token', { required: true });
 
   // SEP-0007 wallet deep links (Issue #44)
@@ -214,6 +216,14 @@ async function run(): Promise<void> {
   }
 
   setValidationOutputs(result, commentUrl);
+
+  if (shouldWriteValidationJson) {
+    try {
+      writeValidationJson(result, { ...checkConfig, stellarAddress }, validationJsonPath);
+    } catch (error) {
+      core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
+    }
+  }
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });

@@ -134,6 +134,17 @@ inputs:
     required: false
     default: ''
 
+  write_validation_json:
+    description: >-
+      Write a validation.json artifact to the workspace summarizing check results
+      for security review, auditing, and downstream gates. Defaults to false.
+    required: false
+    default: 'false'
+  validation_json_path:
+    description: 'Path relative to the workspace to write the validation.json artifact.'
+    required: false
+    default: 'validation.json'
+
 outputs:
   trustline_exists:
     description: 'Whether the account has a trustline for the configured asset'
