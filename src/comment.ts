@@ -67,13 +67,18 @@ function statusIcon(passed: boolean): string {
   return passed ? '✅' : '❌';
 }
 
+export const MAX_COMMENT_LENGTH = 64000;
+const TRUNCATION_NOTICE = '\n\n_... [Truncated due to GitHub length limits. See workflow logs for full details.]_';
+
 export function formatCommentBody(
   result: ValidationResult,
   config: CommentConfig,
 ): string {
   const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
   const gate = buildValidationGate(result);
-  const lines: string[] = [
+
+  const buildWithRemediation = (remediationText: string | undefined): string => {
+    const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
     '## TrustBridge — Stellar Account Check',
@@ -137,8 +142,8 @@ export function formatCommentBody(
     );
   }
 
-  if (result.remediation) {
-    lines.push('', '### Remediation', '', result.remediation);
+  if (remediationText) {
+    lines.push('', '### Remediation', '', remediationText);
   }
 
   lines.push(
@@ -194,9 +199,28 @@ export function formatCommentBody(
     '',
     '---',
     TRUSTBRIDGE_FOOTER,
-  );
+    );
 
-  return lines.join('\n');
+    return lines.join('\n');
+  };
+
+  let fullBody = buildWithRemediation(result.remediation);
+
+  if (fullBody.length > MAX_COMMENT_LENGTH && result.remediation) {
+    const excess = fullBody.length - MAX_COMMENT_LENGTH;
+    const availableForRemediation = result.remediation.length - excess - TRUNCATION_NOTICE.length;
+
+    let truncatedRemediation: string;
+    if (availableForRemediation > 0) {
+      truncatedRemediation = result.remediation.slice(0, availableForRemediation) + TRUNCATION_NOTICE;
+    } else {
+      truncatedRemediation = TRUNCATION_NOTICE.trimStart();
+    }
+    
+    fullBody = buildWithRemediation(truncatedRemediation);
+  }
+  
+  return fullBody;
 }
 
 /**
