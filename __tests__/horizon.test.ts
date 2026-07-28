@@ -718,6 +718,132 @@ describe('Horizon debug log redaction', () => {
     });
   });
 
+  describe('RPC fallback network binding rule', () => {
+    const TESTNET_FALLBACK_HORIZON = 'https://horizon-testnet.stellar.org';
+
+    it('skips a cross-network fallback by default and rethrows the primary error', async () => {
+      const { calls, restore } = captureDebugCalls();
+      const primaryErrBody = { type: 'server_error', title: 'Bad Gateway', status: 502, detail: 'primary down' };
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(502, primaryErrBody);
+        }
+        // The fallback must never be called for a cross-network mismatch.
+        return makeMockResponse(200, makeAccount(FALLBACK_ADDRESS));
+      });
+      loggerModule.logger.setDebugMode(true);
+
+      try {
+        await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          cacheTtlMs: 0,
+          horizonUrlFallback: TESTNET_FALLBACK_HORIZON,
+          fetchFn: mock,
+        })).rejects.toMatchObject({ statusCode: 502 });
+
+        // Only the primary request was made — the mismatched-network
+        // fallback was never attempted.
+        expect(mock).toHaveBeenCalledTimes(1);
+
+        const skipped = calls.find(
+          (c) => c.message === 'Horizon RPC fallback skipped: primary and fallback resolve to different networks',
+        );
+        const skippedCtx = requireContext(skipped);
+        expect(skippedCtx.primaryNetwork).toBe('public');
+        expect(skippedCtx.fallbackNetwork).toBe('testnet');
+
+        const switched = calls.find(
+          (c) => c.message === 'Horizon RPC fallback: primary exhausted, switching to fallback URL',
+        );
+        expect(switched).toBeUndefined();
+      } finally {
+        jest.restoreAllMocks();
+        restore();
+      }
+    });
+
+    it('uses a cross-network fallback when allowCrossNetworkFallback is explicitly set', async () => {
+      const account = makeAccount(FALLBACK_ADDRESS);
+      const primaryErrBody = { type: 'server_error', title: 'Bad Gateway', status: 502, detail: 'primary down' };
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(502, primaryErrBody);
+        }
+        return makeMockResponse(200, account);
+      });
+
+      const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        maxRetries: 0,
+        cacheTtlMs: 0,
+        horizonUrlFallback: TESTNET_FALLBACK_HORIZON,
+        allowCrossNetworkFallback: true,
+        fetchFn: mock,
+      });
+
+      expect(result.account_id).toBe(FALLBACK_ADDRESS);
+      expect(mock).toHaveBeenCalledTimes(2);
+      jest.restoreAllMocks();
+    });
+
+    it('still uses the fallback when both URLs resolve to the same network', async () => {
+      const account = makeAccount(FALLBACK_ADDRESS);
+      const primaryErrBody = { type: 'server_error', title: 'Bad Gateway', status: 502, detail: 'primary down' };
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(502, primaryErrBody);
+        }
+        return makeMockResponse(200, account);
+      });
+
+      const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        maxRetries: 0,
+        cacheTtlMs: 0,
+        horizonUrlFallback: FALLBACK_HORIZON,
+        fetchFn: mock,
+      });
+
+      expect(result.account_id).toBe(FALLBACK_ADDRESS);
+      expect(mock).toHaveBeenCalledTimes(2);
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('never caches a 404 as a successful/funded result', () => {
+    it('does not populate the cache on a 404 and refetches on the next call', async () => {
+      const cache = new SimpleCache();
+      const account = makeAccount(TEST_ADDRESS);
+      const notFoundBody = { type: 'not_found', title: 'Not Found', status: 404, detail: 'Account not found' };
+      let callCount = 0;
+      const mock = makeMockFetch(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return makeMockResponse(404, notFoundBody);
+        }
+        return makeMockResponse(200, account);
+      });
+
+      await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        maxRetries: 0,
+        cacheTtlMs: 60_000,
+        cache,
+        fetchFn: mock,
+      })).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(cache.getStats().size).toBe(0);
+
+      const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        maxRetries: 0,
+        cacheTtlMs: 60_000,
+        cache,
+        fetchFn: mock,
+      });
+
+      expect(result.account_id).toBe(TEST_ADDRESS);
+      expect(callCount).toBe(2);
+      jest.restoreAllMocks();
+    });
+  });
+
   describe('safeAccountSummary: never emits sensitive account fields into debug context', () => {
     it('strips balance, sequence, sponsor counts and raw id from success context', async () => {
       const { calls, restore } = captureDebugCalls();

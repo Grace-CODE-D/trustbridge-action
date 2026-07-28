@@ -125,7 +125,6 @@ export interface ActionInputsLogRecord {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: string;
-    minTrustlineLimit: string;
     stellarAddress: string;
     failOnMissing: boolean;
     debugMode: boolean;
@@ -137,6 +136,7 @@ export interface ActionInputsLogRecord {
     horizonCacheTtlMs: number;
     useCache: boolean;
     logInputs: boolean;
+    allowCrossNetworkFallback?: boolean;
 }
 /**
  * Build a redacted copy of the resolved action inputs suitable for writing

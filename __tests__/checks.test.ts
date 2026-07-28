@@ -12,7 +12,7 @@ import {
   formatAssetDeficit,
   estimateTrustlineSetupCost,
   buildReserveRequirement,
-  buildAssetBalanceRequirement,
+  computeProtocolMinReserve,
   buildValidationGate,
   horizonFailureResult,
   STELLAR_BASE_RESERVE_XLM,
@@ -435,6 +435,67 @@ describe('runAccountChecks', () => {
     expect(result.checks.length).toBe(3);
     expect(result.assetBalanceMet).toBe(true);
   });
+
+  it('sponsor-aware: extra subentries raise the requirement above the flat floor and can fail a balance the flat check would have passed', () => {
+    // protocol minimum = (2 base + 5 subentries) * 0.5 = 3.5 XLM, which exceeds
+    // the configured 1.5 XLM floor. A 2.0 XLM balance would pass the old flat
+    // 1.5 XLM check but correctly fails the sponsor-aware protocol minimum.
+    const account = makeAccount({
+      subentry_count: 5,
+      num_sponsoring: 0,
+      num_sponsored: 0,
+      balances: [
+        {
+          balance: '2.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '100.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+    const result = runAccountChecks(account, defaultConfig);
+
+    expect(result.reserveRequirement?.protocolMinimum).toBe(3.5);
+    expect(result.reserveRequirement?.required).toBe(3.5);
+    expect(result.xlmReserveMet).toBe(false);
+  });
+
+  it('sponsor-aware: fully sponsored trustlines lower the protocol minimum below the flat floor', () => {
+    // protocol minimum = (2 base + 3 subentries + 0 sponsoring - 3 sponsored) * 0.5 = 1.0 XLM,
+    // which is below the configured 1.5 XLM floor — the floor still applies.
+    const account = makeAccount({ subentry_count: 3, num_sponsoring: 0, num_sponsored: 3 });
+    const result = runAccountChecks(account, defaultConfig);
+
+    expect(result.reserveRequirement?.protocolMinimum).toBe(1);
+    expect(result.reserveRequirement?.required).toBe(1.5); // floor override
+  });
+
+  it('sponsor-aware: check detail explains the computed requirement vs the floor', () => {
+    const account = makeAccount({ subentry_count: 2, num_sponsoring: 1, num_sponsored: 0 });
+    const result = runAccountChecks(account, defaultConfig);
+
+    const reserveDetail = result.checks[2].detail;
+    expect(reserveDetail).toMatch(/protocol minimum/i);
+    expect(reserveDetail).toContain('1 sponsoring');
+    expect(reserveDetail).toMatch(/floor \*\*1\.5 XLM\*\*/);
+  });
+
+  it('sponsor-aware: omitted sponsor fields on an account default to 0', () => {
+    const account = makeAccount({ subentry_count: 1 });
+    delete (account as { num_sponsoring?: number }).num_sponsoring;
+    delete (account as { num_sponsored?: number }).num_sponsored;
+
+    const result = runAccountChecks(account, defaultConfig);
+    expect(result.reserveRequirement?.protocolMinimum).toBe(1.5);
+  });
 });
 
 describe('getFailedCheckLabels', () => {
@@ -488,13 +549,81 @@ describe('Stellar reserve constants', () => {
   });
 });
 
+describe('computeProtocolMinReserve', () => {
+  it('computes 2 base reserves plus one per subentry (unsponsored account)', () => {
+    expect(computeProtocolMinReserve({ subentry_count: 1 })).toBe(1.5);
+    expect(computeProtocolMinReserve({ subentry_count: 3 })).toBe(2.5);
+  });
+
+  it('defaults missing sponsor fields to 0 (older Horizon snapshots)', () => {
+    expect(computeProtocolMinReserve({ subentry_count: 2 })).toBe(2);
+  });
+
+  it('adds reserve for subentries this account sponsors for others', () => {
+    expect(
+      computeProtocolMinReserve({ subentry_count: 1, num_sponsoring: 2, num_sponsored: 0 }),
+    ).toBe(2.5);
+  });
+
+  it('subtracts reserve for subentries sponsored on this account by someone else', () => {
+    expect(
+      computeProtocolMinReserve({ subentry_count: 3, num_sponsoring: 0, num_sponsored: 3 }),
+    ).toBe(1);
+  });
+
+  it('never goes negative even if sponsorship counts outweigh base + subentries', () => {
+    expect(
+      computeProtocolMinReserve({ subentry_count: 0, num_sponsoring: 0, num_sponsored: 10 }),
+    ).toBe(0);
+  });
+});
+
 describe('buildReserveRequirement', () => {
-  it('calculates reserve met status correctly', () => {
-    expect(buildReserveRequirement(15000000n, 10000000n)).toEqual({
-      required: 15000000n,
-      actual: 10000000n,
+  it('summarizes reserve state using the protocol minimum when no floor override applies', () => {
+    expect(buildReserveRequirement(1.5, 1, { subentry_count: 1 })).toEqual({
+      required: 1.5,
+      actual: 1,
       missing: '0.5000000',
       met: false,
+      protocolMinimum: 1.5,
+      configuredFloor: 1.5,
+      subentryCount: 1,
+      numSponsoring: 0,
+      numSponsored: 0,
+    });
+  });
+
+  it('uses the configured floor when it exceeds the protocol minimum', () => {
+    const result = buildReserveRequirement(5, 3, { subentry_count: 1 });
+    expect(result.protocolMinimum).toBe(1.5);
+    expect(result.configuredFloor).toBe(5);
+    expect(result.required).toBe(5);
+    expect(result.met).toBe(false);
+  });
+
+  it('uses the protocol minimum when it exceeds the configured floor (sponsored trustlines)', () => {
+    const result = buildReserveRequirement(1.5, 3, {
+      subentry_count: 4,
+      num_sponsoring: 0,
+      num_sponsored: 0,
+    });
+    // 2 base + 4 subentries = 6 reserve units * 0.5 XLM
+    expect(result.protocolMinimum).toBe(3);
+    expect(result.required).toBe(3);
+    expect(result.met).toBe(true);
+  });
+
+  it('defaults to no account context (protocol minimum 0) when omitted', () => {
+    expect(buildReserveRequirement(1.5, 1)).toEqual({
+      required: 1.5,
+      actual: 1,
+      missing: '0.5000000',
+      met: false,
+      protocolMinimum: 0,
+      configuredFloor: 1.5,
+      subentryCount: 0,
+      numSponsoring: 0,
+      numSponsored: 0,
     });
   });
 });

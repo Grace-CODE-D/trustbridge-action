@@ -34888,6 +34888,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -34908,6 +34971,7 @@ exports.runAccountChecks = runAccountChecks;
 exports.unfundedAccountResult = unfundedAccountResult;
 exports.getFailedCheckLabels = getFailedCheckLabels;
 exports.horizonFailureResult = horizonFailureResult;
+exports.computeProtocolMinReserve = computeProtocolMinReserve;
 exports.buildReserveRequirement = buildReserveRequirement;
 exports.runMultiAssetChecks = runMultiAssetChecks;
 exports.buildValidationGate = buildValidationGate;
@@ -34926,13 +34990,75 @@ exports.STELLAR_BASE_RESERVE_XLM = 0.5;
 /** Minimum balance required to activate a new account (XLM). */
 exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM = 1;
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
-/** Pattern to find any Stellar G-address embedded in free-form text. */
-const STELLAR_ADDRESS_IN_TEXT_REGEX = /\bG[A-Z2-7]{55}\b/g;
+/** RFC4648 base32 alphabet used by Stellar's StrKey encoding (no padding). */
+const STRKEY_BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+/** StrKey version byte for an ed25519 public key ("G..." address): 6 << 3. */
+const STRKEY_VERSION_BYTE_ED25519_PUBLIC_KEY = 0x30;
+/**
+ * Decodes an RFC4648 base32 string (no padding) into raw bytes, as used by
+ * Stellar's StrKey encoding. Returns `null` if the input contains
+ * characters outside the StrKey alphabet.
+ */
+function base32Decode(input) {
+    let bits = 0;
+    let value = 0;
+    const bytes = [];
+    for (const char of input) {
+        const index = STRKEY_BASE32_ALPHABET.indexOf(char);
+        if (index === -1) {
+            return null;
+        }
+        value = (value << 5) | index;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            bytes.push((value >> bits) & 0xff);
+        }
+    }
+    return Uint8Array.from(bytes);
+}
+/**
+ * CRC-16/XMODEM (poly 0x1021, init 0x0000, no reflect, no xorout) — the
+ * checksum algorithm StrKey appends (little-endian) after the version byte
+ * and payload.
+ */
+function crc16xmodem(bytes) {
+    let crc = 0x0000;
+    for (const byte of bytes) {
+        crc ^= byte << 8;
+        for (let i = 0; i < 8; i++) {
+            crc = (crc & 0x8000) !== 0 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+        }
+    }
+    return crc;
+}
 function normalizeStellarAddress(address) {
     return address.trim();
 }
+/**
+ * Validates a Stellar "G..." address against the full StrKey policy: 56
+ * characters from the StrKey base32 alphabet, the ed25519 public key
+ * version byte, and a matching CRC-16/XMODEM checksum. A regex match alone
+ * only confirms shape — many regex-valid strings are not real StrKeys
+ * because their checksum bytes don't match the payload.
+ */
 function isValidStellarAddress(address) {
-    return STELLAR_ADDRESS_REGEX.test(normalizeStellarAddress(address));
+    const trimmed = normalizeStellarAddress(address);
+    if (!STELLAR_ADDRESS_REGEX.test(trimmed)) {
+        return false;
+    }
+    const decoded = base32Decode(trimmed);
+    // 1 version byte + 32-byte ed25519 payload + 2-byte checksum.
+    if (!decoded || decoded.length !== 35) {
+        return false;
+    }
+    if (decoded[0] !== STRKEY_VERSION_BYTE_ED25519_PUBLIC_KEY) {
+        return false;
+    }
+    const versionAndPayload = decoded.subarray(0, 33);
+    const expectedChecksum = crc16xmodem(versionAndPayload);
+    const actualChecksum = decoded[33] | (decoded[34] << 8);
+    return expectedChecksum === actualChecksum;
 }
 /**
  * Extract Stellar G-addresses from free-form text such as an issue body.
@@ -34972,7 +35098,8 @@ function validateStellarAddress(address) {
         throw new Error('stellar_address_input is required.');
     }
     if (!isValidStellarAddress(address)) {
-        throw new Error(`Invalid Stellar address "${address}". Expected a 56-character public key starting with "G".`);
+        throw new Error(`Invalid Stellar address "${address}". Expected a 56-character ed25519 public key ` +
+            'starting with "G" with a valid StrKey checksum.');
     }
 }
 function parseMinXlmReserve(value) {
@@ -35013,19 +35140,28 @@ function formatAssetDeficit(required, actual) {
     const deficit = required > actual ? required - actual : 0n;
     return (0, horizon_1.formatStroops)(deficit);
 }
+/**
+ * Renders the sponsor-aware reserve math behind a `ReserveRequirement` as a
+ * short human-readable clause, e.g.
+ * "protocol minimum **1.5 XLM** = (2 + 1 subentry) × 0.5 XLM, floor **1.5 XLM**".
+ */
+function explainReserveRequirement(reserve) {
+    const sponsorClause = reserve.numSponsoring !== 0 || reserve.numSponsored !== 0
+        ? ` + ${reserve.numSponsoring} sponsoring − ${reserve.numSponsored} sponsored`
+        : '';
+    const subentryWord = reserve.subentryCount === 1 ? 'subentry' : 'subentries';
+    const formula = `(2 + ${reserve.subentryCount} ${subentryWord}${sponsorClause}) × ${exports.STELLAR_BASE_RESERVE_XLM} XLM`;
+    return `protocol minimum **${reserve.protocolMinimum} XLM** = ${formula}, floor **${reserve.configuredFloor} XLM**`;
+}
 function runAccountChecks(account, config) {
     const xlmBalance = (0, horizon_1.getNativeBalance)(account);
     const xlmNumeric = (0, horizon_1.parseHorizonBalance)(xlmBalance);
     const trustlineExists = (0, horizon_1.hasTrustline)(account, config.assetCode, config.assetIssuer);
-    const minXlmReserveStroops = (0, horizon_1.parseStroops)(config.minXlmReserve);
-    const reserveRequirement = buildReserveRequirement(minXlmReserveStroops, xlmNumeric);
+    const reserveRequirement = buildReserveRequirement(config.minXlmReserve, xlmNumeric, account);
     const xlmReserveMet = reserveRequirement.met;
     const hasAnyTrustlines = account.balances.some((b) => (0, horizon_1.isCreditBalance)(b));
     const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(config.assetCode);
-    // Get trustline limit for the asset (Issue #140)
-    const trustlineLimit = (0, horizon_1.getTrustlineLimit)(account, config.assetCode, config.assetIssuer);
-    const trustlineLimitNumeric = (0, horizon_1.parseHorizonBalance)(trustlineLimit);
-    const trustlineLimitMet = !config.minTrustlineLimit || trustlineLimitNumeric >= config.minTrustlineLimit;
+    const reserveExplanation = explainReserveRequirement(reserveRequirement);
     const checks = [
         {
             passed: true,
@@ -35045,8 +35181,8 @@ function runAccountChecks(account, config) {
             passed: xlmReserveMet,
             label: 'XLM reserve',
             detail: xlmReserveMet
-                ? `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** meets the minimum of **${config.minXlmReserve} XLM**.`
-                : `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** is below the required **${config.minXlmReserve} XLM**.`,
+                ? `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** meets the required **${reserveRequirement.required} XLM** — ${reserveExplanation}.`
+                : `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** is below the required **${reserveRequirement.required} XLM** — ${reserveExplanation}.`,
         },
     ];
     // Add trustline limit check if configured (Issue #140)
@@ -35091,7 +35227,7 @@ function runAccountChecks(account, config) {
         trustlineLimit,
         checks,
         remediation,
-        sponsorshipInfo,
+        reserveRequirement,
     };
 }
 function unfundedAccountResult(stellarAddress, config) {
@@ -35188,12 +35324,38 @@ function horizonFailureResult(message, config) {
         sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
     };
 }
-function buildReserveRequirement(required, actual) {
+/**
+ * Computes the real Stellar protocol minimum balance for an account:
+ * `(2 base reserves + subentries + num_sponsoring − num_sponsored) * base_reserve`.
+ * Sponsored subentries don't count against the sponsoree's own reserve, and
+ * subentries the account sponsors *for others* do — see CAP-0033. Clamped
+ * to zero so a stale/inconsistent sponsorship snapshot can never go negative.
+ */
+function computeProtocolMinReserve(account) {
+    const numSponsoring = account.num_sponsoring ?? 0;
+    const numSponsored = account.num_sponsored ?? 0;
+    const reserveEntries = 2 + account.subentry_count + numSponsoring - numSponsored;
+    return Math.max(0, reserveEntries) * exports.STELLAR_BASE_RESERVE_XLM;
+}
+/**
+ * Builds the effective reserve requirement for an account: the Stellar
+ * protocol minimum (sponsor-aware) with `configuredFloor` (`min_xlm_reserve`)
+ * applied as a floor override, so maintainers can still require more than
+ * the bare protocol minimum.
+ */
+function buildReserveRequirement(configuredFloor, actual, account) {
+    const protocolMinimum = account ? computeProtocolMinReserve(account) : 0;
+    const required = Math.max(protocolMinimum, configuredFloor);
     return {
         required,
         actual,
         missing: formatXlmDeficit(required, actual),
         met: actual >= required,
+        protocolMinimum,
+        configuredFloor,
+        subentryCount: account?.subentry_count ?? 0,
+        numSponsoring: account?.num_sponsoring ?? 0,
+        numSponsored: account?.num_sponsored ?? 0,
     };
 }
 function buildAssetBalanceRequirement(required, actual) {
@@ -35434,7 +35596,6 @@ const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const links_1 = __nccwpck_require__(3346);
 const markdown_1 = __nccwpck_require__(3758);
-const snooze_1 = __nccwpck_require__(3286);
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -35469,7 +35630,6 @@ function formatCommentBody(result, config) {
     const lines = [
         exports.STICKY_COMMENT_MARKER,
         `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
-        snoozeMarker,
         '## TrustBridge — Stellar Account Check',
         '',
         `${strings.checkedAccount} ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
@@ -35484,7 +35644,9 @@ function formatCommentBody(result, config) {
     }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
-        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, result.reserveRequirement
+        ? `- **Minimum required:** \`${result.reserveRequirement.required} XLM\` (protocol minimum \`${result.reserveRequirement.protocolMinimum} XLM\` from ${result.reserveRequirement.subentryCount} subentries/sponsorship, configured floor \`${result.reserveRequirement.configuredFloor} XLM\`)`
+        : `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     // SEP-0007 wallet deep links (Issue #44)
     if (config.sep0007DeepLinks) {
         const payLink = (0, links_1.buildSep0007PayLink)({
@@ -35495,12 +35657,6 @@ function formatCommentBody(result, config) {
             originDomain: config.sep0007OriginDomain || undefined,
         });
         lines.push('', '### Quick wallet actions (SEP-0007)', '', '_Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup._', '', `- [Send ${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM to activate account](${payLink})`);
-    }
-    // Sponsorship info explainer (Issue #141)
-    if (result.sponsorshipInfo && (result.sponsorshipInfo.numSponsoring > 0 || result.sponsorshipInfo.numSponsored > 0)) {
-        lines.push('', '### Sponsorship status', '', result.sponsorshipInfo.numSponsored > 0
-            ? `**This account is sponsored.** Another account is covering some or all of its reserve requirements.`
-            : '**This account sponsors other accounts** and may have reduced available balance.', '', `- Accounts this account sponsors: **${result.sponsorshipInfo.numSponsoring}**`, `- Accounts sponsoring this account: **${result.sponsorshipInfo.numSponsored}**`, '', '**Reserve implications:** Sponsored accounts may have different reserve requirements than their balance suggests. The sponsoring account bears the reserve cost. [Learn more about sponsorship.](https://developers.stellar.org/learn/fundamentals/stellar-data-structures/ledger-entries#sponsorships)');
     }
     if (result.remediation) {
         lines.push('', '### Remediation', '', result.remediation);
@@ -36253,6 +36409,7 @@ exports.getTrustlineLimit = getTrustlineLimit;
 exports.parseHorizonBalance = parseHorizonBalance;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
+const links_1 = __nccwpck_require__(3346);
 class HorizonError extends Error {
     constructor(message, statusCode, retryable = false) {
         super(message);
@@ -36639,12 +36796,36 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     if (!normalizedFallbackUrl) {
         throw primaryError;
     }
+    // Network binding rule: a G-address is valid on every Stellar network, so
+    // a fallback URL that resolves to a different network than the primary
+    // could silently return funded/trustline/reserve data for the *wrong*
+    // ledger instead of failing loudly. Compare the inferred networks and
+    // refuse the fallback unless the caller explicitly opted in.
+    const primaryNetwork = (0, links_1.inferStellarNetwork)(normalizedHorizonUrl);
+    const fallbackNetwork = (0, links_1.inferStellarNetwork)(normalizedFallbackUrl);
+    const crossNetworkFallback = primaryNetwork !== fallbackNetwork;
+    if (crossNetworkFallback && !options.allowCrossNetworkFallback) {
+        logger_1.logger.debug('Horizon RPC fallback skipped: primary and fallback resolve to different networks', safeHorizonContext({
+            component: 'horizon',
+            stellarAddress,
+            horizonUrl,
+            horizonUrlFallback: normalizedFallbackUrl,
+            primaryNetwork,
+            fallbackNetwork,
+            primaryStatusCode: primaryError?.statusCode,
+            primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
+        }));
+        throw primaryError;
+    }
     logger_1.logger.debug('Horizon RPC fallback: primary exhausted, switching to fallback URL', safeHorizonContext({
         component: 'horizon',
         stellarAddress,
         horizonUrl,
         horizonUrlFallback: normalizedFallbackUrl,
         cacheKey: cachingEnabled ? cacheKey : undefined,
+        primaryNetwork,
+        fallbackNetwork,
+        crossNetworkFallback,
         primaryStatusCode: primaryError?.statusCode,
         primaryRetryable: primaryError?.retryable,
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
@@ -37156,19 +37337,13 @@ async function run() {
         max: 3600000,
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
+    const allowCrossNetworkFallback = (0, inputs_1.parseBooleanInput)(core.getInput('allow_cross_network_fallback'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Failure snooze window (Issue #155)
-    const snoozeWindowMinutes = (0, inputs_1.parseNumberInput)(core.getInput('snooze_window_minutes'), 30, {
-        min: 0,
-        max: 10080, // 7 days
-    });
-    const forceComment = (0, inputs_1.parseBooleanInput)(core.getInput('force_comment'), false);
-    const snoozeWindowMs = snoozeWindowMinutes * 60 * 1000;
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -37188,8 +37363,31 @@ async function run() {
         waitUntilFundedIntervalMs,
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
+        allowCrossNetworkFallback,
         sep0007DeepLinks,
     });
+    if (logInputs) {
+        (0, logger_1.emitInputsLogRecord)({
+            horizonUrl,
+            horizonUrlFallback,
+            rpcFallbackUrl: rpcFallbackUrlRaw,
+            assetCode,
+            assetIssuer,
+            minXlmReserve: minXlmReserveRaw,
+            stellarAddress,
+            failOnMissing,
+            debugMode,
+            horizonTimeoutMs,
+            stickyComment,
+            waitUntilFunded,
+            waitUntilFundedTimeoutMs,
+            waitUntilFundedIntervalMs,
+            horizonCacheTtlMs,
+            useCache,
+            allowCrossNetworkFallback,
+            logInputs,
+        });
+    }
     (0, checks_1.validateStellarAddress)(stellarAddress);
     const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
     const minTrustlineLimitRaw = core.getInput('min_trustline_limit') || '';
@@ -37231,7 +37429,6 @@ async function run() {
     const checkConfig = {
         ...normalizedAsset,
         minXlmReserve,
-        minTrustlineLimit,
         horizonUrl,
     };
     core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
@@ -37245,6 +37442,7 @@ async function run() {
         fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
+        allowCrossNetworkFallback,
     };
     try {
         const account = waitUntilFunded
@@ -38000,7 +38198,6 @@ function buildInputsLogRecord(inputs) {
         assetCode: inputs.assetCode,
         assetIssuer: redactStellarAddress(inputs.assetIssuer) || redactString(inputs.assetIssuer),
         minXlmReserve: inputs.minXlmReserve,
-        minTrustlineLimit: inputs.minTrustlineLimit,
         stellarAddress: redactStellarAddress(inputs.stellarAddress),
         failOnMissing: inputs.failOnMissing,
         debugMode: inputs.debugMode,
@@ -38012,6 +38209,7 @@ function buildInputsLogRecord(inputs) {
         horizonCacheTtlMs: inputs.horizonCacheTtlMs,
         useCache: inputs.useCache,
         logInputs: inputs.logInputs,
+        allowCrossNetworkFallback: inputs.allowCrossNetworkFallback ?? false,
     };
 }
 /**

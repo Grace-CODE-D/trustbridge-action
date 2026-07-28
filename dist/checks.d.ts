@@ -7,7 +7,6 @@ export interface CheckConfig {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: number;
-    minTrustlineLimit?: number;
     horizonUrl?: string;
 }
 export interface CheckResultItem {
@@ -30,10 +29,17 @@ export interface ValidationResult {
     trustlineLimit?: string;
     checks: CheckResultItem[];
     remediation?: string;
-    /** Sponsorship relationship counts from Horizon. */
-    sponsorshipInfo?: SponsorshipInfo;
+    /** Populated when the reserve was computed from a real account (not the unfunded/error paths). */
+    reserveRequirement?: ReserveRequirement;
 }
 export declare function normalizeStellarAddress(address: string): string;
+/**
+ * Validates a Stellar "G..." address against the full StrKey policy: 56
+ * characters from the StrKey base32 alphabet, the ed25519 public key
+ * version byte, and a matching CRC-16/XMODEM checksum. A regex match alone
+ * only confirms shape — many regex-valid strings are not real StrKeys
+ * because their checksum bytes don't match the payload.
+ */
 export declare function isValidStellarAddress(address: string): boolean;
 export interface AddressExtractionResult {
     /** The first valid Stellar G-address found, or undefined if none. */
@@ -65,30 +71,41 @@ export declare function runAccountChecks(account: HorizonAccount, config: CheckC
 export declare function unfundedAccountResult(stellarAddress: string, config: CheckConfig): ValidationResult;
 export declare function getFailedCheckLabels(result: ValidationResult): string[];
 export declare function horizonFailureResult(message: string, config: CheckConfig): ValidationResult;
+/** Subset of `HorizonAccount` needed to compute the protocol-accurate minimum balance. */
+export interface SponsorAwareAccountFields {
+    subentry_count: number;
+    num_sponsoring?: number;
+    num_sponsored?: number;
+}
 export interface ReserveRequirement {
-    required: bigint;
-    actual: bigint;
+    /** Final required balance: the greater of the protocol minimum and the configured floor. */
+    required: number;
+    actual: number;
     missing: string;
     met: boolean;
-}
-export declare function buildReserveRequirement(required: number, actual: number): ReserveRequirement;
-/** Per-asset trustline check result for multi-asset validation. */
-export interface AssetTrustlineResult {
-    assetCode: string;
-    assetIssuer: string;
-    trustlineExists: boolean;
+    /** Stellar protocol minimum computed from subentries and net sponsorship (CAP-0033). */
+    protocolMinimum: number;
+    /** The `min_xlm_reserve` input value, applied as a floor over the protocol minimum. */
+    configuredFloor: number;
+    subentryCount: number;
+    numSponsoring: number;
+    numSponsored: number;
 }
 /**
- * Run trustline checks for multiple assets against an already-fetched account.
- * Returns per-asset results and an aggregate `allTrustlinesExist` flag.
+ * Computes the real Stellar protocol minimum balance for an account:
+ * `(2 base reserves + subentries + num_sponsoring − num_sponsored) * base_reserve`.
+ * Sponsored subentries don't count against the sponsoree's own reserve, and
+ * subentries the account sponsors *for others* do — see CAP-0033. Clamped
+ * to zero so a stale/inconsistent sponsorship snapshot can never go negative.
  */
-export declare function runMultiAssetChecks(account: HorizonAccount, assets: Array<{
-    assetCode: string;
-    assetIssuer: string;
-}>): {
-    results: AssetTrustlineResult[];
-    allTrustlinesExist: boolean;
-};
+export declare function computeProtocolMinReserve(account: SponsorAwareAccountFields): number;
+/**
+ * Builds the effective reserve requirement for an account: the Stellar
+ * protocol minimum (sponsor-aware) with `configuredFloor` (`min_xlm_reserve`)
+ * applied as a floor override, so maintainers can still require more than
+ * the bare protocol minimum.
+ */
+export declare function buildReserveRequirement(configuredFloor: number, actual: number, account?: SponsorAwareAccountFields): ReserveRequirement;
 export interface ValidationGate {
     ready: boolean;
     totalChecks: number;

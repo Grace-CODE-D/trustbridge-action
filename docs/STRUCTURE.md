@@ -107,7 +107,7 @@ coverage/                          # Jest coverage reports
 | Export | Description |
 |--------|-------------|
 | `validateStellarAddress` | Throws on invalid G-address |
-| `isValidStellarAddress` | Regex test helper |
+| `isValidStellarAddress` | Full StrKey validation (shape + version byte + CRC-16/XMODEM checksum) |
 | `parseMinXlmReserve` | Parse and validate reserve input |
 | `runAccountChecks` | Full validation for funded accounts |
 | `unfundedAccountResult` | Result template for 404 |

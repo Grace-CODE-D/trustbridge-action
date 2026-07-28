@@ -139,8 +139,10 @@ export function formatCommentBody(
     '',
     `### ${strings.balancesHeading}`,
     '',
-    `- **${strings.xlmBalance}** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`,
-    `- **${strings.minimumRequired}** \`${config.minXlmReserve} XLM\``,
+    `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`,
+    result.reserveRequirement
+      ? `- **Minimum required:** \`${result.reserveRequirement.required} XLM\` (protocol minimum \`${result.reserveRequirement.protocolMinimum} XLM\` from ${result.reserveRequirement.subentryCount} subentries/sponsorship, configured floor \`${result.reserveRequirement.configuredFloor} XLM\`)`
+      : `- **Minimum required:** \`${config.minXlmReserve} XLM\``,
     '',
     `### ${strings.setupCostHeading}`,
     '',

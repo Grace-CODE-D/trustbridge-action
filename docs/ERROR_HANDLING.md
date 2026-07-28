@@ -35,13 +35,14 @@ Related docs: [README](../README.md) · [Architecture](ARCHITECTURE.md) · [Usag
 
 ### Invalid Stellar address
 
-**Rule:** Must match `/^G[A-Z2-7]{55}$/`.
+**Rule:** Must match `/^G[A-Z2-7]{55}$/` **and** pass full StrKey validation — the ed25519 public-key version byte and a matching CRC-16/XMODEM checksum over the decoded payload. A string that matches the regex but has a corrupted checksum (e.g. a single mistyped character) still fails.
 
 Examples that fail:
 
 - Empty string
 - Ethereum-style `0x...` addresses
 - Wrong length or invalid base32 characters (`0`, `1`, `8`, `9`, `l`)
+- Correct shape and length but an invalid StrKey checksum (e.g. a typo'd character)
 
 **Behavior:** Throws before any Horizon call. The action run fails immediately; no outputs or comments.
 

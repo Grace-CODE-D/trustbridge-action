@@ -71,6 +71,10 @@ async function run(): Promise<void> {
     max: 3_600_000,
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
+  const allowCrossNetworkFallback = parseBooleanInput(
+    core.getInput('allow_cross_network_fallback'),
+    false,
+  );
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
@@ -150,7 +154,7 @@ async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     rpcFallbackUrl: effectiveRpcFallbackUrl,
     useCache,
-    trustbridgeConfigPath,
+    allowCrossNetworkFallback,
     sep0007DeepLinks,
     onboardingChecklist,
     trustbridgeConfigPath,
@@ -180,8 +184,7 @@ async function run(): Promise<void> {
       waitUntilFundedIntervalMs,
       horizonCacheTtlMs,
       useCache,
-      horizonMaxRequests,
-      retryMaxDelayMs,
+      allowCrossNetworkFallback,
       logInputs,
     });
   }
@@ -230,8 +233,7 @@ async function run(): Promise<void> {
     fallbackUrls,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
-    retryMaxDelayMs,
-    retryMaxTotalWaitMs,
+    allowCrossNetworkFallback,
   };
 
   try {

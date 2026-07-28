@@ -113,7 +113,7 @@ Parsed from `GET /accounts/{account_id}`. The action primarily uses:
 
 - `account_id` — canonical address
 - `balances[]` — native XLM and credit assets
-- `subentry_count` — available for future reserve calculations
+- `subentry_count`, `num_sponsoring`, `num_sponsored` — used to compute the sponsor-aware protocol minimum reserve (see [Check rules § 3](#3-xlm-reserve)). `num_sponsoring`/`num_sponsored` are optional — older Horizon snapshots omit them and they are treated as `0`.
 
 ### ValidationResult
 
@@ -128,6 +128,7 @@ interface ValidationResult {
   xlmReserveMet: boolean;
   checks: CheckResultItem[];
   remediation?: string;
+  reserveRequirement?: ReserveRequirement; // sponsor-aware reserve math (see § 3)
 }
 ```
 
@@ -149,10 +150,10 @@ Each `CheckResultItem` maps to one ✅/❌ line in the issue comment.
 
 ### 3. XLM reserve
 
-- **Pass:** Native balance ≥ `min_xlm_reserve` (default `1.5`).
-- **Fail:** Balance below threshold; remediation includes delta to send.
+- **Pass:** Native balance ≥ `required`, where `required = max(protocolMinimum, min_xlm_reserve)`.
+- **Fail:** Balance below `required`; remediation includes delta to send.
 
-Default `1.5` reflects Stellar protocol economics: **1 XLM** minimum account balance + **0.5 XLM** base reserve per trustline subentry.
+`protocolMinimum` is computed from the account itself — `(2 + subentry_count + num_sponsoring − num_sponsored) × 0.5 XLM` (CAP-0033) — so `min_xlm_reserve` acts as a floor override rather than the sole threshold. This makes the check accurate for accounts with sponsored trustlines (which don't count against the sponsoree's own reserve) as well as accounts with several unsponsored subentries. Default `1.5` for `min_xlm_reserve` reflects Stellar protocol economics: **1 XLM** minimum account balance + **0.5 XLM** base reserve per trustline subentry — the unsponsored one-subentry case.
 
 ---
 
@@ -165,8 +166,10 @@ Default `1.5` reflects Stellar protocol economics: **1 XLM** minimum account bal
 | Timeout | `AbortController` per request (15s default) |
 | Retries | Up to 3 on 429, 502, 503, 504, timeout |
 | Backoff | Exponential (1s, 2s, 4s) or `Retry-After` header |
-| 404 | Non-retryable `HorizonError` → unfunded path |
+| 404 | Non-retryable `HorizonError` → unfunded path; never cached |
 | URL normalization | Strips trailing slashes from `horizon_url` |
+| Cache | Optional in-memory TTL cache (`use_cache` + `horizon_cache_ttl_ms`, default disabled), keyed on `(horizon_url, stellar_address)`. 404s are never cached as funded. |
+| RPC fallback | On retry exhaustion, fails over to `horizon_url_fallback`/`rpc_fallback_url`. Refused by default when the fallback resolves to a different Stellar network than the primary — see `allow_cross_network_fallback`. |
 
 Errors are classified as **retryable** vs **terminal** to avoid masking real problems with infinite loops.
 
@@ -231,7 +234,6 @@ Future enhancements that fit the current architecture:
 1. **Soroban / smart contract checks** — new module parallel to `horizon.ts`. `validation.ts` already validates the StrKey shape of a contract (`C...`) `asset_issuer`; querying contract state over Soroban RPC is still open.
 2. **Multi-asset trustlines** — `checks.ts` now exports `checkMultiAssetTrustlines` for validating an arbitrary list of assets in one call (Wave #32).
 3. **PR comments** — extend `comment.ts` to detect `context.payload.pull_request`
-4. **Sponsor-aware reserve math** — `checks.ts` now exports `checkAccountSponsored` and `calculateRecommendedReserve` which factor in the Stellar subentry model (Wave #32).
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for proposing changes.
 

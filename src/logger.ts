@@ -332,6 +332,7 @@ export interface ActionInputsLogRecord {
   horizonMaxRequests: number;
   retryMaxDelayMs: number;
   logInputs: boolean;
+  allowCrossNetworkFallback?: boolean;
 }
 
 /**
@@ -365,6 +366,7 @@ export function buildInputsLogRecord(inputs: ActionInputsLogRecord): ActionInput
     horizonMaxRequests: inputs.horizonMaxRequests,
     retryMaxDelayMs: inputs.retryMaxDelayMs,
     logInputs: inputs.logInputs,
+    allowCrossNetworkFallback: inputs.allowCrossNetworkFallback ?? false,
   };
 }
 
