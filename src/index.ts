@@ -15,8 +15,7 @@ import {
   ValidationResult,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
-import { RateBudgetTracker } from './resilience';
-import { formatCommentBody, postIssueComment } from './comment';
+import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
 import { normalizeAssetConfig } from './assets';
 import {
   getErrorMessage,
@@ -108,6 +107,9 @@ async function run(): Promise<void> {
   // Internationalization (Issue #59)
   const localeInput = core.getInput('locale') || 'en';
   const locale = parseLocaleInput(localeInput);
+
+  // Full-report artifact path (used when comment exceeds size limit)
+  const reportOutputPath = core.getInput('report_output_path') || 'trustbridge-report.md';
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -312,20 +314,27 @@ async function run(): Promise<void> {
     locale,
   });
 
+  // Detect oversize and write the full report to a workspace file when needed.
+  const commentBodyBytes = Buffer.byteLength(commentBody, 'utf8');
+  let fullReportPath: string | undefined;
+  let effectiveCommentBody: string;
+
+  if (commentBodyBytes > COMMENT_SIZE_LIMIT_BYTES) {
+    core.warning(
+      `Comment body is ${commentBodyBytes} bytes, which exceeds GitHub's ${COMMENT_SIZE_LIMIT_BYTES}-byte limit. ` +
+        `Writing full report to ${reportOutputPath} and posting a truncated comment instead.`,
+    );
+    fullReportPath = writeFullReport(commentBody, reportOutputPath);
+    effectiveCommentBody = buildTruncatedCommentBody(commentBody, reportOutputPath);
+  } else {
+    effectiveCommentBody = commentBody;
+  }
+
   let commentUrl: string | undefined;
-
-  // Wave #30: skip comment posting in dry-run and off modes
-  const shouldPostComment = commentMode === 'post';
-
-  if (shouldPostComment) {
-    try {
-      commentUrl = await postIssueComment(githubToken, commentBody, { sticky: stickyComment });
-      if (commentUrl) {
-        logger.info('Issue comment created', { component: 'index', commentUrl });
-      }
-    } catch (commentError) {
-      const message = getErrorMessage(commentError);
-      core.warning(`Failed to post issue comment: ${message}`);
+  try {
+    commentUrl = await postIssueComment(githubToken, effectiveCommentBody, { sticky: stickyComment });
+    if (commentUrl) {
+      logger.info('Issue comment created', { component: 'index', commentUrl });
     }
   } else {
     logger.info(`Comment posting skipped (comment_mode=${commentMode})`, {
@@ -334,52 +343,7 @@ async function run(): Promise<void> {
     });
   }
 
-  setValidationOutputs(result, commentUrl, multiAssetResults);
-
-  // Wave #38: POST validation summary to dashboard webhook (if configured)
-  if (dashboardWebhookUrl) {
-    try {
-      await postDashboardWebhook(dashboardWebhookUrl, {
-        result,
-        config: checkConfig,
-        stellarAddress,
-        commentMode,
-        commentUrl,
-      });
-      logger.info('Dashboard webhook delivered', {
-        component: 'index',
-        webhookUrl: redactHorizonUrl(dashboardWebhookUrl),
-      });
-    } catch (webhookError) {
-      const message = getErrorMessage(webhookError);
-      core.warning(`Failed to POST dashboard webhook: ${message}`);
-    }
-  }
-
-  if (shouldWriteValidationJson) {
-    try {
-      writeValidationJson(result, { ...checkConfig, stellarAddress }, validationJsonPath);
-    } catch (error) {
-      core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
-    }
-  }
-
-  if (writeValidationJsonEnabled) {
-    try {
-      writeValidationJson({
-        result,
-        stellarAddress,
-        assetCode: normalizedAsset.assetCode,
-        assetIssuer: normalizedAsset.assetIssuer,
-        horizonUrl,
-        outputPath: validationJsonPath,
-        delta,
-        privacyMode,
-      });
-    } catch (error) {
-      core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
-    }
-  }
+  setValidationOutputs(result, commentUrl, fullReportPath);
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });

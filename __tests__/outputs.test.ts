@@ -24,8 +24,7 @@ describe('toActionOutputs', () => {
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: '',
-      assets_trustline_status: '',
-      trustlines_summary: '',
+      full_report_path: '',
     });
     expect(outputs).toHaveProperty('readiness_badge_markdown');
     expect(outputs).toHaveProperty('readiness_badge_url');
@@ -40,8 +39,7 @@ describe('toActionOutputs', () => {
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: 'https://github.com/comment',
-      assets_trustline_status: '',
-      trustlines_summary: '',
+      full_report_path: '',
     });
     expect(outputs).toHaveProperty('readiness_badge_markdown');
     expect(outputs).toHaveProperty('readiness_badge_url');
@@ -93,5 +91,22 @@ describe('toActionOutputs', () => {
     const outputs = toActionOutputs(sponsoredResult);
     expect(outputs.num_sponsoring).toBe('2');
     expect(outputs.num_sponsored).toBe('1');
+  });
+
+  it('includes full_report_path when provided', () => {
+    expect(
+      toActionOutputs(result, 'https://github.com/comment', '/workspace/trustbridge-report.md'),
+    ).toEqual({
+      trustline_exists: 'true',
+      xlm_balance: '5.0000000',
+      account_funded: 'true',
+      comment_url: 'https://github.com/comment',
+      full_report_path: '/workspace/trustbridge-report.md',
+    });
+  });
+
+  it('leaves full_report_path empty when not provided', () => {
+    const outputs = toActionOutputs(result, undefined, undefined);
+    expect(outputs.full_report_path).toBe('');
   });
 });

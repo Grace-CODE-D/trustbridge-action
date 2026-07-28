@@ -1,4 +1,7 @@
 import * as core from '@actions/core';
+import * as core from '@actions/core';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as github from '@actions/github';
 import {
   AssetTrustlineResult,
@@ -327,6 +330,94 @@ export function buildHardenedMetricsJson(metrics: MetricsCollector): string {
   }
 
   return json;
+}
+
+/**
+ * GitHub's documented maximum body size for issue comments is 65,536
+ * characters. We keep a small safety margin so the truncation notice and
+ * surrounding HTML markers always fit within the limit.
+ */
+export const COMMENT_SIZE_LIMIT_BYTES = 65536;
+
+/**
+ * Number of bytes reserved for the truncation notice appended to the
+ * shortened comment. Sized to comfortably hold the notice text plus the
+ * footer.
+ */
+export const COMMENT_TRUNCATION_NOTICE_BYTES = 512;
+
+/**
+ * Build a truncated comment body that fits within `COMMENT_SIZE_LIMIT_BYTES`.
+ *
+ * The full body is cut at a safe byte offset, a truncation notice is
+ * appended, and the TrustBridge footer is preserved so the sticky-comment
+ * marker remains present.  The cut always happens on a line boundary so the
+ * resulting markdown is clean.
+ *
+ * @param fullBody  The full comment body produced by `formatCommentBody`.
+ * @param reportPath  Workspace-relative path where the full report was written.
+ * @returns A comment body that fits within the GitHub size limit.
+ *
+ * @internal Exported for testing.
+ */
+export function buildTruncatedCommentBody(fullBody: string, reportPath: string): string {
+  const budget = COMMENT_SIZE_LIMIT_BYTES - COMMENT_TRUNCATION_NOTICE_BYTES;
+
+  // Walk backwards from the budget boundary to find a clean line break.
+  const bodyBytes = Buffer.from(fullBody, 'utf8');
+  let cutByte = budget;
+  while (cutByte > 0 && bodyBytes[cutByte] !== 0x0a /* '\n' */) {
+    cutByte--;
+  }
+
+  const truncated = bodyBytes.subarray(0, cutByte).toString('utf8');
+
+  const notice = [
+    '',
+    '---',
+    '> **⚠️ Report truncated** — this comment exceeded GitHub\'s size limit.',
+    `> The full validation report has been written to \`${reportPath}\` in the workflow workspace.`,
+    '> Upload it as a workflow artifact using `actions/upload-artifact` to make it available for download.',
+    '> See [USAGE.md](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/USAGE.md#handling-oversized-reports) for the recommended workflow pattern.',
+    '',
+    '---',
+    TRUSTBRIDGE_FOOTER,
+  ].join('\n');
+
+  return truncated + notice;
+}
+
+/**
+ * Write the full comment body to a workspace file so it can be uploaded as
+ * a GitHub Actions artifact by a subsequent `actions/upload-artifact` step.
+ *
+ * Directories are created recursively if they don't exist.  Any write
+ * failure is surfaced as a warning (not an error) so the action can still
+ * post the truncated comment.
+ *
+ * @param fullBody  Full comment body to persist.
+ * @param outputPath  Absolute or workspace-relative path for the output file.
+ * @returns The resolved absolute path on success, `undefined` on failure.
+ *
+ * @internal Exported for testing.
+ */
+export function writeFullReport(fullBody: string, outputPath: string): string | undefined {
+  try {
+    const resolved = path.isAbsolute(outputPath)
+      ? outputPath
+      : path.resolve(process.env['GITHUB_WORKSPACE'] ?? process.cwd(), outputPath);
+
+    const dir = path.dirname(resolved);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(resolved, fullBody, 'utf8');
+
+    core.info(`Full validation report written to ${resolved}`);
+    return resolved;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    core.warning(`Failed to write full validation report: ${message}`);
+    return undefined;
+  }
 }
 
 export interface UpsertCommentOptions {

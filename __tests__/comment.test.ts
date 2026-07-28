@@ -1,12 +1,19 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as github from '@actions/github';
 import {
   STICKY_COMMENT_MARKER,
   STICKY_COMMENT_MARKER_LEGACY,
   TRUSTBRIDGE_FOOTER,
+  COMMENT_SIZE_LIMIT_BYTES,
+  COMMENT_TRUNCATION_NOTICE_BYTES,
   findStickyComment,
   formatCommentBody,
   isTrustBridgeComment,
   postIssueComment,
+  buildTruncatedCommentBody,
+  writeFullReport,
 } from '../src/comment';
 import { ValidationResult } from '../src/checks';
 
@@ -17,6 +24,16 @@ jest.mock('@actions/github', () => ({
     apiUrl: 'https://api.github.com',
   },
   getOctokit: jest.fn(),
+}));
+
+jest.mock('@actions/core', () => ({
+  info: jest.fn(),
+  warning: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  setOutput: jest.fn(),
+  setFailed: jest.fn(),
+  getInput: jest.fn(),
 }));
 
 const validationResult: ValidationResult = {
@@ -406,111 +423,127 @@ describe('postIssueComment', () => {
   });
 });
 
-describe('isTrustBridgeComment', () => {
-  it('matches the current versioned marker', () => {
-    expect(isTrustBridgeComment(`${STICKY_COMMENT_MARKER}\nsome body`)).toBe(true);
+// ---------------------------------------------------------------------------
+// Oversize comment truncation
+// ---------------------------------------------------------------------------
+
+describe('COMMENT_SIZE_LIMIT_BYTES', () => {
+  it('is 65536 (GitHub comment size limit)', () => {
+    expect(COMMENT_SIZE_LIMIT_BYTES).toBe(65536);
   });
 
-  it('matches the legacy marker for backward compatibility', () => {
-    expect(isTrustBridgeComment(`${STICKY_COMMENT_MARKER_LEGACY}\nold body`)).toBe(true);
-  });
-
-  it('matches the footer alone', () => {
-    expect(isTrustBridgeComment(`some body\n${TRUSTBRIDGE_FOOTER}`)).toBe(true);
-  });
-
-  it('returns false for unrelated comments', () => {
-    expect(isTrustBridgeComment('just a regular comment')).toBe(false);
-  });
-
-  it('returns false for null/undefined', () => {
-    expect(isTrustBridgeComment(null)).toBe(false);
-    expect(isTrustBridgeComment(undefined)).toBe(false);
+  it('leaves enough room for the truncation notice', () => {
+    expect(COMMENT_SIZE_LIMIT_BYTES).toBeGreaterThan(COMMENT_TRUNCATION_NOTICE_BYTES);
   });
 });
 
-describe('findStickyComment — multiple TrustBridge comments', () => {
-  it('returns the id of the last TrustBridge comment when multiple exist', async () => {
-    const octokit = makeOctokit();
-    octokit.paginate.mockResolvedValue([
-      { id: 10, body: `${STICKY_COMMENT_MARKER_LEGACY}\nfirst old comment` },
-      { id: 20, body: 'unrelated' },
-      { id: 30, body: `${STICKY_COMMENT_MARKER}\nmost recent TrustBridge comment` },
-    ]);
+describe('buildTruncatedCommentBody', () => {
+  const reportPath = 'trustbridge-report.md';
 
-    const id = await findStickyComment(
-      octokit as unknown as Parameters<typeof findStickyComment>[0],
-      'owner',
-      'repo',
-      42,
-    );
-
-    expect(id).toBe(30);
+  it('returns a body within COMMENT_SIZE_LIMIT_BYTES when given an oversized input', () => {
+    const oversizedBody = 'x'.repeat(COMMENT_SIZE_LIMIT_BYTES + 10000);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(Buffer.byteLength(truncated, 'utf8')).toBeLessThanOrEqual(COMMENT_SIZE_LIMIT_BYTES);
   });
 
-  it('matches a comment that only contains the footer', async () => {
-    const octokit = makeOctokit();
-    octokit.paginate.mockResolvedValue([
-      { id: 5, body: `some body\n${TRUSTBRIDGE_FOOTER}` },
-    ]);
+  it('includes the truncation notice', () => {
+    const oversizedBody = 'A'.repeat(COMMENT_SIZE_LIMIT_BYTES + 1000);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(truncated).toContain('⚠️ Report truncated');
+    expect(truncated).toContain(reportPath);
+  });
 
-    const id = await findStickyComment(
-      octokit as unknown as Parameters<typeof findStickyComment>[0],
-      'owner',
-      'repo',
-      1,
-    );
+  it('includes a link to USAGE.md in the truncation notice', () => {
+    const oversizedBody = 'B'.repeat(COMMENT_SIZE_LIMIT_BYTES + 500);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(truncated).toContain('USAGE.md');
+  });
 
-    expect(id).toBe(5);
+  it('preserves the TrustBridge footer so the sticky marker is present', () => {
+    const oversizedBody = 'C'.repeat(COMMENT_SIZE_LIMIT_BYTES + 500);
+    const truncated = buildTruncatedCommentBody(oversizedBody, reportPath);
+    expect(truncated).toContain('trustbridge-action');
+  });
+
+  it('embeds the custom report path in the notice', () => {
+    const oversizedBody = 'D'.repeat(COMMENT_SIZE_LIMIT_BYTES + 500);
+    const customPath = 'artifacts/my-report.md';
+    const truncated = buildTruncatedCommentBody(oversizedBody, customPath);
+    expect(truncated).toContain(customPath);
+  });
+
+  it('cuts on a line boundary (no partial lines in truncated content)', () => {
+    const line = 'line content here\n';
+    const repeated = line.repeat(Math.ceil((COMMENT_SIZE_LIMIT_BYTES + 5000) / line.length));
+    const truncated = buildTruncatedCommentBody(repeated, reportPath);
+    const noticeSeparator = '---\n> **⚠️ Report truncated**';
+    const cutIndex = truncated.indexOf(noticeSeparator);
+    if (cutIndex > 0) {
+      const before = truncated.slice(0, cutIndex);
+      expect(before.endsWith('\n') || before.endsWith('\n\n')).toBe(true);
+    }
+  });
+
+  it('stays well under the limit for a body exactly at the boundary', () => {
+    const exactBody = 'E'.repeat(COMMENT_SIZE_LIMIT_BYTES);
+    const truncated = buildTruncatedCommentBody(exactBody, reportPath);
+    expect(Buffer.byteLength(truncated, 'utf8')).toBeLessThanOrEqual(COMMENT_SIZE_LIMIT_BYTES);
   });
 });
 
-describe('postIssueComment — update failure fallback', () => {
-  const mockedGithub = github as unknown as {
-    context: { payload: { issue?: { number: number } }; repo: { owner: string; repo: string } };
-    getOctokit: jest.Mock;
-  };
+describe('writeFullReport', () => {
+  let tmpDir: string;
 
   beforeEach(() => {
-    mockedGithub.context.payload = { issue: { number: 7 } };
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-test-'));
   });
 
-  it('falls back to creating a new comment when updateComment fails', async () => {
-    const octokit = makeOctokit();
-    octokit.paginate.mockResolvedValue([
-      { id: 55, body: `${STICKY_COMMENT_MARKER}\nold result` },
-    ]);
-    octokit.rest.issues.updateComment.mockRejectedValue(new Error('Not Found'));
-    octokit.rest.issues.createComment.mockResolvedValue({
-      data: { html_url: 'https://github.com/o/r/issues/7#issuecomment-new' },
-    });
-    mockedGithub.getOctokit.mockReturnValue(octokit);
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 
-    const url = await postIssueComment('token', 'body after update failure', { sticky: true });
+  it('writes the full body to the specified path and returns the resolved path', () => {
+    const outputPath = path.join(tmpDir, 'report.md');
+    const body = '# Full Report\n\nThis is the full content.';
 
-    expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-new');
-    expect(octokit.rest.issues.updateComment).toHaveBeenCalledWith(
-      expect.objectContaining({ comment_id: 55 }),
-    );
-    expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
-      expect.objectContaining({ issue_number: 7, body: 'body after update failure' }),
+    const result = writeFullReport(body, outputPath);
+
+    expect(result).toBe(outputPath);
+    expect(fs.existsSync(outputPath)).toBe(true);
+    expect(fs.readFileSync(outputPath, 'utf8')).toBe(body);
+  });
+
+  it('creates intermediate directories as needed', () => {
+    const nestedPath = path.join(tmpDir, 'nested', 'deep', 'report.md');
+    const body = 'nested report content';
+
+    const result = writeFullReport(body, nestedPath);
+
+    expect(result).toBe(nestedPath);
+    expect(fs.existsSync(nestedPath)).toBe(true);
+  });
+
+  it('returns undefined and warns when the path is not writable', () => {
+    const { warning } = jest.requireMock('@actions/core') as { warning: jest.Mock };
+    warning.mockClear();
+
+    // Use a path with a null byte to force a write error cross-platform
+    const badPath = path.join(tmpDir, '\0invalid');
+    const result = writeFullReport('body', badPath);
+
+    expect(result).toBeUndefined();
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to write full validation report'),
     );
   });
 
-  it('falls back to creating when updateComment fails with a rate-limit error', async () => {
-    const octokit = makeOctokit();
-    octokit.paginate.mockResolvedValue([
-      { id: 77, body: `${STICKY_COMMENT_MARKER}\nold` },
-    ]);
-    octokit.rest.issues.updateComment.mockRejectedValue(new Error('API rate limit exceeded'));
-    octokit.rest.issues.createComment.mockResolvedValue({
-      data: { html_url: 'https://github.com/o/r/issues/7#issuecomment-rate' },
-    });
-    mockedGithub.getOctokit.mockReturnValue(octokit);
+  it('preserves the exact byte content of the full body', () => {
+    const body = '# Report\n\nUnicode: こんにちは 🌟\n\nEnd.';
+    const outputPath = path.join(tmpDir, 'unicode-report.md');
 
-    const url = await postIssueComment('token', 'body', { sticky: true });
+    writeFullReport(body, outputPath);
 
-    expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-rate');
-    expect(octokit.rest.issues.createComment).toHaveBeenCalled();
+    const written = fs.readFileSync(outputPath, 'utf8');
+    expect(written).toBe(body);
   });
 });

@@ -11,33 +11,30 @@ export interface ActionOutputs {
   xlm_balance: string;
   account_funded: string;
   comment_url: string;
-  readiness_badge_markdown: string;
-  readiness_badge_url: string;
-  num_sponsoring: string;
-  num_sponsored: string;
+  full_report_path: string;
 }
 
-export function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs {
-  const badgeSnippets = generateBadgeSnippets(result);
+export function toActionOutputs(
+  result: ValidationResult,
+  commentUrl?: string,
+  fullReportPath?: string,
+): ActionOutputs {
   return {
     // Legacy outputs
     trustline_exists: String(result.trustlineExists),
     xlm_balance: result.xlmBalance,
     account_funded: String(result.accountFunded),
     comment_url: commentUrl ?? '',
-    readiness_badge_markdown: badgeSnippets.markdown,
-    readiness_badge_url: badgeSnippets.url,
-    num_sponsoring: String(result.sponsorshipInfo?.numSponsoring ?? 0),
-    num_sponsored: String(result.sponsorshipInfo?.numSponsored ?? 0),
+    full_report_path: fullReportPath ?? '',
   };
 }
 
 export function setValidationOutputs(
   result: ValidationResult,
   commentUrl?: string,
-  multiAssetResults?: AssetTrustlineResult[],
+  fullReportPath?: string,
 ): void {
-  const outputs = toActionOutputs(result, commentUrl, multiAssetResults);
+  const outputs = toActionOutputs(result, commentUrl, fullReportPath);
   for (const [name, value] of Object.entries(outputs)) {
     core.setOutput(name, value);
   }

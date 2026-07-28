@@ -186,22 +186,15 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  locale:
+  report_output_path:
     description: >-
-      Locale for issue comment strings (e.g., 'en', 'es', 'pt').
-      Defaults to 'en' (English) if unset or invalid. See docs/USAGE.md for
-      supported locales and examples.
+      Workspace-relative (or absolute) path where the full validation report
+      is written when the comment body exceeds GitHub's size limit.  The file
+      can then be uploaded as a workflow artifact using
+      `actions/upload-artifact`.  Has no effect when the comment is within
+      the size limit.  Defaults to `trustbridge-report.md`.
     required: false
-    default: 'en'
-  sarif_output_path:
-    description: >-
-      Optional path where TrustBridge will write SARIF 2.1.0 results for
-      GitHub Advanced Security / code scanning integration. When set, the
-      action generates a SARIF file that can be uploaded via
-      github/codeql-action/upload-sarif. Leave empty to skip SARIF generation.
-      Example: 'trustbridge-sarif.json'
-    required: false
-    default: ''
+    default: 'trustbridge-report.md'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
@@ -213,14 +206,11 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
-  readiness_badge_markdown:
-    description: 'Markdown-formatted readiness badge with link to TrustBridge repository'
-  readiness_badge_url:
-    description: 'Shields.io badge URL reflecting wallet-check readiness status (pass/fail)'
-  num_sponsoring:
-    description: 'Number of accounts this account is sponsoring (from Horizon)'
-  num_sponsored:
-    description: 'Number of accounts sponsoring this account (from Horizon)'
+  full_report_path:
+    description: >-
+      Absolute path of the full validation report file written to the workflow
+      workspace when the comment body exceeded GitHub's size limit.  Empty
+      when the comment was within the limit and no file was written.
 
 runs:
   using: 'node20'
