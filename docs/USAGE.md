@@ -265,6 +265,141 @@ jobs:
 
 ---
 
+## SARIF output for GitHub Advanced Security
+
+TrustBridge can emit validation results as SARIF 2.1.0 for integration with GitHub Advanced Security (GHAS) code scanning. This allows wallet-check failures to appear alongside other security findings in the repository's Security tab.
+
+### Enable SARIF output
+
+Set the optional `sarif_output_path` input to a file path where the SARIF JSON will be written:
+
+```yaml
+steps:
+  - uses: Stellar-TrustBridge/trustbridge-action@v1
+    with:
+      stellar_address_input: ${{ steps.address.outputs.address }}
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      sarif_output_path: trustbridge-results.sarif
+
+  - name: Upload SARIF results to GHAS
+    if: always()  # run even if TrustBridge checks fail
+    uses: github/codeql-action/upload-sarif@v2
+    with:
+      sarif_file: trustbridge-results.sarif
+```
+
+The SARIF file includes:
+- **Rule definitions** — TB001 (account funded), TB002 (trustline), TB003 (XLM reserve), TB004 (Horizon availability)
+- **Severity levels** — Passed checks appear as `note`, failed checks as `error`
+- **Validation gate summary** — Total/passed/failed check counts in run properties
+- **Locations** — Links to the Horizon endpoint and checked account address
+
+### SARIF rule reference
+
+| Rule ID | Check | Help link |
+| ------- | ----- | --------- |
+| TB001 | Account funded | [Stellar Accounts](https://developers.stellar.org/docs/fundamentals-and-concepts/stellar-data-structures/accounts) |
+| TB002 | Asset trustline | [Trustlines](https://developers.stellar.org/docs/fundamentals-and-concepts/stellar-data-structures/account-data#trustlines) |
+| TB003 | XLM reserve | [Reserves & Fees](https://developers.stellar.org/docs/learn/fundamentals/fees-and-metering#reserve) |
+| TB004 | Horizon availability | [Horizon API](https://developers.stellar.org/docs/data/apis/horizon) |
+
+---
+
+## Internationalization (i18n)
+
+Issue comments can be rendered in multiple languages. Set the optional `locale` input to change the comment language:
+
+```yaml
+steps:
+  - uses: Stellar-TrustBridge/trustbridge-action@v1
+    with:
+      stellar_address_input: ${{ steps.address.outputs.address }}
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      locale: 'es'  # Spanish
+```
+
+### Supported locales
+
+| Locale | Language | Example comment |
+| ------ | -------- | --------------- |
+| `en` | English (default) | Check labels, remediation, setup cost all in English |
+| `es` | Spanish | "Verificación de Cuenta Stellar", "Cuenta financiada", etc. |
+| `pt` | Portuguese | "Verificação de Conta Stellar", "Conta financiada", etc. |
+
+If an unsupported or invalid locale is provided, the action falls back to English (`en`).
+
+### Example: LATAM campaign
+
+```yaml
+name: Verificar Billetera Stellar
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ github.event.issue.body }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          locale: 'es'  # Comment in Spanish
+          fail_on_missing: false  # Warn only; don't fail workflow
+```
+
+---
+
+## Release SBOM (Software Bill of Materials)
+
+TrustBridge publishes a Software Bill of Materials (SBOM) alongside each release for supply-chain security review.
+
+### Accessing the SBOM
+
+1. Go to the [TrustBridge releases page](https://github.com/Stellar-TrustBridge/trustbridge-action/releases)
+2. Open a release (e.g., `v1.0.0`)
+3. Download the attached `trustbridge-sbom.json` file
+
+### SBOM format
+
+The SBOM is generated in **CycloneDX JSON** format, which is widely supported by:
+- [Dependency-Track](https://dependencytrack.org/) (software inventory platform)
+- [NTIA SBOM Tool](https://github.com/ntia/sbom-pointers)
+- GitHub's own [Dependency Scanning](https://docs.github.com/en/code-security/supply-chain-security)
+
+### Verifying the SBOM
+
+After downloading, you can verify its structure:
+
+```bash
+# Check that it's valid JSON
+jq . trustbridge-sbom.json > /dev/null && echo "Valid SBOM"
+
+# See all dependencies
+jq '.components[] | {name, version}' trustbridge-sbom.json
+
+# Check for a specific dependency
+jq '.components[] | select(.name == "@actions/core")' trustbridge-sbom.json
+```
+
+### Using the SBOM in your supply chain
+
+```bash
+# Example: Submit to NTIA Tool for policy check
+sbom-tool validate --input-format CycloneDX --input-file trustbridge-sbom.json
+
+# Example: Import into Dependency-Track for monitoring
+curl -X POST "https://your-dependency-track/api/v1/bom" \
+  -H "X-API-Key: <your-key>" \
+  -F "project=<project-uuid>" \
+  -F "bom=@trustbridge-sbom.json"
+```
+
+---
+
 ## Pinning versions
 
 | Reference | When to use |
