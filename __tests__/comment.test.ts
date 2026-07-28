@@ -1,9 +1,11 @@
 import * as github from '@actions/github';
 import {
   STICKY_COMMENT_MARKER,
+  STICKY_COMMENT_MARKER_LEGACY,
   TRUSTBRIDGE_FOOTER,
   findStickyComment,
   formatCommentBody,
+  isTrustBridgeComment,
   postIssueComment,
 } from '../src/comment';
 import { ValidationResult } from '../src/checks';
@@ -293,5 +295,114 @@ describe('postIssueComment', () => {
     expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-3');
     expect(octokit.rest.issues.createComment).toHaveBeenCalled();
     expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+});
+
+describe('isTrustBridgeComment', () => {
+  it('matches the current versioned marker', () => {
+    expect(isTrustBridgeComment(`${STICKY_COMMENT_MARKER}\nsome body`)).toBe(true);
+  });
+
+  it('matches the legacy marker for backward compatibility', () => {
+    expect(isTrustBridgeComment(`${STICKY_COMMENT_MARKER_LEGACY}\nold body`)).toBe(true);
+  });
+
+  it('matches the footer alone', () => {
+    expect(isTrustBridgeComment(`some body\n${TRUSTBRIDGE_FOOTER}`)).toBe(true);
+  });
+
+  it('returns false for unrelated comments', () => {
+    expect(isTrustBridgeComment('just a regular comment')).toBe(false);
+  });
+
+  it('returns false for null/undefined', () => {
+    expect(isTrustBridgeComment(null)).toBe(false);
+    expect(isTrustBridgeComment(undefined)).toBe(false);
+  });
+});
+
+describe('findStickyComment — multiple TrustBridge comments', () => {
+  it('returns the id of the last TrustBridge comment when multiple exist', async () => {
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([
+      { id: 10, body: `${STICKY_COMMENT_MARKER_LEGACY}\nfirst old comment` },
+      { id: 20, body: 'unrelated' },
+      { id: 30, body: `${STICKY_COMMENT_MARKER}\nmost recent TrustBridge comment` },
+    ]);
+
+    const id = await findStickyComment(
+      octokit as unknown as Parameters<typeof findStickyComment>[0],
+      'owner',
+      'repo',
+      42,
+    );
+
+    expect(id).toBe(30);
+  });
+
+  it('matches a comment that only contains the footer', async () => {
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([
+      { id: 5, body: `some body\n${TRUSTBRIDGE_FOOTER}` },
+    ]);
+
+    const id = await findStickyComment(
+      octokit as unknown as Parameters<typeof findStickyComment>[0],
+      'owner',
+      'repo',
+      1,
+    );
+
+    expect(id).toBe(5);
+  });
+});
+
+describe('postIssueComment — update failure fallback', () => {
+  const mockedGithub = github as unknown as {
+    context: { payload: { issue?: { number: number } }; repo: { owner: string; repo: string } };
+    getOctokit: jest.Mock;
+  };
+
+  beforeEach(() => {
+    mockedGithub.context.payload = { issue: { number: 7 } };
+  });
+
+  it('falls back to creating a new comment when updateComment fails', async () => {
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([
+      { id: 55, body: `${STICKY_COMMENT_MARKER}\nold result` },
+    ]);
+    octokit.rest.issues.updateComment.mockRejectedValue(new Error('Not Found'));
+    octokit.rest.issues.createComment.mockResolvedValue({
+      data: { html_url: 'https://github.com/o/r/issues/7#issuecomment-new' },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postIssueComment('token', 'body after update failure', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-new');
+    expect(octokit.rest.issues.updateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ comment_id: 55 }),
+    );
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
+      expect.objectContaining({ issue_number: 7, body: 'body after update failure' }),
+    );
+  });
+
+  it('falls back to creating when updateComment fails with a rate-limit error', async () => {
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([
+      { id: 77, body: `${STICKY_COMMENT_MARKER}\nold` },
+    ]);
+    octokit.rest.issues.updateComment.mockRejectedValue(new Error('API rate limit exceeded'));
+    octokit.rest.issues.createComment.mockResolvedValue({
+      data: { html_url: 'https://github.com/o/r/issues/7#issuecomment-rate' },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postIssueComment('token', 'body', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-rate');
+    expect(octokit.rest.issues.createComment).toHaveBeenCalled();
   });
 });
