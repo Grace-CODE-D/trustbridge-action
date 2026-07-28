@@ -16,6 +16,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import { parseLocaleInput } from './i18n';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -56,12 +57,17 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
 
   // SEP-0007 wallet deep links (Issue #44)
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Internationalization (Issue #59)
+  const localeInput = core.getInput('locale') || 'en';
+  const locale = parseLocaleInput(localeInput);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -200,6 +206,7 @@ async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     sep0007DeepLinks,
     sep0007OriginDomain,
+    locale,
   });
 
   let commentUrl: string | undefined;
