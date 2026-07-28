@@ -35413,12 +35413,6 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Dynamic reserve engine (Issue #15)
-    const dynamicReserve = (0, inputs_1.parseBooleanInput)(core.getInput('dynamic_reserve'), false);
-    const reserveBufferXlm = (0, inputs_1.parseNumberInput)(core.getInput('reserve_buffer_xlm'), 0, {
-        min: 0,
-        max: 1000,
-    });
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -35441,8 +35435,6 @@ async function run() {
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
         sep0007DeepLinks,
-        dynamicReserve,
-        reserveBufferXlm,
     });
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
@@ -35510,25 +35502,7 @@ async function run() {
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
             : await (0, horizon_1.fetchAccount)(horizonUrl, stellarAddress, horizonOptions);
-        let effectiveCheckConfig = checkConfig;
-        if (dynamicReserve) {
-            const effectiveMinXlmReserve = (0, validation_1.computeEffectiveReserveRequirement)(checkConfig.minXlmReserve, {
-                subentryCount: account.subentry_count,
-                numSponsoring: account.num_sponsoring,
-                numSponsored: account.num_sponsored,
-            }, { bufferXlm: reserveBufferXlm });
-            effectiveCheckConfig = { ...checkConfig, minXlmReserve: effectiveMinXlmReserve };
-            logger_1.logger.debug('Dynamic reserve engine computed effective requirement', {
-                component: 'index',
-                configuredMinXlmReserve: checkConfig.minXlmReserve,
-                reserveBufferXlm,
-                effectiveMinXlmReserve,
-                subentryCount: account.subentry_count,
-                numSponsoring: account.num_sponsoring,
-                numSponsored: account.num_sponsored,
-            });
-        }
-        result = (0, checks_1.runAccountChecks)(account, effectiveCheckConfig);
+        result = (0, checks_1.runAccountChecks)(account, checkConfig);
     }
     catch (error) {
         if (error instanceof horizon_1.HorizonError && error.statusCode === 404) {
@@ -36437,9 +36411,6 @@ exports.validateSsrfSafeUrl = validateSsrfSafeUrl;
 exports.sanitizeConfigString = sanitizeConfigString;
 exports.redactSecretFields = redactSecretFields;
 exports.validateTrustbridgeConfig = validateTrustbridgeConfig;
-exports.computeBaseReserveRequirement = computeBaseReserveRequirement;
-exports.validateDynamicReserve = validateDynamicReserve;
-exports.computeEffectiveReserveRequirement = computeEffectiveReserveRequirement;
 const _spans = [];
 /**
  * Return all recorded validation spans (for testing or debug export).
@@ -36859,104 +36830,6 @@ function validateTrustbridgeConfig(raw) {
         }
     }
     return combineResults(...results);
-}
-/** Threshold below which a passing check still emits a "thin margin" warning. */
-const RESERVE_MARGIN_WARNING_XLM = 0.5;
-function sanitizeReserveCount(value) {
-    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
-}
-/** Default base reserve (XLM per ledger entry) on the Stellar network. */
-const STELLAR_BASE_RESERVE_XLM_DEFAULT = 0.5;
-/**
- * Computes the real Stellar network minimum balance for an account from its
- * live subentry/sponsorship counters, per the protocol formula:
- *   (2 + subentries + sponsoring - sponsored) * baseReserve
- *
- * Malformed (negative or non-finite) counters are treated as 0 rather than
- * allowed to reduce the computed requirement — a corrupt or partial Horizon
- * response must never cause the engine to under-report what's required.
- */
-function computeBaseReserveRequirement(state, baseReserveXlm = STELLAR_BASE_RESERVE_XLM_DEFAULT) {
-    const subentryCount = sanitizeReserveCount(state.subentryCount);
-    const numSponsoring = sanitizeReserveCount(state.numSponsoring);
-    const numSponsored = sanitizeReserveCount(state.numSponsored);
-    const reserveEntries = 2 + subentryCount + numSponsoring - numSponsored;
-    return Math.max(0, reserveEntries) * baseReserveXlm;
-}
-/**
- * Validates that an account's actual XLM balance meets the dynamically
- * computed reserve requirement (base reserve for its live subentry/
- * sponsorship state, plus an optional safety buffer).
- *
- * Records an OTel-style span. Attributes carry only counts and computed
- * numbers — never a raw account balance or address.
- */
-function validateDynamicReserve(state, actualXlmBalance, options = {}) {
-    const startTimeMs = Date.now();
-    const bufferXlm = options.bufferXlm !== undefined && Number.isFinite(options.bufferXlm) && options.bufferXlm > 0
-        ? options.bufferXlm
-        : 0;
-    const errors = [];
-    const warnings = [];
-    if (!Number.isFinite(actualXlmBalance)) {
-        errors.push(`actualXlmBalance must be a finite number, got: ${actualXlmBalance}`);
-    }
-    for (const [field, value] of Object.entries(state)) {
-        if (!Number.isFinite(value) || value < 0) {
-            warnings.push(`${field} was invalid (${value}) and was treated as 0`);
-        }
-    }
-    const baseReserveRequirement = computeBaseReserveRequirement(state, options.baseReserveXlm);
-    const totalRequirement = baseReserveRequirement + bufferXlm;
-    const safeActual = Number.isFinite(actualXlmBalance) ? actualXlmBalance : 0;
-    const met = errors.length === 0 && safeActual >= totalRequirement;
-    if (errors.length === 0 && !met) {
-        errors.push(`XLM balance ${safeActual} is below the dynamically computed reserve requirement of ${totalRequirement} ` +
-            `(base ${baseReserveRequirement} + buffer ${bufferXlm})`);
-    }
-    else if (met && safeActual - totalRequirement < RESERVE_MARGIN_WARNING_XLM) {
-        warnings.push(`XLM balance ${safeActual} clears the reserve requirement of ${totalRequirement} by less than ` +
-            `${RESERVE_MARGIN_WARNING_XLM} XLM — consider funding additional headroom before future payouts.`);
-    }
-    const result = {
-        valid: errors.length === 0 && met,
-        errors,
-        warnings,
-        baseReserveRequirement,
-        bufferXlm,
-        totalRequirement,
-    };
-    recordSpan({
-        name: 'validateDynamicReserve',
-        attributes: {
-            subentryCount: sanitizeReserveCount(state.subentryCount),
-            numSponsoring: sanitizeReserveCount(state.numSponsoring),
-            numSponsored: sanitizeReserveCount(state.numSponsored),
-            baseReserveRequirement,
-            bufferXlm,
-            totalRequirement,
-            valid: result.valid,
-            errorCount: errors.length,
-        },
-        status: result.valid ? 'ok' : 'error',
-        durationMs: Date.now() - startTimeMs,
-        startTimeMs,
-        error: errors.length > 0 ? errors[0] : undefined,
-    });
-    return result;
-}
-/**
- * Computes the effective minimum reserve to enforce for an account: the
- * greater of the maintainer-configured static floor and the dynamically
- * computed requirement (base reserve for current account state, plus any
- * configured buffer). Never returns less than `configuredMinXlmReserve`, so
- * enabling the dynamic engine can only raise the bar, never lower it below
- * what a maintainer explicitly set.
- */
-function computeEffectiveReserveRequirement(configuredMinXlmReserve, state, options = {}) {
-    const dynamic = computeBaseReserveRequirement(state, options.baseReserveXlm) + (options.bufferXlm ?? 0);
-    const floor = Number.isFinite(configuredMinXlmReserve) ? configuredMinXlmReserve : 0;
-    return Math.max(floor, dynamic);
 }
 
 
