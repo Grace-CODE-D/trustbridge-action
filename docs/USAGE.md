@@ -289,6 +289,82 @@ When an account is **sponsored** (`num_sponsored > 0`), reserve requirements are
 
 ---
 
+## Validating your workflow config against the schema
+
+TrustBridge publishes a [JSON Schema](../schemas/action-inputs.schema.json)
+for all `action.yml` inputs at `schemas/action-inputs.schema.json`. Integrators
+can validate their `with:` block in CI to catch typos, removed inputs, or
+type mismatches **before** they cause silent runtime failures on assignment day.
+
+### What the schema enforces
+
+- Every property matches a declared `action.yml` input.
+- All values are typed as `"string"` (GitHub Actions passes all inputs as strings).
+- `additionalProperties: false` — unknown keys are rejected immediately.
+- `required: ["github_token"]` — the one mandatory input is enforced.
+
+### Validate with ajv-cli (Node)
+
+```bash
+# Install once
+npm install --save-dev ajv-cli
+
+# Create a sample config file — mirrors your workflow's `with:` block
+cat > my-trustbridge-config.json << 'EOF'
+{
+  "github_token": "${{ secrets.GITHUB_TOKEN }}",
+  "stellar_address_input": "GABC...",
+  "fail_on_missing": "true",
+  "horizon_url": "https://horizon.stellar.org"
+}
+EOF
+
+# Validate against the schema
+npx ajv-cli validate \
+  -s schemas/action-inputs.schema.json \
+  -d my-trustbridge-config.json
+```
+
+### Validate with check-jsonschema (Python)
+
+```bash
+pip install check-jsonschema
+
+check-jsonschema \
+  --schemafile schemas/action-inputs.schema.json \
+  my-trustbridge-config.json
+```
+
+### Add it to your CI workflow
+
+```yaml
+- name: Validate TrustBridge config against schema
+  run: |
+    npm install --save-dev ajv-cli
+    npx ajv-cli validate \
+      -s schemas/action-inputs.schema.json \
+      -d ci/trustbridge-config.json
+```
+
+This step fails immediately if you add an unrecognised input or remove a
+required field, giving a clear error message before the action ever runs.
+
+### Schema location
+
+The schema is published alongside the action source and is always in sync
+with `action.yml`. The sync is enforced by:
+
+1. A Jest test suite (`__tests__/action-schema-sync.test.ts`) that parses
+   `action.yml` at runtime and asserts every input appears in the schema and
+   vice-versa. CI fails on any drift.
+2. A dedicated CI step (`Verify action.yml ↔ schema sync`) that runs
+   `npm test -- --testPathPattern action-schema-sync` on every push and PR.
+
+See [CONTRIBUTING.md](../CONTRIBUTING.md#keeping-the-schema-in-sync-with-actionyml)
+for the update checklist maintainers follow when adding or changing inputs.
+
+---
+
 ## Ledger freshness guard
 
 The freshness guard detects when a Horizon node is serving stale data by

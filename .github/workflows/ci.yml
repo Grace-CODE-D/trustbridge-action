@@ -37,6 +37,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Dedicated schema-sync check: fails fast with a clear message when
+      # action.yml inputs drift from schemas/action-inputs.schema.json.
+      - name: Verify action.yml ↔ schema sync
+        run: npm test -- --testPathPattern action-schema-sync --no-coverage
+
       # Includes __tests__/validation.performance.test.ts (mocked Horizon p95 budget).
       - name: Test
         run: npm test

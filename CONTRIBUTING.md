@@ -123,6 +123,62 @@ Do not import `@actions/github` outside `comment.ts` / `index.ts`.
 
 ---
 
+
+## Keeping the schema in sync with action.yml
+
+`schemas/action-inputs.schema.json` is the single source of truth for
+integrator tooling and editor validation. **Every time you add, rename, or
+remove an `action.yml` input you must also update the schema.**
+
+### What is the schema?
+
+A [JSON Schema (draft-07)](http://json-schema.org/draft-07/schema#) document
+that mirrors the `inputs:` section of `action.yml`. Each property:
+
+- Has `"type": "string"` (GitHub Actions passes all inputs as strings).
+- Carries the same `description` and `default` as the corresponding `action.yml` input.
+- May include an `"enum"` constraint for boolean flags (`"true"/"false"`) or named-option fields (`"warn"/"strict"`).
+- May include a `"pattern"` constraint for numeric inputs.
+
+`additionalProperties: false` is set so any unknown key is rejected immediately.
+
+### Checklist when adding an input
+
+1. Add the input to `action.yml` with `description`, `required`, and `default`.
+2. Add a matching property to `schemas/action-inputs.schema.json` under `"properties"` with at minimum `"type": "string"` and `"description"`.
+3. If the new input is `required: true` in `action.yml`, add its name to the `"required"` array in the schema.
+4. Run `npm test -- --testPathPattern action-schema-sync` locally — it must pass.
+5. Document the new input in `docs/USAGE.md` and `README.md`.
+6. Update `docs/BREAKING_CHANGES.md` if the change is breaking.
+
+### Checklist when removing or renaming an input
+
+1. Remove or rename the property in `schemas/action-inputs.schema.json`.
+2. Remove or rename the input in `action.yml`.
+3. Update `docs/USAGE.md`, `README.md`, and `docs/BREAKING_CHANGES.md`.
+4. Run `npm test -- --testPathPattern action-schema-sync` locally.
+
+### How CI enforces the sync
+
+`__tests__/action-schema-sync.test.ts` parses `action.yml` at test time using Node's built-in `fs` module (no extra YAML-parser dependency) and asserts:
+
+| Check | What it catches |
+|-------|-----------------|
+| Every `action.yml` input in schema | Input added to action but schema not updated |
+| Every schema property in `action.yml` | Property added to schema but input removed |
+| `required: true` inputs in `required[]` | Required input missing from schema array |
+| Schema `required[]` matches action | Schema marks an optional input as required |
+| All properties have `type: "string"` | Accidental non-string type in schema |
+| Property count parity | Fast sanity check for bulk additions/removals |
+
+CI runs a dedicated step on every push and PR:
+
+```yaml
+- name: Verify action.yml ? schema sync
+  run: npm test -- --testPathPattern action-schema-sync --no-coverage
+```
+
+---
 ## Pull request process
 
 1. **Fork** the repository and create a feature branch from `main`
