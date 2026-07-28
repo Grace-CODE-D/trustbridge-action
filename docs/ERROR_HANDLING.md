@@ -130,13 +130,11 @@ Native balance is parsed as a string from Horizon (7 decimal places) and compare
 
 Remediation calculates approximate additional XLM needed.
 
-### Unauthorized trustline (AUTHORIZATION_REQUIRED)
-
-A trustline can exist on Horizon (`is_authorized: false`) without the issuer having authorized it — a false green for a naive "trustline exists" check. Controlled by `unauthorized_trustline_policy` (`warn` default, `fail`, or `ignore`); see [Unauthorized trustline policy](USAGE.md#unauthorized-trustline-policy). Under `fail`, the trustline check does not pass and `trustline_exists` reflects the stricter meaning.
-
-### Clawback-enabled trustline
-
-Horizon reports `is_clawback_enabled: true` per-trustline when the issuer (or the trustline itself) has clawback enabled, meaning the issuer can revoke balances at any time. TrustBridge warns by default; set `clawback_strict_mode: true` to fail instead. See [Clawback-enabled asset warnings](USAGE.md#clawback-enabled-asset-warnings) for the security rationale — vanilla assets without clawback enabled never trigger this.
+> **Balance string format and safe parsing rules for release scripts:**
+> See [DECIMAL_PRECISION.md](DECIMAL_PRECISION.md) for a full explanation of
+> why Horizon returns balances as strings, stroop vs decimal XLM, `min_xlm_reserve`
+> validation rules, and safe parsing patterns to avoid rounding bugs in downstream
+> payout automation.
 
 ---
 
