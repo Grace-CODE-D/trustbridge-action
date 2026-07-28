@@ -26,7 +26,7 @@ import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord, redactHorizonUrl } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
-import { checkLedgerFreshness } from './freshness';
+import { lookupAddressFromContract, ContractLookupError } from './soroban';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -73,9 +73,7 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
-  const networkPassphrase = core.getInput('network_passphrase') || 'Public Global Stellar Network ; September 2015';
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+  void core.getInput('trustbridge_config_path'); // reserved for future config-file integration
   const githubToken = core.getInput('github_token', { required: true });
   const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
@@ -83,13 +81,10 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
-  // Ledger freshness guard (Issue #107)
-  const checkLedgerFreshnessEnabled = parseBooleanInput(core.getInput('check_ledger_freshness'), false);
-  const maxLedgerLagSeconds = parseNumberInput(core.getInput('max_ledger_lag_seconds'), 60, {
-    min: 5,
-    max: 3600,
-  });
-  const ledgerFreshnessFailOnStale = parseBooleanInput(core.getInput('ledger_freshness_fail_on_stale'), false);
+  // Soroban contract registry (Issue #7)
+  const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
+  const contractId = core.getInput('contract_id') || '';
+  const githubUsername = core.getInput('github_username') || '';
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -171,6 +166,37 @@ async function run(): Promise<void> {
     });
   }
 
+  // Soroban contract registry lookup — resolve GitHub username → G-address
+  // before running Horizon checks. Falls back to stellar_address_input on
+  // any error so existing non-contract workflows are unaffected.
+  let resolvedAddress = stellarAddress;
+  if (sorobanRpcUrl && contractId && githubUsername) {
+    try {
+      const lookupResult = await lookupAddressFromContract(githubUsername, {
+        sorobanRpcUrl,
+        contractId,
+        timeoutMs: horizonTimeoutMs,
+      });
+      if (lookupResult.fromRegistry && lookupResult.address) {
+        core.info(
+          `[TrustBridge] Registry resolved @${githubUsername} → ${lookupResult.address}`,
+        );
+        resolvedAddress = lookupResult.address;
+      } else {
+        core.info(
+          `[TrustBridge] @${githubUsername} not found in registry — using stellar_address_input`,
+        );
+      }
+    } catch (err) {
+      const msg = getErrorMessage(err);
+      const retryable = err instanceof ContractLookupError && err.retryable;
+      core.warning(
+        `[TrustBridge] Contract registry lookup failed (${retryable ? 'retryable' : 'non-retryable'}): ${msg}. Falling back to stellar_address_input.`,
+      );
+    }
+  }
+
+  validateStellarAddress(resolvedAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 
   const normalizedAsset = normalizeAssetConfig({
@@ -201,31 +227,7 @@ async function run(): Promise<void> {
     horizonUrl: effectiveHorizonUrl,
   };
 
-  // ── Ledger freshness guard (Issue #107) ──────────────────────────────────
-  if (checkLedgerFreshnessEnabled) {
-    core.info('[TrustBridge] Running ledger freshness check...');
-    const freshness = await checkLedgerFreshness(horizonUrl, {
-      maxLagSeconds: maxLedgerLagSeconds,
-      timeoutMs: horizonTimeoutMs,
-    });
-    logger.debug('Ledger freshness result', { component: 'index', ...freshness });
-
-    if (freshness.status === 'stale') {
-      const msg = `[TrustBridge] Ledger freshness: ${freshness.message}`;
-      if (ledgerFreshnessFailOnStale) {
-        core.setFailed(msg);
-        return;
-      } else {
-        core.warning(msg);
-      }
-    } else if (freshness.status === 'unknown') {
-      core.warning(`[TrustBridge] Ledger freshness: ${freshness.message}`);
-    } else {
-      core.info(`[TrustBridge] Ledger freshness: ${freshness.message}`);
-    }
-  }
-
-  core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
+  core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -238,8 +240,8 @@ async function run(): Promise<void> {
   try {
     const account = waitUntilFunded
       ? await waitForFundedAccount(
-          effectiveHorizonUrl,
-          stellarAddress,
+          horizonUrl,
+          resolvedAddress,
           {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
@@ -254,16 +256,12 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(effectiveHorizonUrl, stellarAddress, horizonOptions);
+      : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
-      result = unfundedAccountResult(stellarAddress, checkConfig);
-    } else if (error instanceof HorizonError && error.statusCode === 0 && !error.retryable) {
-      // Cancelled by job signal — exit cleanly without a misleading comment.
-      core.warning(`TrustBridge run was cancelled: ${error.message}`);
-      // result stays undefined; the null guard below returns cleanly.
+      result = unfundedAccountResult(resolvedAddress, checkConfig);
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       globalMetrics.incrementCounter('errors');
@@ -289,9 +287,9 @@ async function run(): Promise<void> {
 
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
-    stellarAddress,
-    horizonUrl: effectiveHorizonUrl,
-    failOnMissing: effectiveFailOnMissing,
+    stellarAddress: resolvedAddress,
+    horizonUrl,
+    failOnMissing,
     stickyComment,
     waitUntilFunded,
     waitUntilFundedTimeoutMs,

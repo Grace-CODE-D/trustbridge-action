@@ -370,6 +370,50 @@ jobs:
 
 ---
 
+## Soroban contract registry lookup
+
+For programs that maintain an on-chain mapping of GitHub usernames to Stellar G-addresses via the `trustbridge-contract` registry, TrustBridge can resolve the address automatically before running Horizon checks.
+
+### How it works
+
+1. When `soroban_rpc_url`, `contract_id`, and `github_username` are all set, TrustBridge calls `get_address(github_username)` on the registry contract via `simulateTransaction`.
+2. If the username is registered, the resolved G-address is used for all subsequent Horizon checks instead of `stellar_address_input`.
+3. If the username is **not registered**, or the registry is **unavailable** (rate-limited, outage, timeout), TrustBridge logs a warning and falls back to `stellar_address_input` — existing workflows are never broken.
+
+### Configuration
+
+| Input | Required | Default | Description |
+| ----- | -------- | ------- | ----------- |
+| `soroban_rpc_url` | No | `''` | Soroban RPC endpoint (e.g. `https://soroban-testnet.stellar.org`). Leave empty to skip registry lookup. |
+| `contract_id` | No | `''` | C-address of the `trustbridge-contract` registry. Required when `soroban_rpc_url` is set. |
+| `github_username` | No | `''` | GitHub username to resolve. Falls back to `stellar_address_input` if not registered. |
+
+### Example — resolve assignee address from registry
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    github_username: ${{ github.event.assignee.login }}
+    soroban_rpc_url: https://soroban-testnet.stellar.org
+    contract_id: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
+    stellar_address_input: ${{ steps.addr.outputs.value }}  # fallback
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Rollout instructions
+
+1. Deploy the `trustbridge-contract` registry to your target Stellar network.
+2. Register contributor GitHub usernames via the contract's `set_address` function.
+3. Add `soroban_rpc_url`, `contract_id`, and `github_username` to your workflow.
+4. Keep `stellar_address_input` set as a fallback for contributors not yet registered.
+5. Gradually migrate contributors to the registry; remove `stellar_address_input` once all are registered.
+
+### Backward compatibility
+
+All three inputs (`soroban_rpc_url`, `contract_id`, `github_username`) default to empty string. Existing workflows that do not set them are completely unaffected — the registry lookup is skipped entirely and the action behaves identically to previous versions.
+
+---
+
 ## Pinning versions
 
 | Reference | When to use |

@@ -158,31 +158,28 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  check_ledger_freshness:
+  soroban_rpc_url:
     description: >-
-      Enable the ledger freshness guard. When true, TrustBridge fetches the
-      Horizon root endpoint before running account checks and warns (or fails,
-      if ledger_freshness_fail_on_stale is true) when the latest ingested
-      ledger is older than max_ledger_lag_seconds. Disabled by default to
-      preserve backward compatibility.
+      Soroban RPC endpoint URL used to query the trustbridge-contract on-chain
+      registry (e.g. https://soroban-testnet.stellar.org). Leave empty to skip
+      the registry lookup and rely solely on stellar_address_input.
     required: false
-    default: 'false'
-  max_ledger_lag_seconds:
+    default: ''
+  contract_id:
     description: >-
-      Maximum allowed age of the Horizon node's latest ingested ledger in
-      seconds. If history_latest_ledger_closed_at on the Horizon root is
-      older than this value, the freshness guard fires. Default 60 s
-      (approximately 10 Stellar ledger close cycles at ~5–6 s each).
-      Only used when check_ledger_freshness is true.
+      Contract ID (C-address) of the trustbridge-contract registry. Required
+      when soroban_rpc_url is set. Ignored when soroban_rpc_url is empty.
     required: false
-    default: '60'
-  ledger_freshness_fail_on_stale:
+    default: ''
+  github_username:
     description: >-
-      When true, a stale Horizon response causes the action to hard-fail
-      (core.setFailed) instead of warning. Default false (warn only).
-      Only used when check_ledger_freshness is true.
+      GitHub username to resolve via the trustbridge-contract registry.
+      When provided alongside soroban_rpc_url and contract_id, the action
+      looks up the on-chain mapping first and uses the resolved G-address
+      instead of stellar_address_input. Falls back to stellar_address_input
+      if the registry is unavailable or the username is not registered.
     required: false
-    default: 'false'
+    default: ''
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
