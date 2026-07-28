@@ -1,4 +1,4 @@
-import { HorizonError, isCreditBalance,
+import { HorizonError, HorizonRateLimitError, isCreditBalance,
   isRetryableStatus,
   parseRetryAfterMs,
   parseHorizonBalance, normalizeHorizonUrl } from '../src/horizon';
@@ -384,6 +384,45 @@ describe('Horizon debug log redaction', () => {
         global.setTimeout = origSetTimeout;
         jest.restoreAllMocks();
         restore();
+      }
+    });
+
+    it('throws HorizonRateLimitError if Retry-After exceeds max delay per retry', async () => {
+      const errBody = { type: 'rate_limit', title: 'Too Many Requests', status: 429, detail: `Rate limited` };
+      const mock = makeMockFetch(async () => makeMockResponse(429, errBody, { headers: { 'retry-after': '120' } })); // 120s = 120000ms
+      
+      await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        maxRetries: 2,
+        cacheTtlMs: 0,
+        retryMaxDelayMs: 60000,
+        fetchFn: mock,
+      })).rejects.toThrow(HorizonRateLimitError);
+    });
+
+    it('throws HorizonRateLimitError if total wait exceeds max total wait', async () => {
+      const errBody = { type: 'rate_limit', title: 'Too Many Requests', status: 429, detail: `Rate limited` };
+      let callCount = 0;
+      const mock = makeMockFetch(async () => {
+        callCount += 1;
+        // Two consecutive 429s, each asking to wait 40 seconds (40000ms).
+        return makeMockResponse(429, errBody, { headers: { 'retry-after': '40' } });
+      });
+      const origSetTimeout = global.setTimeout;
+      global.setTimeout = ((callback: Parameters<typeof setTimeout>[0]) =>
+        origSetTimeout(callback, 0)) as typeof setTimeout;
+
+      try {
+        await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 2,
+          cacheTtlMs: 0,
+          retryMaxDelayMs: 60000, // per-retry cap is generous enough
+          retryMaxTotalWaitMs: 70000, // but total wait cap will be exceeded on 2nd retry (40k + 40k = 80k > 70k)
+          fetchFn: mock,
+        })).rejects.toThrow(HorizonRateLimitError);
+        // It should have made 2 calls (first attempt + 1 retry, before failing before 2nd retry)
+        expect(mock).toHaveBeenCalledTimes(2);
+      } finally {
+        global.setTimeout = origSetTimeout;
       }
     });
   });

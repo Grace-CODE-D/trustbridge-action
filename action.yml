@@ -133,6 +133,14 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  retry_max_delay_ms:
+    description: 'Maximum sleep per retry (ms). Overrides Retry-After if it exceeds this cap.'
+    required: false
+    default: '60000'
+  retry_max_total_wait_ms:
+    description: 'Maximum total wait time across all retries (ms). Fails if exceeded.'
+    required: false
+    default: '120000'
 
 outputs:
   trustline_exists:

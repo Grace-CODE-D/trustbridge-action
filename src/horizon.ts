@@ -46,6 +46,13 @@ export class HorizonError extends Error {
   }
 }
 
+export class HorizonRateLimitError extends HorizonError {
+  constructor(message: string, public readonly retryAfterMs?: number) {
+    super(message, 429, true);
+    this.name = 'HorizonRateLimitError';
+  }
+}
+
 type FetchLike = (
   url: string | import('node-fetch').Request,
   init?: import('node-fetch').RequestInit,
@@ -60,11 +67,15 @@ export interface FetchAccountOptions {
   cacheTtlMs?: number;
   cache?: SimpleCache;
   fetchFn?: FetchLike;
+  retryMaxDelayMs?: number;
+  retryMaxTotalWaitMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_CACHE_TTL_MS = 60_000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 60_000;
+const DEFAULT_RETRY_MAX_TOTAL_WAIT_MS = 120_000;
 
 export function normalizeHorizonUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, '');
@@ -164,12 +175,15 @@ async function fetchAccountOnce(
   timeoutMs: number,
   maxRetries: number,
   endpointKind: 'primary' | 'fallback',
+  retryMaxDelayMs: number,
+  retryMaxTotalWaitMs: number,
 ): Promise<FetchOnceResult> {
   const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
   const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
   const safeUrlForLog = redactHorizonUrl(url);
 
   let attempt = 0;
+  let totalWaitMs = 0;
   let lastError: Error | undefined;
 
   while (attempt <= maxRetries) {
@@ -254,6 +268,16 @@ async function fetchAccountOnce(
         if (retryable && attempt < maxRetries) {
           const retryAfterHeader = parseRetryAfterMs(response);
           const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
+          
+          if (retryAfter > retryMaxDelayMs || totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
+             throw new HorizonRateLimitError(
+               `Horizon rate limit exceeded (Retry-After ${retryAfter}ms exceeds cap of ${retryMaxDelayMs}ms per-retry or ${retryMaxTotalWaitMs}ms total). Please try again later.`,
+               retryAfter
+             );
+          }
+          
+          totalWaitMs += retryAfter;
+
           logger.debug('Horizon retry scheduled', safeHorizonContext({
             component: 'horizon',
             stellarAddress,
@@ -338,6 +362,13 @@ async function fetchAccountOnce(
 
       if (attempt < maxRetries) {
         const backoffMs = 1000 * 2 ** attempt;
+        
+        if (backoffMs > retryMaxDelayMs || totalWaitMs + backoffMs > retryMaxTotalWaitMs) {
+          throw lastError;
+        }
+        
+        totalWaitMs += backoffMs;
+
         logger.debug('Horizon transport retry scheduled', safeHorizonContext({
           component: 'horizon',
           stellarAddress,
@@ -392,6 +423,8 @@ export async function fetchAccount(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  const retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+  const retryMaxTotalWaitMs = options.retryMaxTotalWaitMs ?? DEFAULT_RETRY_MAX_TOTAL_WAIT_MS;
   const cache = options.cache ?? defaultCache;
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
   const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
@@ -463,6 +496,8 @@ export async function fetchAccount(
       timeoutMs,
       maxRetries,
       'primary',
+      retryMaxDelayMs,
+      retryMaxTotalWaitMs,
     );
 
     if (cachingEnabled) {
@@ -517,6 +552,8 @@ export async function fetchAccount(
       timeoutMs,
       maxRetries,
       'fallback',
+      retryMaxDelayMs,
+      retryMaxTotalWaitMs,
     );
 
     if (cachingEnabled) {

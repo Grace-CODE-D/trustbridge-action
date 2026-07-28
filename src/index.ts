@@ -57,6 +57,8 @@ async function run(): Promise<void> {
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
+  const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms'), 60000, { min: 1000 });
+  const retryMaxTotalWaitMs = parseNumberInput(core.getInput('retry_max_total_wait_ms'), 120000, { min: 1000 });
   const githubToken = core.getInput('github_token', { required: true });
 
   // SEP-0007 wallet deep links (Issue #44)
@@ -152,6 +154,8 @@ async function run(): Promise<void> {
     fallbackUrls,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
+    retryMaxDelayMs,
+    retryMaxTotalWaitMs,
   };
 
   try {
