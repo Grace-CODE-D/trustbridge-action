@@ -1,9 +1,14 @@
 import * as core from '@actions/core';
-
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { ValidationResult, CheckConfig, buildValidationGate } from './checks';
+import { ValidationResult } from './checks';
+import {
+  BuildValidationArtifactOptions,
+  ValidationArtifact,
+  ValidationDelta,
+  buildValidationArtifact,
+} from './delta';
 
 export interface ActionOutputs {
   // Legacy outputs — kept for backward compatibility
@@ -52,27 +57,45 @@ export function setValidationOutputs(
   }
 }
 
-export function writeValidationJson(
-  result: ValidationResult,
-  config: CheckConfig & { stellarAddress: string },
-  outputPath: string,
-): void {
-  const payload = {
-    timestamp: new Date().toISOString(),
-    address: config.stellarAddress,
-    asset: {
-      code: config.assetCode,
-      issuer: config.assetIssuer,
-    },
-    horizonUrl: config.horizonUrl,
-    readiness: buildValidationGate(result),
-    checks: result.checks,
-    balances: {
-      xlm: result.xlmBalance,
-    },
+export interface WriteValidationJsonOptions {
+  result: ValidationResult;
+  stellarAddress: string;
+  assetCode: string;
+  assetIssuer: string;
+  horizonUrl?: string;
+  outputPath: string;
+  delta?: ValidationDelta | null;
+  privacyMode?: boolean;
+  workspaceRoot?: string;
+}
+
+/**
+ * Write a structured `validation.json` artifact for security review and
+ * cross-run delta comparison. Never includes `github_token` or auth headers.
+ */
+export function writeValidationJson(options: WriteValidationJsonOptions): ValidationArtifact {
+  const buildOpts: BuildValidationArtifactOptions = {
+    result: options.result,
+    stellarAddress: options.stellarAddress,
+    assetCode: options.assetCode,
+    assetIssuer: options.assetIssuer,
+    horizonUrl: options.horizonUrl,
+    delta: options.delta,
+    privacyMode: options.privacyMode,
   };
 
-  const absolutePath = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), outputPath);
+  const payload = buildValidationArtifact(buildOpts);
+  const root = options.workspaceRoot || process.env.GITHUB_WORKSPACE || process.cwd();
+  const absolutePath = path.isAbsolute(options.outputPath)
+    ? options.outputPath
+    : path.resolve(root, options.outputPath);
+
+  const dir = path.dirname(absolutePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
   fs.writeFileSync(absolutePath, JSON.stringify(payload, null, 2), 'utf-8');
   core.info(`Wrote structured validation artifact to ${absolutePath}`);
+  return payload;
 }

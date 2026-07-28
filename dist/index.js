@@ -34539,6 +34539,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35066,6 +35129,7 @@ const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const links_1 = __nccwpck_require__(3346);
 const markdown_1 = __nccwpck_require__(3758);
+const delta_1 = __nccwpck_require__(1493);
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -35110,13 +35174,9 @@ function formatCommentBody(result, config) {
     for (const check of result.checks) {
         lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
-    // Onboarding checklist (Issue #154) — default on; omit when explicitly disabled.
-    const showOnboardingChecklist = config.onboardingChecklist !== false;
-    if (showOnboardingChecklist) {
-        lines.push('', (0, markdown_1.buildOnboardingChecklist)(result, {
-            assetCode: config.assetCode,
-            minXlmReserve: config.minXlmReserve,
-        }));
+    const deltaSection = (0, delta_1.formatDeltaMarkdown)(config.delta);
+    if (deltaSection) {
+        lines.push('', deltaSection);
     }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
@@ -35486,6 +35546,317 @@ async function checkLedgerFreshness(horizonUrl, options = {}) {
         message: `Horizon is fresh: latest ledger closed ${lagSeconds.toFixed(1)}s ago (threshold: ${maxLagSeconds}s, ledger #${latestLedger ?? 'unknown'}).`,
         status: 'ok',
     };
+}
+
+
+/***/ }),
+
+/***/ 1493:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Delta vs previous workflow-run validation artifact (Security / Issue #148).
+ *
+ * Consumers retain `validation.json` across runs (upload-artifact + download
+ * on the next cron/dispatch). This module compares the prior snapshot to the
+ * current check results and produces a structured delta for comments and JSON.
+ *
+ * Strategy tradeoffs (documented also in docs/USAGE.md):
+ * - **Local artifact path (recommended):** workflow downloads the previous
+ *   run's artifact to `previous_validation_path`. No extra API scopes; explicit
+ *   matching; fails soft when the file is absent (first run).
+ * - **GitHub Actions API from inside the action:** would auto-discover the
+ *   prior run's artifact, but needs `actions: read`, is brittle around
+ *   artifact names / retention / matrix jobs, and couples the action to
+ *   Actions API rate limits. Not implemented here.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.VALIDATION_ARTIFACT_SCHEMA_VERSION = void 0;
+exports.hashAddressForPrivacy = hashAddressForPrivacy;
+exports.privacyMaskAddress = privacyMaskAddress;
+exports.stripSensitiveFields = stripSensitiveFields;
+exports.computeValidationDelta = computeValidationDelta;
+exports.loadPreviousValidationArtifact = loadPreviousValidationArtifact;
+exports.buildValidationArtifact = buildValidationArtifact;
+exports.formatDeltaMarkdown = formatDeltaMarkdown;
+const crypto = __importStar(__nccwpck_require__(6982));
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
+const checks_1 = __nccwpck_require__(2122);
+const logger_1 = __nccwpck_require__(6999);
+exports.VALIDATION_ARTIFACT_SCHEMA_VERSION = '1.0.0';
+/** Keys that must never appear in a validation / delta payload. */
+const FORBIDDEN_SENSITIVE_KEYS = new Set([
+    'github_token',
+    'githubToken',
+    'token',
+    'authorization',
+    'Authorization',
+    'api_key',
+    'apiKey',
+    'password',
+    'secret',
+    'private_key',
+    'privateKey',
+    'passphrase',
+]);
+/**
+ * Hash a Stellar address for privacy-mode JSON artifacts.
+ * Returns `sha256:<16 hex chars>` so payloads stay correlatable without
+ * exposing the raw G-/C-address in retained artifacts or Actions logs.
+ */
+function hashAddressForPrivacy(address) {
+    const digest = crypto.createHash('sha256').update(address.trim()).digest('hex');
+    return `sha256:${digest.slice(0, 16)}`;
+}
+/**
+ * Apply privacy policy to a string that may contain addresses.
+ * When privacyMode is on, addresses are hashed; otherwise first4…last4 redaction.
+ */
+function privacyMaskAddress(address, privacyMode) {
+    if (!address)
+        return address;
+    if (privacyMode)
+        return hashAddressForPrivacy(address);
+    return (0, logger_1.redactStellarAddress)(address);
+}
+/**
+ * Strip forbidden sensitive keys from an arbitrary object tree (defense in depth
+ * when loading a previous artifact that might have been hand-edited).
+ */
+function stripSensitiveFields(value) {
+    if (value === null || value === undefined)
+        return value;
+    if (Array.isArray(value)) {
+        return value.map((item) => stripSensitiveFields(item));
+    }
+    if (typeof value === 'object') {
+        const out = {};
+        for (const [key, child] of Object.entries(value)) {
+            if (FORBIDDEN_SENSITIVE_KEYS.has(key))
+                continue;
+            out[key] = stripSensitiveFields(child);
+        }
+        return out;
+    }
+    return value;
+}
+/**
+ * Compare previous vs current checks by label.
+ * Returns `null` when there is no previous snapshot (first run) — callers
+ * should omit the delta section entirely rather than erroring.
+ */
+function computeValidationDelta(previous, current) {
+    if (!previous || !Array.isArray(previous.checks) || previous.checks.length === 0) {
+        return null;
+    }
+    const previousByLabel = new Map();
+    for (const check of previous.checks) {
+        if (check && typeof check.label === 'string') {
+            previousByLabel.set(check.label, Boolean(check.passed));
+        }
+    }
+    const newlyPassed = [];
+    const newlyFailed = [];
+    const unchanged = [];
+    for (const check of current.checks) {
+        const prior = previousByLabel.get(check.label);
+        if (prior === undefined) {
+            // New check label not present previously — treat as newly passed/failed.
+            if (check.passed)
+                newlyPassed.push(check.label);
+            else
+                newlyFailed.push(check.label);
+            continue;
+        }
+        if (prior === check.passed) {
+            unchanged.push(check.label);
+        }
+        else if (check.passed && !prior) {
+            newlyPassed.push(check.label);
+        }
+        else if (!check.passed && prior) {
+            newlyFailed.push(check.label);
+        }
+    }
+    return {
+        previousTimestamp: previous.timestamp,
+        newlyPassed,
+        newlyFailed,
+        unchanged,
+        improved: newlyPassed.length > 0,
+        regressed: newlyFailed.length > 0,
+    };
+}
+/**
+ * Load a previous `validation.json` from disk. Returns `null` (no throw) when
+ * the path is empty, the file is missing, or JSON is unreadable/invalid —
+ * first-run and artifact-miss cases must never fail the action.
+ */
+function loadPreviousValidationArtifact(previousPath, workspaceRoot) {
+    const trimmed = (previousPath || '').trim();
+    if (!trimmed)
+        return null;
+    const root = workspaceRoot || process.env.GITHUB_WORKSPACE || process.cwd();
+    const absolutePath = path.isAbsolute(trimmed) ? trimmed : path.resolve(root, trimmed);
+    try {
+        if (!fs.existsSync(absolutePath)) {
+            return null;
+        }
+        const raw = fs.readFileSync(absolutePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object')
+            return null;
+        const cleaned = stripSensitiveFields(parsed);
+        if (!Array.isArray(cleaned.checks))
+            return null;
+        return {
+            schemaVersion: cleaned.schemaVersion || exports.VALIDATION_ARTIFACT_SCHEMA_VERSION,
+            timestamp: typeof cleaned.timestamp === 'string' ? cleaned.timestamp : '',
+            address: typeof cleaned.address === 'string' ? cleaned.address : '',
+            asset: {
+                code: cleaned.asset?.code ?? '',
+                issuer: cleaned.asset?.issuer ?? '',
+            },
+            horizonUrl: cleaned.horizonUrl,
+            readiness: cleaned.readiness ?? {
+                ready: false,
+                totalChecks: cleaned.checks.length,
+                passedChecks: cleaned.checks.filter((c) => c.passed).length,
+                failedChecks: cleaned.checks.filter((c) => !c.passed).length,
+                failedLabels: cleaned.checks.filter((c) => !c.passed).map((c) => c.label),
+            },
+            checks: cleaned.checks.map((c) => ({
+                label: c.label,
+                passed: Boolean(c.passed),
+                detail: typeof c.detail === 'string' ? (0, logger_1.redactString)(c.detail) : '',
+            })),
+            balances: {
+                xlm: cleaned.balances?.xlm ?? 'unknown',
+            },
+            delta: cleaned.delta,
+            privacyMode: cleaned.privacyMode,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Build the validation.json payload. Applies privacy masking to addresses
+ * and strips any accidental sensitive fields. Never embeds tokens.
+ */
+function buildValidationArtifact(options) {
+    const privacyMode = Boolean(options.privacyMode);
+    // Full addresses by default (auditing). Privacy mode hashes them for retained artifacts.
+    const address = privacyMode
+        ? privacyMaskAddress(options.stellarAddress, true)
+        : options.stellarAddress;
+    const issuer = privacyMode
+        ? privacyMaskAddress(options.assetIssuer, true)
+        : options.assetIssuer;
+    const checks = options.result.checks.map((c) => ({
+        label: c.label,
+        passed: c.passed,
+        detail: privacyMode
+            ? (0, logger_1.redactString)(c.detail).replace(/\b([GC][A-Z2-7]{55})\b/g, (m) => hashAddressForPrivacy(m))
+            : c.detail,
+    }));
+    const artifact = {
+        schemaVersion: exports.VALIDATION_ARTIFACT_SCHEMA_VERSION,
+        timestamp: options.timestamp ?? new Date().toISOString(),
+        address,
+        asset: {
+            code: options.assetCode,
+            issuer,
+        },
+        horizonUrl: options.horizonUrl
+            ? privacyMode
+                ? (0, logger_1.redactString)(options.horizonUrl).replace(/\b([GC][A-Z2-7]{55})\b/g, (m) => hashAddressForPrivacy(m))
+                : options.horizonUrl
+            : undefined,
+        readiness: (0, checks_1.buildValidationGate)(options.result),
+        checks,
+        balances: {
+            xlm: options.result.xlmBalance,
+        },
+        privacyMode: privacyMode || undefined,
+    };
+    if (options.delta) {
+        artifact.delta = options.delta;
+    }
+    return stripSensitiveFields(artifact);
+}
+/**
+ * Render a Markdown delta section for the issue comment.
+ * Returns an empty string when there is no delta (first run).
+ */
+function formatDeltaMarkdown(delta) {
+    if (!delta)
+        return '';
+    const lines = [
+        '### Delta vs previous run',
+        '',
+    ];
+    if (delta.previousTimestamp) {
+        lines.push(`_Compared to previous artifact from \`${delta.previousTimestamp}\`._`, '');
+    }
+    if (delta.newlyPassed.length === 0 && delta.newlyFailed.length === 0) {
+        lines.push('- No check status changes since the previous run.');
+    }
+    else {
+        if (delta.newlyPassed.length > 0) {
+            lines.push(`- ✅ **Newly passed:** ${delta.newlyPassed.join(', ')}`);
+        }
+        if (delta.newlyFailed.length > 0) {
+            lines.push(`- ❌ **Newly failed:** ${delta.newlyFailed.join(', ')}`);
+        }
+    }
+    if (delta.unchanged.length > 0) {
+        lines.push(`- Unchanged: ${delta.unchanged.length} check(s)`);
+    }
+    if (delta.regressed) {
+        lines.push('', '_Regression detected — one or more checks that previously passed now fail._');
+    }
+    else if (delta.improved && !delta.regressed) {
+        lines.push('', '_Improvement — checks newly passing with no new failures._');
+    }
+    return lines.join('\n');
 }
 
 
@@ -36180,47 +36551,7 @@ const outputs_1 = __nccwpck_require__(7729);
 const logger_1 = __nccwpck_require__(6999);
 const metrics_1 = __nccwpck_require__(5670);
 const validation_1 = __nccwpck_require__(4344);
-/**
- * Resolve the GitHub assignee login from the current Actions event payload.
- * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
- */
-function resolveAssigneeLoginFromContext() {
-    const payload = github.context.payload;
-    const fromEvent = payload.assignee?.login?.trim();
-    if (fromEvent) {
-        return fromEvent;
-    }
-    const assignees = payload.issue?.assignees;
-    if (Array.isArray(assignees)) {
-        for (const entry of assignees) {
-            const login = entry?.login?.trim();
-            if (login) {
-                return login;
-            }
-        }
-    }
-    return undefined;
-}
-/**
- * Resolve the Stellar G-address to validate: either from assignee_address_map
- * (GitHub username → address roster) or from stellar_address_input.
- */
-function resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw) {
-    const mapRaw = assigneeAddressMapRaw.trim();
-    if (mapRaw) {
-        const map = (0, inputs_1.parseAssigneeAddressMap)(mapRaw, {
-            workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
-        });
-        const assigneeLogin = resolveAssigneeLoginFromContext();
-        return (0, inputs_1.resolveAddressFromAssigneeMap)(map, assigneeLogin);
-    }
-    const direct = stellarAddressInput.trim();
-    if (direct) {
-        return direct;
-    }
-    throw new Error('Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
-        '(JSON / file path mapping GitHub usernames to G-addresses).');
-}
+const delta_1 = __nccwpck_require__(1493);
 async function run() {
     const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
     const assetCode = core.getInput('asset_code') || 'USDC';
@@ -36258,6 +36589,11 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Security artifacts / delta vs previous run (Issue #148)
+    const writeValidationJsonEnabled = (0, inputs_1.parseBooleanInput)(core.getInput('write_validation_json'), false);
+    const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
+    const previousValidationPath = core.getInput('previous_validation_path') || '';
+    const privacyMode = (0, inputs_1.parseBooleanInput)(core.getInput('privacy_mode'), false);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -36277,7 +36613,6 @@ async function run() {
         waitUntilFundedIntervalMs,
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
-        trustbridgeConfigPath,
         sep0007DeepLinks,
     });
     if (logInputs) {
@@ -36371,35 +36706,13 @@ async function run() {
         return;
     }
     (0, outputs_1.setValidationOutputs)(result);
-    // Multi-asset checks (Issue #4)
-    let multiAssetResults;
-    if (assetsJsonRaw.trim()) {
-        const parsedAssets = (0, assets_1.dedupeAssets)((0, assets_1.parseAssetsJson)(assetsJsonRaw));
-        if (result.accountFunded) {
-            // We need the account object — re-use the result path by fetching again
-            // only if we have a funded account. Since we already have the account
-            // data embedded in the result path, we run checks against the same
-            // account by fetching once more (cached if use_cache is on).
-            try {
-                const accountForMulti = await (0, horizon_1.fetchAccount)(horizonUrl, resolvedAddress, horizonOptions);
-                ({ results: multiAssetResults } = (0, checks_1.runMultiAssetChecks)(accountForMulti, parsedAssets));
-            }
-            catch {
-                // If re-fetch fails, fall back to running checks with what we know
-                multiAssetResults = parsedAssets.map((a) => ({
-                    assetCode: a.assetCode,
-                    assetIssuer: a.assetIssuer,
-                    trustlineExists: false,
-                }));
-            }
-        }
-        else {
-            multiAssetResults = parsedAssets.map((a) => ({
-                assetCode: a.assetCode,
-                assetIssuer: a.assetIssuer,
-                trustlineExists: false,
-            }));
-        }
+    const previousArtifact = (0, delta_1.loadPreviousValidationArtifact)(previousValidationPath);
+    const delta = (0, delta_1.computeValidationDelta)(previousArtifact, result);
+    if (!previousArtifact && previousValidationPath.trim()) {
+        core.info('No previous validation artifact found — omitting delta (first run or missing download).');
+    }
+    else if (delta) {
+        core.info(`Validation delta vs previous run: newlyPassed=${delta.newlyPassed.length}, newlyFailed=${delta.newlyFailed.length}, unchanged=${delta.unchanged.length}`);
     }
     const commentBody = (0, comment_1.formatCommentBody)(result, {
         ...checkConfig,
@@ -36412,6 +36725,7 @@ async function run() {
         waitUntilFundedIntervalMs,
         sep0007DeepLinks,
         sep0007OriginDomain,
+        delta,
     });
     let commentUrl;
     try {
@@ -36428,9 +36742,18 @@ async function run() {
         core.warning(`Failed to post issue comment: ${message}`);
     }
     (0, outputs_1.setValidationOutputs)(result, commentUrl);
-    if (shouldWriteValidationJson) {
+    if (writeValidationJsonEnabled) {
         try {
-            (0, outputs_1.writeValidationJson)(result, { ...checkConfig, stellarAddress }, validationJsonPath);
+            (0, outputs_1.writeValidationJson)({
+                result,
+                stellarAddress,
+                assetCode: normalizedAsset.assetCode,
+                assetIssuer: normalizedAsset.assetIssuer,
+                horizonUrl,
+                outputPath: validationJsonPath,
+                delta,
+                privacyMode,
+            });
         }
         catch (error) {
             core.warning(`Failed to write validation.json: ${(0, inputs_1.getErrorMessage)(error)}`);
@@ -37364,7 +37687,7 @@ exports.writeValidationJson = writeValidationJson;
 const core = __importStar(__nccwpck_require__(7484));
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
-const checks_1 = __nccwpck_require__(2122);
+const delta_1 = __nccwpck_require__(1493);
 function toActionOutputs(result, commentUrl) {
     return {
         // Legacy outputs
@@ -37382,326 +37705,32 @@ function setValidationOutputs(result, commentUrl, multiAssetResults) {
         core.setOutput(name, value);
     }
 }
-function writeValidationJson(result, config, outputPath) {
-    const payload = {
-        timestamp: new Date().toISOString(),
-        address: config.stellarAddress,
-        asset: {
-            code: config.assetCode,
-            issuer: config.assetIssuer,
-        },
-        horizonUrl: config.horizonUrl,
-        readiness: (0, checks_1.buildValidationGate)(result),
-        checks: result.checks,
-        balances: {
-            xlm: result.xlmBalance,
-        },
+/**
+ * Write a structured `validation.json` artifact for security review and
+ * cross-run delta comparison. Never includes `github_token` or auth headers.
+ */
+function writeValidationJson(options) {
+    const buildOpts = {
+        result: options.result,
+        stellarAddress: options.stellarAddress,
+        assetCode: options.assetCode,
+        assetIssuer: options.assetIssuer,
+        horizonUrl: options.horizonUrl,
+        delta: options.delta,
+        privacyMode: options.privacyMode,
     };
-    const absolutePath = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), outputPath);
+    const payload = (0, delta_1.buildValidationArtifact)(buildOpts);
+    const root = options.workspaceRoot || process.env.GITHUB_WORKSPACE || process.cwd();
+    const absolutePath = path.isAbsolute(options.outputPath)
+        ? options.outputPath
+        : path.resolve(root, options.outputPath);
+    const dir = path.dirname(absolutePath);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
     fs.writeFileSync(absolutePath, JSON.stringify(payload, null, 2), 'utf-8');
     core.info(`Wrote structured validation artifact to ${absolutePath}`);
-}
-
-
-/***/ }),
-
-/***/ 2334:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-/**
- * Advanced retry and rate-limiting strategies for resilient API interactions.
- *
- * This module also exposes a local CLI check command that exercises the full
- * resilience pipeline (backoff, rate-limiting, circuit-breaking) against a
- * live or stubbed Horizon endpoint without requiring a GitHub Actions context.
- *
- * Usage (compiled binary or `ts-node`):
- *   node dist/resilience.js check --address G... [--horizon-url URL] [--timeout-ms N]
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.CircuitBreaker = exports.RateLimiter = exports.DEFAULT_RETRY_POLICY = exports.RateBudgetTracker = exports.RateBudgetExhaustedError = void 0;
-exports.calculateBackoffDelay = calculateBackoffDelay;
-exports.addJitter = addJitter;
-exports.sleep = sleep;
-exports.retryWithBackoff = retryWithBackoff;
-exports.runCliCheck = runCliCheck;
-// ---------------------------------------------------------------------------
-// Rate Budget Tracker
-// ---------------------------------------------------------------------------
-class RateBudgetExhaustedError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = 'RateBudgetExhaustedError';
-        this.statusCode = 0;
-        this.retryable = false;
-    }
-}
-exports.RateBudgetExhaustedError = RateBudgetExhaustedError;
-class RateBudgetTracker {
-    constructor(maxRequests) {
-        this.maxRequests = maxRequests;
-        this.count = 0;
-    }
-    /**
-     * Records a request. Throws RateBudgetExhaustedError if the budget is exceeded.
-     * If maxRequests is 0, the budget is considered unlimited.
-     */
-    recordRequest() {
-        if (this.maxRequests > 0) {
-            this.count++;
-            if (this.count > this.maxRequests) {
-                throw new RateBudgetExhaustedError(`Rate budget exhausted: exceeded ${this.maxRequests} maximum Horizon requests per run.`);
-            }
-        }
-    }
-    get requestsMade() {
-        return this.count;
-    }
-}
-exports.RateBudgetTracker = RateBudgetTracker;
-/**
- * Default retry policy for API calls.
- */
-exports.DEFAULT_RETRY_POLICY = {
-    maxRetries: 3,
-    initialDelayMs: 1000,
-    maxDelayMs: 30000,
-    backoffMultiplier: 2,
-    timeoutMs: 15000,
-};
-/**
- * Calculate the delay for a retry attempt using exponential backoff.
- */
-function calculateBackoffDelay(attempt, policy) {
-    const delay = policy.initialDelayMs * Math.pow(policy.backoffMultiplier, attempt);
-    return Math.min(delay, policy.maxDelayMs);
-}
-/**
- * Add random jitter to a delay to prevent thundering herd.
- */
-function addJitter(delayMs, jitterPercent = 10) {
-    const jitter = delayMs * (jitterPercent / 100);
-    const randomJitter = (Math.random() - 0.5) * 2 * jitter;
-    return Math.max(0, delayMs + randomJitter);
-}
-/**
- * Sleep for a given duration.
- */
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-/**
- * Simple rate limiter to throttle requests.
- */
-class RateLimiter {
-    /**
-     * Create a rate limiter with token bucket algorithm.
-     * @param capacity Maximum number of tokens (requests allowed per refill window)
-     * @param refillRatePerSecond How many tokens to refill per second
-     */
-    constructor(capacity, refillRatePerSecond) {
-        this.capacity = capacity;
-        this.refillRatePerSecond = refillRatePerSecond;
-        this.tokens = capacity;
-        this.lastRefillTime = Date.now();
-    }
-    /**
-     * Check if a request is allowed, consuming a token if so.
-     */
-    tryConsume(tokensNeeded = 1) {
-        this.refill();
-        if (this.tokens >= tokensNeeded) {
-            this.tokens -= tokensNeeded;
-            return true;
-        }
-        return false;
-    }
-    /**
-     * Get the number of milliseconds to wait before trying again.
-     */
-    waitTimeMs(tokensNeeded = 1) {
-        this.refill();
-        if (this.tokens >= tokensNeeded) {
-            return 0;
-        }
-        const deficit = tokensNeeded - this.tokens;
-        return (deficit / this.refillRatePerSecond) * 1000;
-    }
-    /**
-     * Refill tokens based on elapsed time.
-     */
-    refill() {
-        const now = Date.now();
-        const elapsedSeconds = (now - this.lastRefillTime) / 1000;
-        const tokensToAdd = elapsedSeconds * this.refillRatePerSecond;
-        this.tokens = Math.min(this.capacity, this.tokens + tokensToAdd);
-        this.lastRefillTime = now;
-    }
-    /**
-     * Get current token count.
-     */
-    getAvailableTokens() {
-        this.refill();
-        return Math.floor(this.tokens);
-    }
-    /**
-     * Reset the rate limiter to full capacity.
-     */
-    reset() {
-        this.tokens = this.capacity;
-        this.lastRefillTime = Date.now();
-    }
-}
-exports.RateLimiter = RateLimiter;
-/**
- * Execute a function with exponential backoff retry logic.
- */
-async function retryWithBackoff(fn, policy = exports.DEFAULT_RETRY_POLICY, shouldRetry = () => true) {
-    let lastError;
-    for (let attempt = 0; attempt <= policy.maxRetries; attempt++) {
-        try {
-            return await fn();
-        }
-        catch (error) {
-            lastError = error;
-            if (attempt >= policy.maxRetries) {
-                throw error;
-            }
-            if (!shouldRetry(error, attempt)) {
-                throw error;
-            }
-            const delayMs = calculateBackoffDelay(attempt, policy);
-            const delayWithJitter = addJitter(delayMs);
-            await sleep(delayWithJitter);
-        }
-    }
-    throw lastError;
-}
-// ---------------------------------------------------------------------------
-// Circuit breaker
-// ---------------------------------------------------------------------------
-/**
- * Simple circuit-breaker that wraps any async function.
- *
- * - CLOSED  → requests flow normally; failures are counted.
- * - OPEN    → requests are rejected immediately until `resetTimeoutMs` passes.
- * - HALF    → one probe is allowed; if it succeeds the breaker closes again.
- */
-class CircuitBreaker {
-    constructor(failureThreshold = 3, resetTimeoutMs = 30000) {
-        this.failureThreshold = failureThreshold;
-        this.resetTimeoutMs = resetTimeoutMs;
-        this.state = 'CLOSED';
-        this.failureCount = 0;
-        this.lastFailureTime = 0;
-    }
-    getState() {
-        return this.state;
-    }
-    /** Reset to closed state (e.g. for test isolation). */
-    reset() {
-        this.state = 'CLOSED';
-        this.failureCount = 0;
-        this.lastFailureTime = 0;
-    }
-    async execute(fn) {
-        if (this.state === 'OPEN') {
-            const elapsed = Date.now() - this.lastFailureTime;
-            if (elapsed < this.resetTimeoutMs) {
-                throw new Error(`Circuit breaker is OPEN — waiting ${this.resetTimeoutMs - elapsed}ms before retry`);
-            }
-            this.state = 'HALF';
-        }
-        try {
-            const result = await fn();
-            if (this.state === 'HALF' || this.failureCount > 0) {
-                // Successful probe: close the circuit.
-                this.state = 'CLOSED';
-                this.failureCount = 0;
-            }
-            return result;
-        }
-        catch (error) {
-            this.failureCount++;
-            this.lastFailureTime = Date.now();
-            if (this.failureCount >= this.failureThreshold) {
-                this.state = 'OPEN';
-            }
-            throw error;
-        }
-    }
-}
-exports.CircuitBreaker = CircuitBreaker;
-/**
- * Run a local CLI check against a Horizon endpoint.
- *
- * The check exercises the full resilience pipeline: timeout (via AbortSignal),
- * exponential backoff retries, and optional circuit-breaker integration. It
- * is intentionally side-effect-free (no GitHub Actions core calls) so it can
- * be used in local development, CI smoke tests, or scripting without a
- * GitHub context.
- *
- * @param options  CLI check options (address, horizon URL, timeout, policy).
- * @param fetchFn  Optional fetch override for unit tests (default: global fetch).
- * @returns        A {@link CliCheckResult} with reachability, timing, and retry info.
- *
- * @example
- * ```ts
- * const result = await runCliCheck({
- *   address: 'GABC...XYZ',
- *   horizonUrl: 'https://horizon-testnet.stellar.org',
- *   timeoutMs: 5000,
- * });
- * console.log(result.message);
- * ```
- */
-async function runCliCheck(options, fetchFn = (url, init) => fetch(url, init)) {
-    const horizonUrl = options.horizonUrl ?? 'https://horizon.stellar.org';
-    const policy = {
-        ...exports.DEFAULT_RETRY_POLICY,
-        timeoutMs: options.timeoutMs ?? exports.DEFAULT_RETRY_POLICY.timeoutMs,
-        ...options.retryPolicy,
-    };
-    const accountUrl = `${horizonUrl.replace(/\/$/, '')}/accounts/${options.address}`;
-    const startMs = Date.now();
-    let retries = 0;
-    let statusCode;
-    try {
-        await retryWithBackoff(async () => {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
-            try {
-                const response = await fetchFn(accountUrl, { signal: controller.signal });
-                statusCode = response.status;
-                // Only retry on server-side transient errors.
-                if (response.status === 429 || (response.status >= 500 && response.status !== 503)) {
-                    throw new Error(`Transient HTTP ${response.status} — retrying`);
-                }
-                // 404 = not found, not a transient error.
-            }
-            finally {
-                clearTimeout(timer);
-            }
-        }, policy, (_error, attempt) => {
-            retries = attempt + 1;
-            return true;
-        });
-    }
-    catch {
-        // Exhausted retries or non-retryable error — fall through to result.
-    }
-    const durationMs = Date.now() - startMs;
-    const reachable = statusCode === 200;
-    const message = reachable
-        ? `Account ${options.address} is reachable on Horizon (${durationMs}ms, ${retries} retries).`
-        : statusCode === 404
-            ? `Account ${options.address} was not found on Horizon (404) — not yet funded.`
-            : statusCode !== undefined
-                ? `Horizon returned HTTP ${statusCode} for ${options.address} (${durationMs}ms, ${retries} retries).`
-                : `Could not reach Horizon at ${horizonUrl} (${durationMs}ms, ${retries} retries).`;
-    return { reachable, statusCode, durationMs, message, retries };
+    return payload;
 }
 
 

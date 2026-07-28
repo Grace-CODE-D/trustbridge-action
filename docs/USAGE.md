@@ -514,6 +514,88 @@ The `validation.json` file contains:
 
 ---
 
+## Security: validation.json and delta vs previous run
+
+TrustBridge can emit a structured `validation.json` artifact and compare it to the **previous workflow run** so auditors see what newly passed or failed between cron revalidations (Issue #148).
+
+### Recommended strategy: retain artifacts between runs
+
+Download the previous run’s artifact into the job, then pass its path as `previous_validation_path`. Always upload the current `validation.json` (even on failure) so the next run can compare.
+
+```yaml
+name: TrustBridge cron revalidation
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      actions: read   # needed only for download-artifact across runs
+    steps:
+      - name: Download previous validation artifact (optional)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: trustbridge-validation
+          path: previous-validation
+          # For cross-run retention, prefer a dedicated store or
+          # gh api + artifact ID lookup; see tradeoffs below.
+
+      - name: TrustBridge check
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ vars.STELLAR_ADDRESS }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          write_validation_json: true
+          validation_json_path: validation.json
+          previous_validation_path: previous-validation/validation.json
+          privacy_mode: true   # hash addresses in the JSON artifact
+
+      - name: Upload validation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustbridge-validation
+          path: validation.json
+          retention-days: 30
+```
+
+**First run:** if `previous_validation_path` is empty or the file is missing, TrustBridge **omits** the delta section and does not fail.
+
+**Delta surfaces:**
+- Issue comment section `### Delta vs previous run` (newly passed / newly failed / unchanged)
+- Optional `delta` object inside `validation.json` when writing is enabled
+
+### Strategy tradeoffs
+
+| Approach | Pros | Cons |
+| -------- | ---- | ---- |
+| **Local artifact path** (`previous_validation_path`) — **recommended** | Explicit matching; no Actions API logic inside the action; soft-fails on first run | Consumer must download/retain artifacts (or copy from a known store) |
+| **GitHub Actions API auto-discover** (not implemented) | Zero wiring for consumers | Needs `actions: read`; brittle around artifact names, matrix jobs, retention; rate limits |
+
+`actions/download-artifact@v4` only downloads artifacts from the *current* workflow run by default. For cron-to-cron comparison, retain the file outside GitHub (S3, gist, commit to an internal branch) **or** use `gh api` / a custom step to fetch the previous successful run’s artifact ID, then pass the downloaded path to `previous_validation_path`.
+
+### Privacy mode
+
+When `privacy_mode: true`, addresses and asset issuers in `validation.json` (and its `delta`) are replaced with `sha256:<16 hex>` digests so retained artifacts and public logs do not expose raw G-/C-addresses. Issue comments still use full addresses for remediation. The artifact **never** includes `github_token` or auth headers.
+
+### JSON schema (high level)
+
+- `schemaVersion`, `timestamp`, `address`, `asset`, `horizonUrl`
+- `readiness` — gate summary (`ready`, counts, failed labels)
+- `checks[]` — `{ label, passed, detail }`
+- `balances.xlm`
+- `delta` — optional `{ newlyPassed, newlyFailed, unchanged, improved, regressed, previousTimestamp }`
+- `privacyMode` — present when hashing was applied
+
+---
+
 ## Pinning versions
 
 | Reference | When to use |

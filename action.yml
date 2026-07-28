@@ -178,14 +178,35 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  onboarding_checklist:
+  write_validation_json:
     description: >-
-      Include an onboarding checklist section in the issue comment with
-      Markdown task-list checkboxes that reflect live validation state
-      (fund account → add trustline → verify XLM balance). Defaults to true.
-      Set to false to omit the checklist block.
+      Write a validation.json artifact to the workspace summarizing check
+      results (and optional delta vs previous run) for security review,
+      auditing, and cron revalidation. Defaults to false.
     required: false
-    default: 'true'
+    default: 'false'
+  validation_json_path:
+    description: >-
+      Path (relative to the workspace, or absolute) where validation.json
+      is written when write_validation_json is true.
+    required: false
+    default: 'validation.json'
+  previous_validation_path:
+    description: >-
+      Path to a previous run's validation.json (typically downloaded via
+      actions/download-artifact). When present and readable, TrustBridge
+      emits a delta (newly passed/failed checks) in the issue comment and
+      in the current validation.json. Missing files are ignored (first run).
+    required: false
+    default: ''
+  privacy_mode:
+    description: >-
+      When true, Stellar addresses and asset issuers in validation.json
+      (including the delta payload) are replaced with sha256 digests so
+      retained artifacts and public Actions logs do not expose raw G-/C-
+      addresses. Issue comments still use full addresses for remediation.
+    required: false
+    default: 'false'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

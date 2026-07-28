@@ -18,7 +18,7 @@ import {
 } from './links';
 import { buildOnboardingChecklist, inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
-import { displayHorizonUrl } from './horizon';
+import { ValidationDelta, formatDeltaMarkdown } from './delta';
 
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
@@ -60,8 +60,12 @@ export interface CommentConfig extends CheckConfig {
    * snapshot so the comment reflects the run that generated it.
    */
   metricsSnapshot?: MetricsCollector;
-  /** Per-asset trustline results from multi-asset validation. */
-  multiAssetResults?: AssetTrustlineResult[];
+  /**
+   * Optional delta vs the previous workflow-run validation artifact.
+   * When present, a "Delta vs previous run" section is rendered after Results.
+   * Omit (or pass null) on the first run so the section is not shown.
+   */
+  delta?: ValidationDelta | null;
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
@@ -113,16 +117,9 @@ export function formatCommentBody(
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
   }
 
-  // Onboarding checklist (Issue #154) — default on; omit when explicitly disabled.
-  const showOnboardingChecklist = config.onboardingChecklist !== false;
-  if (showOnboardingChecklist) {
-    lines.push(
-      '',
-      buildOnboardingChecklist(result, {
-        assetCode: config.assetCode,
-        minXlmReserve: config.minXlmReserve,
-      }),
-    );
+  const deltaSection = formatDeltaMarkdown(config.delta);
+  if (deltaSection) {
+    lines.push('', deltaSection);
   }
 
   lines.push(

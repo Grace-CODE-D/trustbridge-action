@@ -30,63 +30,10 @@ import { setValidationOutputs, writeValidationJson } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
-import { runIssuesPreflight, PreflightError } from './preflight';
-
-/**
- * Resolve the GitHub assignee login from the current Actions event payload.
- * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
- */
-function resolveAssigneeLoginFromContext(): string | undefined {
-  const payload = github.context.payload as {
-    assignee?: { login?: string };
-    issue?: { assignees?: Array<{ login?: string }> };
-  };
-
-  const fromEvent = payload.assignee?.login?.trim();
-  if (fromEvent) {
-    return fromEvent;
-  }
-
-  const assignees = payload.issue?.assignees;
-  if (Array.isArray(assignees)) {
-    for (const entry of assignees) {
-      const login = entry?.login?.trim();
-      if (login) {
-        return login;
-      }
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Resolve the Stellar G-address to validate: either from assignee_address_map
- * (GitHub username → address roster) or from stellar_address_input.
- */
-function resolveStellarAddressInput(
-  stellarAddressInput: string,
-  assigneeAddressMapRaw: string,
-): string {
-  const mapRaw = assigneeAddressMapRaw.trim();
-  if (mapRaw) {
-    const map = parseAssigneeAddressMap(mapRaw, {
-      workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
-    });
-    const assigneeLogin = resolveAssigneeLoginFromContext();
-    return resolveAddressFromAssigneeMap(map, assigneeLogin);
-  }
-
-  const direct = stellarAddressInput.trim();
-  if (direct) {
-    return direct;
-  }
-
-  throw new Error(
-    'Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
-      '(JSON / file path mapping GitHub usernames to G-addresses).',
-  );
-}
+import {
+  computeValidationDelta,
+  loadPreviousValidationArtifact,
+} from './delta';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -150,6 +97,15 @@ async function run(): Promise<void> {
 
   // Onboarding checklist in comments (Issue #154) — default on
   const onboardingChecklist = parseBooleanInput(core.getInput('onboarding_checklist'), true);
+
+  // Security artifacts / delta vs previous run (Issue #148)
+  const writeValidationJsonEnabled = parseBooleanInput(
+    core.getInput('write_validation_json'),
+    false,
+  );
+  const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
+  const previousValidationPath = core.getInput('previous_validation_path') || '';
+  const privacyMode = parseBooleanInput(core.getInput('privacy_mode'), false);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -384,33 +340,16 @@ async function run(): Promise<void> {
 
   setValidationOutputs(result);
 
-  // Multi-asset checks (Issue #4)
-  let multiAssetResults: AssetTrustlineResult[] | undefined;
-  if (assetsJsonRaw.trim()) {
-    const parsedAssets = dedupeAssets(parseAssetsJson(assetsJsonRaw));
-    if (result.accountFunded) {
-      // We need the account object — re-use the result path by fetching again
-      // only if we have a funded account. Since we already have the account
-      // data embedded in the result path, we run checks against the same
-      // account by fetching once more (cached if use_cache is on).
-      try {
-        const accountForMulti = await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
-        ({ results: multiAssetResults } = runMultiAssetChecks(accountForMulti, parsedAssets));
-      } catch {
-        // If re-fetch fails, fall back to running checks with what we know
-        multiAssetResults = parsedAssets.map((a) => ({
-          assetCode: a.assetCode,
-          assetIssuer: a.assetIssuer,
-          trustlineExists: false,
-        }));
-      }
-    } else {
-      multiAssetResults = parsedAssets.map((a) => ({
-        assetCode: a.assetCode,
-        assetIssuer: a.assetIssuer,
-        trustlineExists: false,
-      }));
-    }
+  const previousArtifact = loadPreviousValidationArtifact(previousValidationPath);
+  const delta = computeValidationDelta(previousArtifact, result);
+  if (!previousArtifact && previousValidationPath.trim()) {
+    core.info(
+      'No previous validation artifact found — omitting delta (first run or missing download).',
+    );
+  } else if (delta) {
+    core.info(
+      `Validation delta vs previous run: newlyPassed=${delta.newlyPassed.length}, newlyFailed=${delta.newlyFailed.length}, unchanged=${delta.unchanged.length}`,
+    );
   }
 
   const commentBody = formatCommentBody(result, {
@@ -425,8 +364,7 @@ async function run(): Promise<void> {
     onboardingChecklist,
     sep0007DeepLinks,
     sep0007OriginDomain,
-    multiAssetResults,
-    metricsSnapshot: debugMode ? globalMetrics : undefined,
+    delta,
   });
 
   let commentUrl: string | undefined;
@@ -476,6 +414,23 @@ async function run(): Promise<void> {
   if (shouldWriteValidationJson) {
     try {
       writeValidationJson(result, { ...checkConfig, stellarAddress }, validationJsonPath);
+    } catch (error) {
+      core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
+    }
+  }
+
+  if (writeValidationJsonEnabled) {
+    try {
+      writeValidationJson({
+        result,
+        stellarAddress,
+        assetCode: normalizedAsset.assetCode,
+        assetIssuer: normalizedAsset.assetIssuer,
+        horizonUrl,
+        outputPath: validationJsonPath,
+        delta,
+        privacyMode,
+      });
     } catch (error) {
       core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
     }

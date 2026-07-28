@@ -50,6 +50,47 @@ describe('TRUSTBRIDGE_FOOTER', () => {
 });
 
 describe('formatCommentBody golden snapshots', () => {
+  it('includes delta section when previous-run delta is provided', () => {
+    const successResult: ValidationResult = {
+      valid: true,
+      accountFunded: true,
+      trustlineExists: true,
+      xlmBalance: '10.5000000',
+      xlmReserveMet: true,
+      checks: [
+        { passed: true, label: 'Account funded', detail: 'Account exists on Horizon.' },
+        { passed: true, label: 'USDC trustline', detail: 'Trustline exists with balance 50.0.' },
+        { passed: true, label: 'XLM reserve', detail: 'Balance 10.5 XLM >= minimum 1.5 XLM.' },
+      ],
+    };
+
+    const body = formatCommentBody(successResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+      delta: {
+        previousTimestamp: '2026-07-01T00:00:00.000Z',
+        newlyPassed: ['USDC trustline', 'XLM reserve'],
+        newlyFailed: [],
+        unchanged: ['Account funded'],
+        improved: true,
+        regressed: false,
+      },
+    });
+
+    expect(body).toContain('### Delta vs previous run');
+    expect(body).toContain('Newly passed:** USDC trustline, XLM reserve');
+    expect(body).toContain('Improvement');
+  });
+
+  it('omits delta section on first run when delta is null', () => {
+    const body = formatCommentBody(validationResult, {
+      ...baseConfig,
+      horizonUrl: 'https://horizon.stellar.org',
+      delta: null,
+    });
+    expect(body).not.toContain('### Delta vs previous run');
+  });
+
   it('matches golden snapshot for successful validation result', () => {
     const successResult: ValidationResult = {
       valid: true,
