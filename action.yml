@@ -9,6 +9,7 @@ branding:
   icon: 'shield'
   color: 'blue'
 
+# Breaking-change policy for inputs and outputs: docs/BREAKING_CHANGES.md
 inputs:
   max_retries:
     description: "Maximum number of retry attempts for Horizon API requests"

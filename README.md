@@ -24,7 +24,7 @@ Open-source programs and DAOs often gate contributions on Stellar wallet readine
 
 ## Release pipeline
 
-The repository ships a dedicated `release` workflow (`.github/workflows/release.yml`) that runs the same lint, test, and build checks used in CI before a tag is considered release-ready. Use the release checklist in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) before moving a `v*` tag.
+The repository ships a dedicated `release` workflow (`.github/workflows/release.yml`) that runs the same lint, test, and build checks used in CI before a tag is considered release-ready. Use the release checklist in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) before moving a `v*` tag. For guidance on whether a change requires a major version bump, see [docs/BREAKING_CHANGES.md](docs/BREAKING_CHANGES.md).
 
 ---
 
@@ -650,7 +650,7 @@ Full matrix: [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, data flow, module responsibilities |
 | [docs/STRUCTURE.md](docs/STRUCTURE.md) | File and directory reference |
 | [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md) | Error cases and retry behavior |
-| [docs/DECIMAL_PRECISION.md](docs/DECIMAL_PRECISION.md) | Asset balance string format, XLM stroop vs decimal, safe parsing for release scripts |
+| [docs/BREAKING_CHANGES.md](docs/BREAKING_CHANGES.md) | Versioning policy — breaking vs safe changes, `@v` tag expectations, deprecation process |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, PR checklist, release process |
 
 ---
