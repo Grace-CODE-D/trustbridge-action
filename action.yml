@@ -143,6 +143,10 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
+  readiness_badge_markdown:
+    description: 'Markdown-formatted readiness badge with link to TrustBridge repository'
+  readiness_badge_url:
+    description: 'Shields.io badge URL reflecting wallet-check readiness status (pass/fail)'
 
 runs:
   using: 'node20'
