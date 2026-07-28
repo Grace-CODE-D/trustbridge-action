@@ -35,12 +35,25 @@ inputs:
     required: false
     default: '1.5'
   stellar_address_input:
-    description: >-
-      Stellar account address (G-address) to validate. Required unless
-      `extract_address_from_issue` is true, in which case the address is
-      extracted from the issue body automatically.
+    description: 'Stellar account address (G-address) to validate'
     required: false
     default: ''
+  stellar_addresses:
+    description: >-
+      Newline-separated or JSON-array list of Stellar G-addresses for batch
+      validation. When set, the action validates all addresses sequentially
+      and emits per-address results as a JSON artifact (batch_results output)
+      plus aggregate metrics. The single-address stellar_address_input path
+      is bypassed when this input is non-empty. Empty list is an error.
+    required: false
+    default: ''
+  batch_request_delay_ms:
+    description: >-
+      Delay in milliseconds between individual Horizon requests in batch mode
+      (default 200 ms). Increase for conservative rate-limit budgets; set to
+      0 to remove the inter-request pause entirely.
+    required: false
+    default: '200'
   fail_on_missing:
     description: 'Fail the workflow step when checks do not pass (true) or only warn (false)'
     required: false
@@ -171,22 +184,17 @@ outputs:
     description: 'Whether the account exists and is activated on the Stellar network'
   comment_url:
     description: 'URL of the created or updated issue comment, when run in an issue context'
-  # ── Per-check named outputs (Issue #106) ──────────────────────────────────
-  check_account_funded:
+  batch_results:
     description: >-
-      Boolean string ('true'/'false') — whether the account exists and is
-      funded on the Stellar network. Mirrors account_funded; provided as a
-      named per-check output for finer-grained workflow gating.
-  check_trustline:
+      JSON array of per-address validation results when running in batch mode
+      (stellar_addresses input set). Each element contains: address,
+      valid, accountFunded, trustlineExists, xlmBalance, xlmReserveMet,
+      failureReason. Empty string in single-address mode.
+  batch_summary:
     description: >-
-      Boolean string ('true'/'false') — whether the account holds a trustline
-      for the configured asset (asset_code + asset_issuer). Mirrors
-      trustline_exists; provided as a named per-check output.
-  check_xlm_reserve:
-    description: >-
-      Boolean string ('true'/'false') — whether the account's native XLM
-      balance meets or exceeds the min_xlm_reserve threshold. Not available
-      from legacy outputs; use this for reserve-specific gating.
+      JSON object with aggregate batch metrics: total, passed, failed,
+      failures (array), failureTaxonomy (counts by failure type). Empty
+      string in single-address mode.
 
 runs:
   using: 'node20'

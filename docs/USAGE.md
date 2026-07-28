@@ -216,70 +216,48 @@ When the action runs in an issue context, it sets `comment_url` to the created G
 
 ---
 
-## `workflow_call` reusable workflow
+## Batch multi-address validation (roster audit)
 
-If your org runs TrustBridge across many repos, wrap the action in a reusable workflow once and have every repo call it via `uses:` instead of copying the same job YAML everywhere.
+To validate many contributor wallets in one job, use the `stellar_addresses`
+input instead of `stellar_address_input`. The action runs all checks
+sequentially with a configurable inter-request delay, collects per-address
+results, and posts a single summary comment.
 
-Copy-paste starting points (validated as YAML):
+### Newline-separated list
 
-- [docs/examples/trustbridge-reusable.yml](examples/trustbridge-reusable.yml) — the callable workflow. Publish it at `.github/workflows/trustbridge-reusable.yml` in an org-level shared-workflows repo (or in this repo, as shown).
-- [docs/examples/trustbridge-caller.yml](examples/trustbridge-caller.yml) — an example consumer workflow that calls it.
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  id: batch
+  with:
+    stellar_addresses: |
+      GABC1234AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      GDEF5678BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    fail_on_missing: false
+    batch_request_delay_ms: 300
+```
 
-### Inputs
+### Using batch outputs
 
-All `workflow_call` inputs mirror `action.yml` inputs (see [README inputs table](../README.md#inputs)) except `github_token`, which is a secret (below). Types are widened to `boolean`/`number` where the underlying action input is boolean/numeric so callers get YAML-native typing instead of raw strings:
+```yaml
+- name: Check batch results
+  run: |
+    echo '${{ steps.batch.outputs.batch_summary }}' | jq .
 
-| `workflow_call` input | Type | Default | Maps to action input |
-| --------- | ------ | --------- | ----------------------- |
-| `stellar_address_input` | string | — (required) | `stellar_address_input` |
-| `horizon_url` | string | `https://horizon.stellar.org` | `horizon_url` |
-| `horizon_url_fallback` | string | `''` | `horizon_url_fallback` |
-| `rpc_fallback_url` | string | `''` | `rpc_fallback_url` |
-| `asset_code` | string | `USDC` | `asset_code` |
-| `asset_issuer` | string | (default USDC issuer) | `asset_issuer` |
-| `min_xlm_reserve` | string | `1.5` | `min_xlm_reserve` |
-| `fail_on_missing` | boolean | `true` | `fail_on_missing` |
-| `debug_mode` | boolean | `false` | `debug_mode` |
-| `sticky_comment` | boolean | `true` | `sticky_comment` |
-| `wait_until_funded` | boolean | `false` | `wait_until_funded` |
-| `wait_until_funded_timeout_ms` | number | `120000` | `wait_until_funded_timeout_ms` |
-| `wait_until_funded_interval_ms` | number | `5000` | `wait_until_funded_interval_ms` |
-| `horizon_timeout_ms` | number | `15000` | `horizon_timeout_ms` |
-| `horizon_cache_ttl_ms` | number | `60000` | `horizon_cache_ttl_ms` |
-| `use_cache` | boolean | `false` | `use_cache` |
-| `trustbridge_config_path` | string | `.trustbridge.yml` | `trustbridge_config_path` |
-| `log_inputs` | boolean | `false` | `log_inputs` |
-| `sep0007_deep_links` | boolean | `false` | `sep0007_deep_links` |
-| `sep0007_origin_domain` | string | `''` | `sep0007_origin_domain` |
+- name: Fail if any address failed
+  if: fromJSON(steps.batch.outputs.batch_summary).failed > 0
+  run: exit 1
+```
 
-### Outputs
+`batch_results` is a JSON array; `batch_summary` includes aggregate counts
+and a `failureTaxonomy` object. See [README outputs table](../README.md#outputs)
+for full field descriptions.
 
-| `workflow_call` output | Maps to action output |
-| --------- | ------------------------ |
-| `trustline_exists` | `trustline_exists` |
-| `xlm_balance` | `xlm_balance` |
-| `account_funded` | `account_funded` |
-| `comment_url` | `comment_url` |
+### Rate-limit awareness
 
-Read them from the calling workflow via `needs.<job-id>.outputs.<name>`, same as any other reusable-workflow job.
-
-### Secrets
-
-| Secret | Required | Notes |
-| --------- | ---------- | ------- |
-| `github_token` | No | Token with `issues: write` used to post/update the comment. Most callers should use `secrets: inherit` at the call site, which forwards the caller's own `GITHUB_TOKEN` (and any other secrets) under the same names — the reusable workflow reads it as `secrets.github_token`. The reusable workflow also falls back to `github.token` if no secret is supplied, so `secrets: inherit` is convenience, not a hard requirement. |
-
-### Permissions
-
-The reusable workflow's job declares `permissions: { issues: write, contents: read }` itself, but the **caller** workflow also needs at least `issues: write` in its own `permissions:` block (or org/repo default permissions must allow it) for the forwarded token to be able to post comments.
-
-### Issue context limitations when called from non-`issues` events
-
-TrustBridge posts a comment only when the workflow run's triggering event carries an issue payload (`github.context.payload.issue`). For a reusable workflow, that payload comes from whatever event triggered the **caller** workflow run — not from `workflow_call` itself, which has no event payload of its own. Concretely:
-
-- Caller triggered by `issues: assigned` → issue context is present, comment posting works normally.
-- Caller triggered by `workflow_dispatch`, `schedule`, `push`, etc. → there is no issue context, so `postIssueComment` logs a warning and skips posting (checks and outputs still run normally). This matches the action's existing standalone behavior — see the "Manual run — workflow_dispatch" section above.
-- If you need comments from a non-`issues` trigger, pass an issue number explicitly to your own comment step rather than relying on TrustBridge's built-in poster, or trigger the caller workflow from an `issues` event alongside `workflow_dispatch` as shown in `trustbridge-caller.yml`.
+Addresses are validated **sequentially**. `batch_request_delay_ms` (default
+200 ms) adds a pause between each Horizon request. Per-request exponential
+backoff applies to every address in the batch.
 
 ---
 
