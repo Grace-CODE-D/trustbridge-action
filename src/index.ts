@@ -86,6 +86,11 @@ async function run(): Promise<void> {
     sep0007DeepLinks,
   });
 
+  validateStellarAddress(stellarAddress);
+  const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
+  const minTrustlineLimitRaw = core.getInput('min_trustline_limit') || '';
+  const minTrustlineLimit = minTrustlineLimitRaw ? parseNumberInput(minTrustlineLimitRaw, 0, { min: 0 }) : undefined;
+
   if (logInputs) {
     emitInputsLogRecord({
       horizonUrl,
@@ -94,6 +99,7 @@ async function run(): Promise<void> {
       assetCode,
       assetIssuer,
       minXlmReserve: minXlmReserveRaw,
+      minTrustlineLimit: minTrustlineLimitRaw,
       stellarAddress,
       failOnMissing,
       debugMode,
@@ -107,9 +113,6 @@ async function run(): Promise<void> {
       logInputs,
     });
   }
-
-  validateStellarAddress(stellarAddress);
-  const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
 
@@ -133,6 +136,7 @@ async function run(): Promise<void> {
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
     minXlmReserve,
+    minTrustlineLimit,
     horizonUrl,
   };
 

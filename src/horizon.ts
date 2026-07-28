@@ -14,6 +14,7 @@ export interface HorizonBalanceCredit {
   asset_issuer: string;
   buying_liabilities: string;
   selling_liabilities: string;
+  limit?: string; // Maximum balance this trustline can hold (Issue #140)
 }
 
 export type HorizonBalance = HorizonBalanceNative | HorizonBalanceCredit;
@@ -645,6 +646,24 @@ export function hasTrustline(
       balance.asset_code === assetCode &&
       balance.asset_issuer === assetIssuer,
   );
+}
+
+/**
+ * Get the trustline limit for a specific asset, if it exists.
+ * Returns the limit as a string (as provided by Horizon) or '0' if not found.
+ */
+export function getTrustlineLimit(
+  account: HorizonAccount,
+  assetCode: string,
+  assetIssuer: string,
+): string {
+  const balance = account.balances.find(
+    (b) =>
+      isCreditBalance(b) &&
+      b.asset_code === assetCode &&
+      b.asset_issuer === assetIssuer,
+  );
+  return balance && isCreditBalance(balance) && balance.limit ? balance.limit : '0';
 }
 
 export function parseHorizonBalance(balance: string): number {

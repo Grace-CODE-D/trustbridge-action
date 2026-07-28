@@ -1,4 +1,4 @@
-import { HorizonAccount, getNativeBalance, hasTrustline, parseHorizonBalance } from './horizon';
+import { HorizonAccount, getNativeBalance, hasTrustline, getTrustlineLimit, parseHorizonBalance } from './horizon';
 import { escapeMarkdownInline, inlineCode } from './markdown';
 import { buildChangeTrustLink, buildLobstrLink, inferStellarNetwork } from './links';
 
@@ -12,6 +12,7 @@ export interface CheckConfig {
   assetCode: string;
   assetIssuer: string;
   minXlmReserve: number;
+  minTrustlineLimit?: number; // Optional minimum trustline limit (Issue #140)
   horizonUrl?: string;
 }
 
@@ -34,6 +35,7 @@ export interface ValidationResult {
   trustlineExists: boolean;
   xlmBalance: string;
   xlmReserveMet: boolean;
+  trustlineLimit?: string; // Actual trustline limit for the asset (Issue #140)
   checks: CheckResultItem[];
   remediation?: string;
   /** Sponsorship relationship counts from Horizon. */
@@ -70,6 +72,15 @@ export function parseMinXlmReserve(value: string): number {
   return parsed;
 }
 
+export function parseTrustlineLimit(value: string): number {
+  const normalized = value.trim();
+  const parsed = Number(normalized);
+  if (!normalized || !Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`min_trustline_limit must be a non-negative number. Received: "${value}"`);
+  }
+  return parsed;
+}
+
 export function estimateTrustlineSetupCost(): number {
   return STELLAR_MIN_ACCOUNT_BALANCE_XLM + STELLAR_BASE_RESERVE_XLM;
 }
@@ -90,6 +101,11 @@ export function runAccountChecks(
   const hasAnyTrustlines = account.balances.some((b) => b.asset_type !== 'native');
 
   const safeAssetCode = escapeMarkdownInline(config.assetCode);
+
+  // Get trustline limit for the asset (Issue #140)
+  const trustlineLimit = getTrustlineLimit(account, config.assetCode, config.assetIssuer);
+  const trustlineLimitNumeric = parseHorizonBalance(trustlineLimit);
+  const trustlineLimitMet = !config.minTrustlineLimit || trustlineLimitNumeric >= config.minTrustlineLimit;
 
   const checks: CheckResultItem[] = [
     {
@@ -115,6 +131,19 @@ export function runAccountChecks(
     },
   ];
 
+  // Add trustline limit check if configured (Issue #140)
+  if (config.minTrustlineLimit !== undefined) {
+    checks.push({
+      passed: trustlineExists && trustlineLimitMet,
+      label: 'Trustline limit',
+      detail: trustlineExists
+        ? trustlineLimitMet
+          ? `Trustline limit is **${inlineCode(trustlineLimit)} ${safeAssetCode}** (minimum required: **${config.minTrustlineLimit} ${safeAssetCode}**).`
+          : `Trustline limit is **${inlineCode(trustlineLimit)} ${safeAssetCode}** but **${config.minTrustlineLimit} ${safeAssetCode}** is required.`
+        : `Cannot verify trustline limit (${safeAssetCode} trustline does not exist).`,
+    });
+  }
+
   const valid = checks.every((c) => c.passed);
   let remediation: string | undefined;
 
@@ -129,6 +158,11 @@ export function runAccountChecks(
     if (!xlmReserveMet) {
       steps.push(
         `Send at least **${reserveRequirement.missing} XLM** to ${inlineCode(account.account_id)} to meet the reserve requirement.`,
+      );
+    }
+    if (trustlineExists && !trustlineLimitMet && config.minTrustlineLimit) {
+      steps.push(
+        `Increase the ${safeAssetCode} trustline limit to at least **${config.minTrustlineLimit} ${safeAssetCode}** using [Stellar Laboratory](${buildChangeTrustLink(network)}) (Manage Trust operation) or a wallet. Current limit is **${inlineCode(trustlineLimit)} ${safeAssetCode}**.`,
       );
     }
     remediation = steps.join('\n\n');
@@ -146,6 +180,7 @@ export function runAccountChecks(
     trustlineExists,
     xlmBalance,
     xlmReserveMet,
+    trustlineLimit,
     checks,
     remediation,
     sponsorshipInfo,

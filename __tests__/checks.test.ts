@@ -343,3 +343,222 @@ describe('markdown escape hardening', () => {
     expect(result.checks[0].detail).not.toMatch(/[^\\]`INJECTED[^\\]`/);
   });
 });
+
+describe('trustline limit validation (Issue #140)', () => {
+  it('does not add trustline limit check when minTrustlineLimit is undefined', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '100.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          limit: '1000.0000000',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, defaultConfig);
+
+    // Only 3 checks: account funded, trustline exists, XLM reserve
+    expect(result.checks.length).toBe(3);
+    expect(result.checks.some((c) => c.label === 'Trustline limit')).toBe(false);
+    expect(result.valid).toBe(true);
+  });
+
+  it('passes when trustline limit meets minimum requirement', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '100.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          limit: '1000.0000000',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, {
+      ...defaultConfig,
+      minTrustlineLimit: 500,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.trustlineLimit).toBe('1000.0000000');
+    expect(result.checks[3].label).toBe('Trustline limit');
+    expect(result.checks[3].passed).toBe(true);
+    expect(result.checks[3].detail).toContain('1000.0000000');
+    expect(result.checks[3].detail).toContain('500');
+  });
+
+  it('fails when trustline limit is below minimum requirement', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '50.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          limit: '100.0000000',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, {
+      ...defaultConfig,
+      minTrustlineLimit: 500,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.checks[3].label).toBe('Trustline limit');
+    expect(result.checks[3].passed).toBe(false);
+    expect(result.checks[3].detail).toContain('100.0000000');
+    expect(result.checks[3].detail).toContain('500');
+    expect(result.remediation).toContain('Increase the USDC trustline limit');
+    expect(result.remediation).toContain('at least **500');
+    expect(result.remediation).toContain('Current limit is **`100.0000000` USDC**');
+  });
+
+  it('fails the trustline limit check when trustline does not exist', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, {
+      ...defaultConfig,
+      minTrustlineLimit: 500,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.trustlineExists).toBe(false);
+    expect(result.checks[3].label).toBe('Trustline limit');
+    expect(result.checks[3].passed).toBe(false);
+    expect(result.checks[3].detail).toContain('Cannot verify trustline limit');
+    expect(result.checks[3].detail).toContain('USDC');
+  });
+
+  it('handles trustline with zero limit', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '0.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          limit: '0.0000000',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, {
+      ...defaultConfig,
+      minTrustlineLimit: 1,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.checks[3].passed).toBe(false);
+    expect(result.checks[3].detail).toContain('0.0000000');
+  });
+
+  it('passes when trustline limit exactly equals minimum requirement', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '10.0000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '100.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          limit: '250.5000000',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, {
+      ...defaultConfig,
+      minTrustlineLimit: 250.5,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.checks[3].passed).toBe(true);
+  });
+
+  it('includes all remediation steps when multiple checks fail', () => {
+    const account = makeAccount({
+      balances: [
+        {
+          balance: '0.5000000',
+          asset_type: 'native',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+        {
+          balance: '50.0000000',
+          asset_type: 'credit_alphanum4',
+          asset_code: 'USDC',
+          asset_issuer: USDC_ISSUER,
+          limit: '100.0000000',
+          buying_liabilities: '0.0000000',
+          selling_liabilities: '0.0000000',
+        },
+      ],
+    });
+
+    const result = runAccountChecks(account, {
+      ...defaultConfig,
+      minTrustlineLimit: 500,
+    });
+
+    expect(result.valid).toBe(false);
+    // Should have remediation for both XLM reserve and trustline limit
+    expect(result.remediation).toContain('Send at least');
+    expect(result.remediation).toContain('Increase the USDC trustline limit');
+  });
+});

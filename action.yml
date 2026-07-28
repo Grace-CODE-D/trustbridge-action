@@ -34,6 +34,13 @@ inputs:
     description: 'Minimum native XLM balance required (string, e.g. 1.5)'
     required: false
     default: '1.5'
+  min_trustline_limit:
+    description: >-
+      Minimum trustline limit required for the configured asset (numeric, e.g. 100).
+      When set, the action will warn or fail if the account's trustline limit is below
+      this threshold. Leave empty to skip this check. (Issue #140)
+    required: false
+    default: ''
   stellar_address_input:
     description: 'Stellar account address (G-address) to validate'
     required: true

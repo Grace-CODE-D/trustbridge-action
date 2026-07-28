@@ -12,6 +12,7 @@ export interface HorizonBalanceCredit {
     asset_issuer: string;
     buying_liabilities: string;
     selling_liabilities: string;
+    limit?: string;
 }
 export type HorizonBalance = HorizonBalanceNative | HorizonBalanceCredit;
 export interface HorizonAccount {
@@ -72,6 +73,11 @@ export declare function waitForFundedAccount(horizonUrl: string, stellarAddress:
 export declare function isCreditBalance(balance: HorizonBalance): balance is HorizonBalanceCredit;
 export declare function getNativeBalance(account: HorizonAccount): string;
 export declare function hasTrustline(account: HorizonAccount, assetCode: string, assetIssuer: string): boolean;
+/**
+ * Get the trustline limit for a specific asset, if it exists.
+ * Returns the limit as a string (as provided by Horizon) or '0' if not found.
+ */
+export declare function getTrustlineLimit(account: HorizonAccount, assetCode: string, assetIssuer: string): string;
 export declare function parseHorizonBalance(balance: string): number;
 export interface HorizonFetchOptions {
     maxRetries?: number;
