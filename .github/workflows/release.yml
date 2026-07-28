@@ -10,8 +10,10 @@ permissions:
   contents: write  # required to create/update GitHub Release assets
 
 jobs:
-  verify-release:
+  verify-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Allow uploading SBOM asset to release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,47 +39,16 @@ jobs:
       - name: Verify action bundle exists
         run: test -f dist/index.js
 
-      - name: Generate license report (JSON)
-        run: npm run license:report
-        # Produces licenses-report.json in the workspace root.
-        # --production   : only runtime deps (excludes Jest, ESLint, ncc, etc.)
-        # --excludePrivatePackages : omits the root trustbridge-action package itself
-        # No secrets are written — only package name, version, SPDX ID, and repo URL.
-
-      - name: Convert license report to Markdown
+      - name: Generate SBOM (CycloneDX format)
         run: |
-          node - <<'EOF'
-          const fs = require('fs');
-          const data = JSON.parse(fs.readFileSync('licenses-report.json', 'utf8'));
-          const rows = Object.entries(data)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([pkg, info]) => {
-              const repo = info.repository || info.url || '—';
-              return `| ${pkg} | ${info.licenses || '—'} | ${repo} |`;
-            });
-          const md = [
-            '# Third-Party License Report',
-            '',
-            '> Generated automatically during the release workflow.',
-            '> Only production runtime dependencies are listed.',
-            '> Dev tooling (Jest, ESLint, ncc, etc.) is excluded.',
-            '',
-            '| Package | License | Repository |',
-            '|---------|---------|------------|',
-            ...rows,
-            '',
-            'See [docs/LICENSE_REPORT.md](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/LICENSE_REPORT.md) for the full license policy.',
-          ].join('\n');
-          fs.writeFileSync('licenses-report.md', md);
-          console.log(`Wrote licenses-report.md with ${rows.length} entries.`);
-          EOF
+          npx @cyclonedx/npm@latest --output-file trustbridge-sbom.json --output-format json --specs all
+          echo "SBOM generated: trustbridge-sbom.json"
+          cat trustbridge-sbom.json | head -20
 
-      - name: Attach license reports to GitHub Release
-        # Only runs on real tag pushes, not workflow_dispatch dry runs
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda  # v2.2.1
+      - name: Upload SBOM to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
         with:
-          files: |
-            licenses-report.json
-            licenses-report.md
-          fail_on_unmatched_files: true
+          files: trustbridge-sbom.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

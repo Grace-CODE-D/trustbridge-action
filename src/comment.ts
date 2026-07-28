@@ -18,7 +18,7 @@ import {
 } from './links';
 import { buildOnboardingChecklist, inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
-import { ValidationDelta, formatDeltaMarkdown } from './delta';
+import { Locale, getStrings } from './i18n';
 
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
@@ -61,11 +61,10 @@ export interface CommentConfig extends CheckConfig {
    */
   metricsSnapshot?: MetricsCollector;
   /**
-   * Optional delta vs the previous workflow-run validation artifact.
-   * When present, a "Delta vs previous run" section is rendered after Results.
-   * Omit (or pass null) on the first run so the section is not shown.
+   * Locale for comment strings (e.g., 'en', 'es', 'pt').
+   * Falls back to English if unset or invalid.
    */
-  delta?: ValidationDelta | null;
+  locale?: Locale;
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
@@ -98,18 +97,20 @@ export function formatCommentBody(
 ): string {
   const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
   const gate = buildValidationGate(result);
+  const locale = config.locale || 'en';
+  const strings = getStrings(locale);
 
-  const buildWithRemediation = (remediationText: string | undefined): string => {
-    const lines: string[] = [
+  const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
-    '## TrustBridge — Stellar Account Check',
+    `<!-- trustbridge-action:locale:${locale} -->`,
+    `## ${strings.heading}`,
     '',
-    `Checked account: ${inlineCode(config.stellarAddress)}`,
-    `Horizon: ${inlineCode(displayHorizonUrl(config.horizonUrl, config.debugMode ?? false))}`,
-    `Asset: **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
+    `${strings.checkedAccount} ${inlineCode(config.stellarAddress)}`,
+    `${strings.horizon} ${inlineCode(config.horizonUrl)}`,
+    `${strings.asset} **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
     '',
-    '### Results',
+    `### ${strings.resultsHeading}`,
     '',
   ];
 
@@ -124,43 +125,30 @@ export function formatCommentBody(
 
   lines.push(
     '',
-    '### Validation gate',
+    `### ${strings.validationGateHeading}`,
     '',
     gate.ready
-      ? '- Ready to proceed: all checks passed.'
-      : `- Blocked by: ${gate.failedLabels.join(', ')}`,
-    `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`,
-    `- Failed checks: ${gate.failedChecks}`,
+      ? `- ${strings.readyToProceed}`
+      : `- ${strings.blockedBy} ${gate.failedLabels.join(', ')}`,
+    `- ${strings.passedChecks} ${gate.passedChecks}/${gate.totalChecks}`,
+    `- ${strings.failedChecks} ${gate.failedChecks}`,
     '',
-    '### Balances',
+    `### ${strings.balancesHeading}`,
     '',
-    `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`,
-    `- **XLM minimum required:** \`${config.minXlmReserve} XLM\``,
-  );
-
-  if (assetBalanceCheckEnabled) {
-    const assetBalanceDisplay = result.assetBalance === 'unknown'
-      ? '_unknown_'
-      : `\`${result.assetBalance} ${config.assetCode}\``;
-    lines.push(
-      `- **${config.assetCode} balance:** ${assetBalanceDisplay}`,
-      `- **${config.assetCode} minimum required:** \`${config.minAssetBalance} ${config.assetCode}\``,
-    );
-  }
-
-  lines.push(
+    `- **${strings.xlmBalance}** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`,
+    `- **${strings.minimumRequired}** \`${config.minXlmReserve} XLM\``,
     '',
-    '### Setup cost estimate',
+    `### ${strings.setupCostHeading}`,
     '',
-    `- Stellar minimum account balance: **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`,
-    `- Base reserve per trustline (ledger entry): **${STELLAR_BASE_RESERVE_XLM} XLM**`,
-    `- Typical minimum to fund account + one trustline: **~${estimateTrustlineSetupCost()} XLM**`,
+    `- ${strings.minimumAccountBalance} **${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`,
+    `- ${strings.baseReservePerTrustline} **${STELLAR_BASE_RESERVE_XLM} XLM**`,
+    `- ${strings.typicalMinimumToFund} **~${estimateTrustlineSetupCost()} XLM**`,
     '',
-    '### Add a trustline',
+    `### ${strings.addTrustlineHeading}`,
     '',
-    `- [View account on Stellar Laboratory](${buildAccountViewerLink(config.stellarAddress, stellarLabNetwork)})`,
-    `- [Open Transaction Builder (Change Trust)](${buildChangeTrustLink(stellarLabNetwork)})`,
-    `- [LOBSTR wallet](${buildLobstrLink()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``,
+    `- [${strings.viewAccountOnLab}](${buildAccountViewerLink(config.stellarAddress, stellarLabNetwork)})`,
+    `- [${strings.openTransactionBuilder}](${buildChangeTrustLink(stellarLabNetwork)})`,
+    `- [${strings.lobstrWallet}](${buildLobstrLink()}) — ${strings.lobstrDescription} **${config.assetCode}** from issuer \`${config.assetIssuer}\``,
   );
 
   // SEP-0007 wallet deep links (Issue #44)
@@ -174,30 +162,27 @@ export function formatCommentBody(
     });
     lines.push(
       '',
-      '### Quick wallet actions (SEP-0007)',
+      `### ${strings.sepWalletActionsHeading}`,
       '',
-      '_Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup._',
+      `_${strings.sepWalletActionsDescription}_`,
       '',
-      `- [Send ${STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM to activate account](${payLink})`,
+      `- [${strings.sendXlmToActivate.replace('{amount}', String(STELLAR_MIN_ACCOUNT_BALANCE_XLM))}](${payLink})`,
     );
   }
 
-  if (remediationText) {
-    lines.push('', '### Remediation', '', remediationText);
+  if (result.remediation) {
+    lines.push('', `### ${strings.remediationHeading}`, '', result.remediation);
   }
 
   lines.push(
     '',
-    '### Configuration summary',
+    `### ${strings.configurationSummaryHeading}`,
     '',
-    `| Input | Value |`,
+    `| ${strings.inputColumn} | ${strings.valueColumn} |`,
     `| --- | --- |`,
-    `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`,
-    `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`,
-    `| \`onboarding_checklist\` | ${config.onboardingChecklist === undefined ? '_default (true)_' : config.onboardingChecklist ? '`true` — checklist section included' : '`false` — checklist omitted'} |`,
-    `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`,
-    `| \`unauthorized_trustline_policy\` | \`${config.unauthorizedTrustlinePolicy ?? 'warn'}\` |`,
-    `| \`clawback_strict_mode\` | ${config.clawbackStrictMode ? '`true`' : '`false` (default)'} |`,
+    `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? strings.failOnMissingTrue : strings.failOnMissingFalse} |`,
+    `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? strings.stickyCommentTrue : strings.stickyCommentFalse} |`,
+    `| \`wait_until_funded\` | ${config.waitUntilFunded ? strings.waitUntilFundedTrue : strings.waitUntilFundedFalse} |`,
   );
 
   if (assetBalanceCheckEnabled) {
@@ -210,25 +195,23 @@ export function formatCommentBody(
     const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
     const interval = config.waitUntilFundedIntervalMs ?? 5000;
     lines.push(
-      `| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`,
-      `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`,
+      `| \`wait_until_funded_timeout_ms\` | ${strings.waitUntilFundedTimeoutMs.replace('{ms}', String(timeout))} |`,
+      `| \`wait_until_funded_interval_ms\` | ${strings.waitUntilFundedIntervalMs.replace('{ms}', String(interval))} |`,
     );
   }
 
   lines.push(
     '',
-    '### Action outputs reference',
+    `### ${strings.outputsHeading}`,
     '',
-    '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._',
+    `_${strings.outputsDescription}_`,
     '',
-    `| Output | Value in this run | Description |`,
+    `| ${strings.outputColumn} | ${strings.valueRunColumn} | ${strings.descriptionColumn} |`,
     `| --- | --- | --- |`,
-    `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`,
-    `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`,
-    `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`,
-    `| \`asset_balance\` | \`${result.assetBalance}\` | **${config.assetCode}** balance reported by Horizon (from \`action.yml\`) |`,
-    `| \`asset_balance_met\` | \`${String(result.assetBalanceMet)}\` | Whether **${config.assetCode}** balance meets the configured floor (from \`action.yml\`) |`,
-    `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`,
+    `| \`account_funded\` | \`${String(result.accountFunded)}\` | ${strings.accountFundedOutput} |`,
+    `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | ${strings.trustlineExistsOutput.replace('{assetCode}', config.assetCode)} |`,
+    `| \`xlm_balance\` | \`${result.xlmBalance}\` | ${strings.xlmBalanceOutput} |`,
+    `| \`comment_url\` | _set after posting_ | ${strings.commentUrlOutput} |`,
   );
 
   // Hardened metrics JSON export (Issue #33)
@@ -236,9 +219,9 @@ export function formatCommentBody(
     const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
     lines.push(
       '',
-      '### Metrics',
+      `### ${strings.metricsHeading}`,
       '',
-      '_Machine-readable run metrics. Values are structural counts only — no account addresses or balances._',
+      `_${strings.metricsDescription}_`,
       '',
       '```json',
       metricsJson,

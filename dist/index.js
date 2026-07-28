@@ -34665,6 +34665,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35192,6 +35255,7 @@ const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const links_1 = __nccwpck_require__(3346);
 const markdown_1 = __nccwpck_require__(3758);
+const i18n_1 = __nccwpck_require__(4859);
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -35221,28 +35285,27 @@ const TRUNCATION_NOTICE = '\n\n_... [Truncated due to GitHub length limits. See 
 function formatCommentBody(result, config) {
     const stellarLabNetwork = (0, links_1.inferStellarNetwork)(config.horizonUrl);
     const gate = (0, checks_1.buildValidationGate)(result);
+    const locale = config.locale || 'en';
+    const strings = (0, i18n_1.getStrings)(locale);
     const lines = [
         exports.STICKY_COMMENT_MARKER,
         `<!-- trustbridge-action:schema-version:${exports.COMMENT_SCHEMA_VERSION} -->`,
-        '## TrustBridge — Stellar Account Check',
+        `<!-- trustbridge-action:locale:${locale} -->`,
+        `## ${strings.heading}`,
         '',
-        `Checked account: ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
-        `Horizon: ${(0, markdown_1.inlineCode)(config.horizonUrl)}`,
-        `Asset: **${config.assetCode}** · Issuer: ${(0, markdown_1.inlineCode)(config.assetIssuer)}`,
+        `${strings.checkedAccount} ${(0, markdown_1.inlineCode)(config.stellarAddress)}`,
+        `${strings.horizon} ${(0, markdown_1.inlineCode)(config.horizonUrl)}`,
+        `${strings.asset} **${config.assetCode}** · Issuer: ${(0, markdown_1.inlineCode)(config.assetIssuer)}`,
         '',
-        '### Results',
+        `### ${strings.resultsHeading}`,
         '',
     ];
     for (const check of result.checks) {
         lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
     }
-    const deltaSection = (0, delta_1.formatDeltaMarkdown)(config.delta);
-    if (deltaSection) {
-        lines.push('', deltaSection);
-    }
-    lines.push('', '### Validation gate', '', gate.ready
-        ? '- Ready to proceed: all checks passed.'
-        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+    lines.push('', `### ${strings.validationGateHeading}`, '', gate.ready
+        ? `- ${strings.readyToProceed}`
+        : `- ${strings.blockedBy} ${gate.failedLabels.join(', ')}`, `- ${strings.passedChecks} ${gate.passedChecks}/${gate.totalChecks}`, `- ${strings.failedChecks} ${gate.failedChecks}`, '', `### ${strings.balancesHeading}`, '', `- **${strings.xlmBalance}** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **${strings.minimumRequired}** \`${config.minXlmReserve} XLM\``, '', `### ${strings.setupCostHeading}`, '', `- ${strings.minimumAccountBalance} **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- ${strings.baseReservePerTrustline} **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- ${strings.typicalMinimumToFund} **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', `### ${strings.addTrustlineHeading}`, '', `- [${strings.viewAccountOnLab}](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [${strings.openTransactionBuilder}](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [${strings.lobstrWallet}](${(0, links_1.buildLobstrLink)()}) — ${strings.lobstrDescription} **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     // SEP-0007 wallet deep links (Issue #44)
     if (config.sep0007DeepLinks) {
         const payLink = (0, links_1.buildSep0007PayLink)({
@@ -35252,22 +35315,22 @@ function formatCommentBody(result, config) {
             network: stellarLabNetwork,
             originDomain: config.sep0007OriginDomain || undefined,
         });
-        lines.push('', '### Quick wallet actions (SEP-0007)', '', '_Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup._', '', `- [Send ${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM to activate account](${payLink})`);
+        lines.push('', `### ${strings.sepWalletActionsHeading}`, '', `_${strings.sepWalletActionsDescription}_`, '', `- [${strings.sendXlmToActivate.replace('{amount}', String(checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM))}](${payLink})`);
     }
     if (result.remediation) {
-        lines.push('', '### Remediation', '', result.remediation);
+        lines.push('', `### ${strings.remediationHeading}`, '', result.remediation);
     }
-    lines.push('', '### Configuration summary', '', `| Input | Value |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? '`true` — step fails on missing checks' : '`false` — only warns'} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? '`true` — upserts prior comment' : '`false` — always posts new'} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? '`true`' : '`false` (default)'} |`);
+    lines.push('', `### ${strings.configurationSummaryHeading}`, '', `| ${strings.inputColumn} | ${strings.valueColumn} |`, `| --- | --- |`, `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? strings.failOnMissingTrue : strings.failOnMissingFalse} |`, `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? strings.stickyCommentTrue : strings.stickyCommentFalse} |`, `| \`wait_until_funded\` | ${config.waitUntilFunded ? strings.waitUntilFundedTrue : strings.waitUntilFundedFalse} |`);
     if (config.waitUntilFunded) {
         const timeout = config.waitUntilFundedTimeoutMs ?? 120000;
         const interval = config.waitUntilFundedIntervalMs ?? 5000;
-        lines.push(`| \`wait_until_funded_timeout_ms\` | \`${timeout}\` |`, `| \`wait_until_funded_interval_ms\` | \`${interval}\` |`);
+        lines.push(`| \`wait_until_funded_timeout_ms\` | ${strings.waitUntilFundedTimeoutMs.replace('{ms}', String(timeout))} |`, `| \`wait_until_funded_interval_ms\` | ${strings.waitUntilFundedIntervalMs.replace('{ms}', String(interval))} |`);
     }
-    lines.push('', '### Action outputs reference', '', '_Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`._', '', `| Output | Value in this run | Description |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | Whether the account exists on the Stellar network (from \`action.yml\`) |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | Whether the **${config.assetCode}** trustline is configured (from \`action.yml\`) |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | Native XLM balance reported by Horizon (from \`action.yml\`) |`, `| \`comment_url\` | _set after posting_ | URL of this issue comment (from \`action.yml\`) |`);
+    lines.push('', `### ${strings.outputsHeading}`, '', `_${strings.outputsDescription}_`, '', `| ${strings.outputColumn} | ${strings.valueRunColumn} | ${strings.descriptionColumn} |`, `| --- | --- | --- |`, `| \`account_funded\` | \`${String(result.accountFunded)}\` | ${strings.accountFundedOutput} |`, `| \`trustline_exists\` | \`${String(result.trustlineExists)}\` | ${strings.trustlineExistsOutput.replace('{assetCode}', config.assetCode)} |`, `| \`xlm_balance\` | \`${result.xlmBalance}\` | ${strings.xlmBalanceOutput} |`, `| \`comment_url\` | _set after posting_ | ${strings.commentUrlOutput} |`);
     // Hardened metrics JSON export (Issue #33)
     if (config.metricsSnapshot) {
         const metricsJson = buildHardenedMetricsJson(config.metricsSnapshot);
-        lines.push('', '### Metrics', '', '_Machine-readable run metrics. Values are structural counts only — no account addresses or balances._', '', '```json', metricsJson, '```');
+        lines.push('', `### ${strings.metricsHeading}`, '', `_${strings.metricsDescription}_`, '', '```json', metricsJson, '```');
     }
     lines.push('', '---', exports.TRUSTBRIDGE_FOOTER);
     return lines.join('\n');
@@ -36560,6 +36623,270 @@ async function fetchNetworkPassphrase(horizonUrl, options = {}) {
 
 /***/ }),
 
+/***/ 4859:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Internationalization (i18n) template layer for TrustBridge issue comments.
+ *
+ * Provides locale-aware comment templates with fallback to English.
+ * Strings that appear in Markdown issue comments are externalized here,
+ * making it easy for consumers to add new locales or adjust copy.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.getStrings = getStrings;
+exports.isValidLocale = isValidLocale;
+exports.parseLocaleInput = parseLocaleInput;
+/**
+ * English (en) locale strings.
+ */
+const EN = {
+    heading: 'TrustBridge — Stellar Account Check',
+    checkedAccount: 'Checked account:',
+    horizon: 'Horizon:',
+    asset: 'Asset:',
+    resultsHeading: 'Results',
+    validationGateHeading: 'Validation gate',
+    readyToProceed: 'Ready to proceed: all checks passed.',
+    blockedBy: 'Blocked by:',
+    passedChecks: 'Passed checks:',
+    failedChecks: 'Failed checks:',
+    balancesHeading: 'Balances',
+    xlmBalance: 'XLM balance:',
+    minimumRequired: 'Minimum required:',
+    setupCostHeading: 'Setup cost estimate',
+    minimumAccountBalance: 'Stellar minimum account balance:',
+    baseReservePerTrustline: 'Base reserve per trustline (ledger entry):',
+    typicalMinimumToFund: 'Typical minimum to fund account + one trustline:',
+    addTrustlineHeading: 'Add a trustline',
+    viewAccountOnLab: 'View account on Stellar Laboratory',
+    openTransactionBuilder: 'Open Transaction Builder (Change Trust)',
+    lobstrWallet: 'LOBSTR wallet',
+    lobstrDescription: 'add asset',
+    sepWalletActionsHeading: 'Quick wallet actions (SEP-0007)',
+    sepWalletActionsDescription: 'Open these links in a SEP-0007-compatible wallet (LOBSTR, Solar, Albedo) to complete setup.',
+    sendXlmToActivate: 'Send {amount} XLM to activate account',
+    remediationHeading: 'Remediation',
+    configurationSummaryHeading: 'Configuration summary',
+    inputColumn: 'Input',
+    valueColumn: 'Value',
+    failOnMissingTrue: '`true` — step fails on missing checks',
+    failOnMissingFalse: '`false` — only warns',
+    stickyCommentTrue: '`true` — upserts prior comment',
+    stickyCommentFalse: '`false` — always posts new',
+    waitUntilFundedTrue: '`true`',
+    waitUntilFundedFalse: '`false` (default)',
+    waitUntilFundedTimeoutMs: '`{ms}`',
+    waitUntilFundedIntervalMs: '`{ms}`',
+    outputsHeading: 'Action outputs reference',
+    outputsDescription: 'Use these output names in downstream workflow steps via `steps.<id>.outputs.<name>`.',
+    outputColumn: 'Output',
+    valueRunColumn: 'Value in this run',
+    descriptionColumn: 'Description',
+    accountFundedOutput: 'Whether the account exists on the Stellar network (from `action.yml`)',
+    trustlineExistsOutput: 'Whether the **{assetCode}** trustline is configured (from `action.yml`)',
+    xlmBalanceOutput: 'Native XLM balance reported by Horizon (from `action.yml`)',
+    commentUrlOutput: 'URL of this issue comment (from `action.yml`)',
+    metricsHeading: 'Metrics',
+    metricsDescription: 'Machine-readable run metrics. Values are structural counts only — no account addresses or balances.',
+    accountFundedLabel: 'Account funded',
+    accountFundedPassDetail: (address) => `Account ${address} is active on the Stellar network.`,
+    accountFundedFailDetail: (address) => `Account ${address} was **not found** on Horizon — it may not be funded or activated yet.`,
+    trustlineLabel: (assetCode) => `${assetCode} trustline`,
+    trustlinePassDetail: (assetCode, issuer) => `Trustline for **${assetCode}** (${issuer}) is configured.`,
+    trustlineFailHasTrustlines: (assetCode, issuer) => `Account has trustlines, but not for **${assetCode}** issued by ${issuer}.`,
+    trustlineFailNoTrustlines: 'Account has **zero trustlines** — add a trustline before receiving this asset.',
+    xlmReserveLabel: 'XLM reserve',
+    xlmReservePassDetail: (balance, required) => `Balance **${balance} XLM** meets the minimum of **${required} XLM**.`,
+    xlmReserveFailDetail: (balance, required) => `Balance **${balance} XLM** is below the required **${required} XLM**.`,
+    horizonAvailabilityLabel: 'Horizon availability',
+    remediationAddTrustline: (assetCode) => `Add a **${assetCode}** trustline using [Stellar Laboratory](https://laboratory.stellar.org/) (Change Trust operation) or a wallet such as [LOBSTR](https://lobstr.co/).`,
+    remediationSendXlm: (amount, address) => `Send at least **${amount} XLM** to ${address} to meet the reserve requirement.`,
+    remediationActivateAccount: (address, minBalance, assetCode) => `Activate ${address} by sending at least **${minBalance} XLM** (Stellar minimum account balance).\n\nThen add a **${assetCode}** trustline via [Stellar Laboratory](https://laboratory.stellar.org/) or [LOBSTR](https://lobstr.co/).`,
+    remediationAccountNotFound: (assetCode) => `Estimated setup cost: ~**1.5 XLM** (1 XLM base + 0.5 XLM per ${assetCode} trustline reserve).`,
+    remediationEstimatedSetupCost: (cost) => `Estimated setup cost: ~**${cost} XLM**.`,
+    remediationHorizonError: 'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
+};
+/**
+ * Spanish (es) locale strings.
+ */
+const ES = {
+    heading: 'TrustBridge — Verificación de Cuenta Stellar',
+    checkedAccount: 'Cuenta verificada:',
+    horizon: 'Horizon:',
+    asset: 'Activo:',
+    resultsHeading: 'Resultados',
+    validationGateHeading: 'Puerta de validación',
+    readyToProceed: 'Listo para proceder: todas las comprobaciones pasaron.',
+    blockedBy: 'Bloqueado por:',
+    passedChecks: 'Comprobaciones pasadas:',
+    failedChecks: 'Comprobaciones fallidas:',
+    balancesHeading: 'Saldos',
+    xlmBalance: 'Saldo de XLM:',
+    minimumRequired: 'Mínimo requerido:',
+    setupCostHeading: 'Estimación del costo de configuración',
+    minimumAccountBalance: 'Saldo mínimo de cuenta Stellar:',
+    baseReservePerTrustline: 'Reserva base por línea de confianza (entrada del libro mayor):',
+    typicalMinimumToFund: 'Mínimo típico para financiar cuenta + una línea de confianza:',
+    addTrustlineHeading: 'Agregar una línea de confianza',
+    viewAccountOnLab: 'Ver cuenta en Stellar Laboratory',
+    openTransactionBuilder: 'Abrir Transaction Builder (Change Trust)',
+    lobstrWallet: 'Billetera LOBSTR',
+    lobstrDescription: 'agregar activo',
+    sepWalletActionsHeading: 'Acciones rápidas de billetera (SEP-0007)',
+    sepWalletActionsDescription: 'Abre estos enlaces en una billetera compatible con SEP-0007 (LOBSTR, Solar, Albedo) para completar la configuración.',
+    sendXlmToActivate: 'Envía {amount} XLM para activar la cuenta',
+    remediationHeading: 'Remediación',
+    configurationSummaryHeading: 'Resumen de configuración',
+    inputColumn: 'Entrada',
+    valueColumn: 'Valor',
+    failOnMissingTrue: '`true` — el paso falla en comprobaciones faltantes',
+    failOnMissingFalse: '`false` — solo advierte',
+    stickyCommentTrue: '`true` — actualiza comentario anterior',
+    stickyCommentFalse: '`false` — siempre publica uno nuevo',
+    waitUntilFundedTrue: '`true`',
+    waitUntilFundedFalse: '`false` (predeterminado)',
+    waitUntilFundedTimeoutMs: '`{ms}`',
+    waitUntilFundedIntervalMs: '`{ms}`',
+    outputsHeading: 'Referencia de salidas de acción',
+    outputsDescription: 'Use estos nombres de salida en pasos de flujo de trabajo posteriores a través de `steps.<id>.outputs.<name>`.',
+    outputColumn: 'Salida',
+    valueRunColumn: 'Valor en esta ejecución',
+    descriptionColumn: 'Descripción',
+    accountFundedOutput: 'Si la cuenta existe en la red Stellar (de `action.yml`)',
+    trustlineExistsOutput: 'Si la línea de confianza **{assetCode}** está configurada (de `action.yml`)',
+    xlmBalanceOutput: 'Saldo de XLM nativo reportado por Horizon (de `action.yml`)',
+    commentUrlOutput: 'URL del comentario de problema (de `action.yml`)',
+    metricsHeading: 'Métricas',
+    metricsDescription: 'Métricas de ejecución legibles por máquina. Los valores son solo recuentos estructurales — sin direcciones de cuenta ni saldos.',
+    accountFundedLabel: 'Cuenta financiada',
+    accountFundedPassDetail: (address) => `La cuenta ${address} está activa en la red Stellar.`,
+    accountFundedFailDetail: (address) => `La cuenta ${address} **no se encontró** en Horizon — puede que no esté financiada o activada aún.`,
+    trustlineLabel: (assetCode) => `Línea de confianza ${assetCode}`,
+    trustlinePassDetail: (assetCode, issuer) => `Línea de confianza para **${assetCode}** (${issuer}) está configurada.`,
+    trustlineFailHasTrustlines: (assetCode, issuer) => `La cuenta tiene líneas de confianza, pero no para **${assetCode}** emitido por ${issuer}.`,
+    trustlineFailNoTrustlines: 'La cuenta tiene **cero líneas de confianza** — agrega una antes de recibir este activo.',
+    xlmReserveLabel: 'Reserva de XLM',
+    xlmReservePassDetail: (balance, required) => `El saldo **${balance} XLM** cumple con el mínimo de **${required} XLM**.`,
+    xlmReserveFailDetail: (balance, required) => `El saldo **${balance} XLM** está por debajo del requerido **${required} XLM**.`,
+    horizonAvailabilityLabel: 'Disponibilidad de Horizon',
+    remediationAddTrustline: (assetCode) => `Agrega una línea de confianza **${assetCode}** usando [Stellar Laboratory](https://laboratory.stellar.org/) (operación Change Trust) o una billetera como [LOBSTR](https://lobstr.co/).`,
+    remediationSendXlm: (amount, address) => `Envía al menos **${amount} XLM** a ${address} para cumplir con el requisito de reserva.`,
+    remediationActivateAccount: (address, minBalance, assetCode) => `Activa ${address} enviando al menos **${minBalance} XLM** (saldo mínimo de cuenta Stellar).\n\nLuego agrega una línea de confianza **${assetCode}** a través de [Stellar Laboratory](https://laboratory.stellar.org/) o [LOBSTR](https://lobstr.co/).`,
+    remediationAccountNotFound: (assetCode) => `Costo estimado de configuración: ~**1.5 XLM** (1 XLM base + 0.5 XLM por reserva de línea de confianza ${assetCode}).`,
+    remediationEstimatedSetupCost: (cost) => `Costo estimado de configuración: ~**${cost} XLM**.`,
+    remediationHorizonError: 'Horizon no se pudo alcanzar. Reinténtalo más tarde o verifica tu entrada `horizon_url` y la conectividad de red.',
+};
+/**
+ * Portuguese (pt) locale strings.
+ */
+const PT = {
+    heading: 'TrustBridge — Verificação de Conta Stellar',
+    checkedAccount: 'Conta verificada:',
+    horizon: 'Horizon:',
+    asset: 'Ativo:',
+    resultsHeading: 'Resultados',
+    validationGateHeading: 'Portão de validação',
+    readyToProceed: 'Pronto para prosseguir: todas as verificações passaram.',
+    blockedBy: 'Bloqueado por:',
+    passedChecks: 'Verificações aprovadas:',
+    failedChecks: 'Verificações falhadas:',
+    balancesHeading: 'Saldos',
+    xlmBalance: 'Saldo de XLM:',
+    minimumRequired: 'Mínimo necessário:',
+    setupCostHeading: 'Estimativa de custo de configuração',
+    minimumAccountBalance: 'Saldo mínimo de conta Stellar:',
+    baseReservePerTrustline: 'Reserva base por linha de confiança (entrada de ledger):',
+    typicalMinimumToFund: 'Mínimo típico para financiar conta + uma linha de confiança:',
+    addTrustlineHeading: 'Adicionar uma linha de confiança',
+    viewAccountOnLab: 'Ver conta no Stellar Laboratory',
+    openTransactionBuilder: 'Abrir Transaction Builder (Change Trust)',
+    lobstrWallet: 'Carteira LOBSTR',
+    lobstrDescription: 'adicionar ativo',
+    sepWalletActionsHeading: 'Ações rápidas da carteira (SEP-0007)',
+    sepWalletActionsDescription: 'Abra esses links em uma carteira compatível com SEP-0007 (LOBSTR, Solar, Albedo) para concluir a configuração.',
+    sendXlmToActivate: 'Envie {amount} XLM para ativar a conta',
+    remediationHeading: 'Remediação',
+    configurationSummaryHeading: 'Resumo da configuração',
+    inputColumn: 'Entrada',
+    valueColumn: 'Valor',
+    failOnMissingTrue: '`true` — etapa falha em verificações ausentes',
+    failOnMissingFalse: '`false` — apenas avisa',
+    stickyCommentTrue: '`true` — atualiza comentário anterior',
+    stickyCommentFalse: '`false` — sempre publica um novo',
+    waitUntilFundedTrue: '`true`',
+    waitUntilFundedFalse: '`false` (padrão)',
+    waitUntilFundedTimeoutMs: '`{ms}`',
+    waitUntilFundedIntervalMs: '`{ms}`',
+    outputsHeading: 'Referência de saídas de ação',
+    outputsDescription: 'Use esses nomes de saída em etapas de fluxo de trabalho posteriores via `steps.<id>.outputs.<name>`.',
+    outputColumn: 'Saída',
+    valueRunColumn: 'Valor nesta execução',
+    descriptionColumn: 'Descrição',
+    accountFundedOutput: 'Se a conta existe na rede Stellar (de `action.yml`)',
+    trustlineExistsOutput: 'Se a linha de confiança **{assetCode}** está configurada (de `action.yml`)',
+    xlmBalanceOutput: 'Saldo de XLM nativo relatado pelo Horizon (de `action.yml`)',
+    commentUrlOutput: 'URL do comentário de problema (de `action.yml`)',
+    metricsHeading: 'Métricas',
+    metricsDescription: 'Métricas de execução legíveis por máquina. Os valores são apenas contagens estruturais — nenhum endereço de conta ou saldo.',
+    accountFundedLabel: 'Conta financiada',
+    accountFundedPassDetail: (address) => `A conta ${address} está ativa na rede Stellar.`,
+    accountFundedFailDetail: (address) => `A conta ${address} **não foi encontrada** no Horizon — pode não estar financiada ou ativada ainda.`,
+    trustlineLabel: (assetCode) => `Linha de confiança ${assetCode}`,
+    trustlinePassDetail: (assetCode, issuer) => `Linha de confiança para **${assetCode}** (${issuer}) está configurada.`,
+    trustlineFailHasTrustlines: (assetCode, issuer) => `A conta tem linhas de confiança, mas não para **${assetCode}** emitido por ${issuer}.`,
+    trustlineFailNoTrustlines: 'A conta tem **zero linhas de confiança** — adicione uma antes de receber esse ativo.',
+    xlmReserveLabel: 'Reserva de XLM',
+    xlmReservePassDetail: (balance, required) => `Saldo **${balance} XLM** atende ao mínimo de **${required} XLM**.`,
+    xlmReserveFailDetail: (balance, required) => `Saldo **${balance} XLM** está abaixo do exigido **${required} XLM**.`,
+    horizonAvailabilityLabel: 'Disponibilidade do Horizon',
+    remediationAddTrustline: (assetCode) => `Adicione uma linha de confiança **${assetCode}** usando [Stellar Laboratory](https://laboratory.stellar.org/) (operação Change Trust) ou uma carteira como [LOBSTR](https://lobstr.co/).`,
+    remediationSendXlm: (amount, address) => `Envie pelo menos **${amount} XLM** para ${address} para atender ao requisito de reserva.`,
+    remediationActivateAccount: (address, minBalance, assetCode) => `Ative ${address} enviando pelo menos **${minBalance} XLM** (saldo mínimo de conta Stellar).\n\nEm seguida, adicione uma linha de confiança **${assetCode}** via [Stellar Laboratory](https://laboratory.stellar.org/) ou [LOBSTR](https://lobstr.co/).`,
+    remediationAccountNotFound: (assetCode) => `Custo estimado de configuração: ~**1.5 XLM** (1 XLM base + 0.5 XLM por reserva de linha de confiança ${assetCode}).`,
+    remediationEstimatedSetupCost: (cost) => `Custo estimado de configuração: ~**${cost} XLM**.`,
+    remediationHorizonError: 'Horizon não pôde ser alcançado. Tente novamente mais tarde ou verifique sua entrada `horizon_url` e a conectividade de rede.',
+};
+const LOCALES = {
+    en: EN,
+    es: ES,
+    pt: PT,
+};
+/**
+ * Get comment strings for a given locale, with automatic fallback to English
+ * if the locale is not available.
+ */
+function getStrings(locale) {
+    const normalizedLocale = (locale || 'en').toLowerCase();
+    return LOCALES[normalizedLocale] || EN;
+}
+/**
+ * Validate that a locale string is supported.
+ */
+function isValidLocale(locale) {
+    if (!locale)
+        return false;
+    return Object.keys(LOCALES).includes(locale.toLowerCase());
+}
+/**
+ * Parse and validate a locale input from action configuration.
+ * Falls back to 'en' if the input is invalid or unset.
+ */
+function parseLocaleInput(input) {
+    if (!input)
+        return 'en';
+    const normalized = input.trim().toLowerCase();
+    if (isValidLocale(normalized)) {
+        return normalized;
+    }
+    return 'en';
+}
+
+
+/***/ }),
+
 /***/ 9407:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -36613,7 +36940,7 @@ const outputs_1 = __nccwpck_require__(7729);
 const logger_1 = __nccwpck_require__(6999);
 const metrics_1 = __nccwpck_require__(5670);
 const validation_1 = __nccwpck_require__(4344);
-const delta_1 = __nccwpck_require__(1493);
+const i18n_1 = __nccwpck_require__(4859);
 async function run() {
     const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
     const assetCode = core.getInput('asset_code') || 'USDC';
@@ -36646,11 +36973,15 @@ async function run() {
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Internationalization (Issue #59)
+    const localeInput = core.getInput('locale') || 'en';
+    const locale = (0, i18n_1.parseLocaleInput)(localeInput);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -36782,6 +37113,7 @@ async function run() {
         waitUntilFundedIntervalMs,
         sep0007DeepLinks,
         sep0007OriginDomain,
+        locale,
     });
     let commentUrl;
     try {

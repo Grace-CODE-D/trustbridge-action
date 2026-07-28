@@ -30,10 +30,7 @@ import { setValidationOutputs, writeValidationJson } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
-import {
-  computeValidationDelta,
-  loadPreviousValidationArtifact,
-} from './delta';
+import { parseLocaleInput } from './i18n';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -74,9 +71,10 @@ async function run(): Promise<void> {
     min: 0,
     max: 3_600_000,
   });
-  const useCache = parseBooleanInput(getInput('use_cache'), false);
-  const logInputs = parseBooleanInput(getInput('log_inputs'), false);
-  const trustbridgeConfigPath = getInput('trustbridge_config_path') || '.trustbridge.yml';
+  const useCache = parseBooleanInput(core.getInput('use_cache'), false);
+  const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
   const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
@@ -106,6 +104,10 @@ async function run(): Promise<void> {
   const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
   const previousValidationPath = core.getInput('previous_validation_path') || '';
   const privacyMode = parseBooleanInput(core.getInput('privacy_mode'), false);
+
+  // Internationalization (Issue #59)
+  const localeInput = core.getInput('locale') || 'en';
+  const locale = parseLocaleInput(localeInput);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -364,7 +366,7 @@ async function run(): Promise<void> {
     onboardingChecklist,
     sep0007DeepLinks,
     sep0007OriginDomain,
-    delta,
+    locale,
   });
 
   let commentUrl: string | undefined;

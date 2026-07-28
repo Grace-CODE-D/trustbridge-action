@@ -179,35 +179,22 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  write_validation_json:
+  locale:
     description: >-
-      Write a validation.json artifact to the workspace summarizing check
-      results (and optional delta vs previous run) for security review,
-      auditing, and cron revalidation. Defaults to false.
+      Locale for issue comment strings (e.g., 'en', 'es', 'pt').
+      Defaults to 'en' (English) if unset or invalid. See docs/USAGE.md for
+      supported locales and examples.
     required: false
-    default: 'false'
-  validation_json_path:
+    default: 'en'
+  sarif_output_path:
     description: >-
-      Path (relative to the workspace, or absolute) where validation.json
-      is written when write_validation_json is true.
-    required: false
-    default: 'validation.json'
-  previous_validation_path:
-    description: >-
-      Path to a previous run's validation.json (typically downloaded via
-      actions/download-artifact). When present and readable, TrustBridge
-      emits a delta (newly passed/failed checks) in the issue comment and
-      in the current validation.json. Missing files are ignored (first run).
+      Optional path where TrustBridge will write SARIF 2.1.0 results for
+      GitHub Advanced Security / code scanning integration. When set, the
+      action generates a SARIF file that can be uploaded via
+      github/codeql-action/upload-sarif. Leave empty to skip SARIF generation.
+      Example: 'trustbridge-sarif.json'
     required: false
     default: ''
-  privacy_mode:
-    description: >-
-      When true, Stellar addresses and asset issuers in validation.json
-      (including the delta payload) are replaced with sha256 digests so
-      retained artifacts and public Actions logs do not expose raw G-/C-
-      addresses. Issue comments still use full addresses for remediation.
-    required: false
-    default: 'false'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

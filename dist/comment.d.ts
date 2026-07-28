@@ -1,6 +1,7 @@
 import * as github from '@actions/github';
 import { CheckConfig, ValidationResult } from './checks';
 import { MetricsCollector } from './metrics';
+import { Locale } from './i18n';
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -26,6 +27,11 @@ export interface CommentConfig extends CheckConfig {
      * snapshot so the comment reflects the run that generated it.
      */
     metricsSnapshot?: MetricsCollector;
+    /**
+     * Locale for comment strings (e.g., 'en', 'es', 'pt').
+     * Falls back to English if unset or invalid.
+     */
+    locale?: Locale;
 }
 export declare const TRUSTBRIDGE_FOOTER = "_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_";
 /**
