@@ -620,7 +620,7 @@ export function validateTrustbridgeConfig(
           warnings: [],
         });
       }
-    } else if (!SECRET_FIELD_NAMES.has('asset_issuer')) {
+    } else if (!SECRET_FIELD_NAMES.has(trimmedIssuer)) {
       // Neither G nor C — invalid format
       results.push({
         valid: false,

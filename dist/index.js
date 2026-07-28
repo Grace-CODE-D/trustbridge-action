@@ -35636,13 +35636,6 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Ledger freshness guard (Issue #107)
-    const checkLedgerFreshnessEnabled = (0, inputs_1.parseBooleanInput)(core.getInput('check_ledger_freshness'), false);
-    const maxLedgerLagSeconds = (0, inputs_1.parseNumberInput)(core.getInput('max_ledger_lag_seconds'), 60, {
-        min: 5,
-        max: 3600,
-    });
-    const ledgerFreshnessFailOnStale = (0, inputs_1.parseBooleanInput)(core.getInput('ledger_freshness_fail_on_stale'), false);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -37079,7 +37072,7 @@ function validateTrustbridgeConfig(raw) {
                 });
             }
         }
-        else if (!exports.SECRET_FIELD_NAMES.has('asset_issuer')) {
+        else if (!exports.SECRET_FIELD_NAMES.has(trimmedIssuer)) {
             // Neither G nor C — invalid format
             results.push({
                 valid: false,
