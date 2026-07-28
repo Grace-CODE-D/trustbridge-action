@@ -17,6 +17,7 @@ import {
 } from './links';
 import { inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
+import { ValidationDelta, formatDeltaMarkdown } from './delta';
 
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
@@ -44,6 +45,12 @@ export interface CommentConfig extends CheckConfig {
    * snapshot so the comment reflects the run that generated it.
    */
   metricsSnapshot?: MetricsCollector;
+  /**
+   * Optional delta vs the previous workflow-run validation artifact.
+   * When present, a "Delta vs previous run" section is rendered after Results.
+   * Omit (or pass null) on the first run so the section is not shown.
+   */
+  delta?: ValidationDelta | null;
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
@@ -88,6 +95,11 @@ export function formatCommentBody(
 
   for (const check of result.checks) {
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
+  }
+
+  const deltaSection = formatDeltaMarkdown(config.delta);
+  if (deltaSection) {
+    lines.push('', deltaSection);
   }
 
   lines.push(

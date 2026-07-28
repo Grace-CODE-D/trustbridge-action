@@ -12,10 +12,14 @@ import { formatCommentBody, postIssueComment } from './comment';
 import { normalizeAssetConfig } from './assets';
 import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
 import { formatFailureSummary } from './summary';
-import { setValidationOutputs } from './outputs';
+import { setValidationOutputs, writeValidationJson } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
+import {
+  computeValidationDelta,
+  loadPreviousValidationArtifact,
+} from './delta';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -62,6 +66,15 @@ async function run(): Promise<void> {
   // SEP-0007 wallet deep links (Issue #44)
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+
+  // Security artifacts / delta vs previous run (Issue #148)
+  const writeValidationJsonEnabled = parseBooleanInput(
+    core.getInput('write_validation_json'),
+    false,
+  );
+  const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
+  const previousValidationPath = core.getInput('previous_validation_path') || '';
+  const privacyMode = parseBooleanInput(core.getInput('privacy_mode'), false);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -189,6 +202,18 @@ async function run(): Promise<void> {
 
   setValidationOutputs(result);
 
+  const previousArtifact = loadPreviousValidationArtifact(previousValidationPath);
+  const delta = computeValidationDelta(previousArtifact, result);
+  if (!previousArtifact && previousValidationPath.trim()) {
+    core.info(
+      'No previous validation artifact found — omitting delta (first run or missing download).',
+    );
+  } else if (delta) {
+    core.info(
+      `Validation delta vs previous run: newlyPassed=${delta.newlyPassed.length}, newlyFailed=${delta.newlyFailed.length}, unchanged=${delta.unchanged.length}`,
+    );
+  }
+
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
     stellarAddress,
@@ -200,6 +225,7 @@ async function run(): Promise<void> {
     waitUntilFundedIntervalMs,
     sep0007DeepLinks,
     sep0007OriginDomain,
+    delta,
   });
 
   let commentUrl: string | undefined;
@@ -214,6 +240,23 @@ async function run(): Promise<void> {
   }
 
   setValidationOutputs(result, commentUrl);
+
+  if (writeValidationJsonEnabled) {
+    try {
+      writeValidationJson({
+        result,
+        stellarAddress,
+        assetCode: normalizedAsset.assetCode,
+        assetIssuer: normalizedAsset.assetIssuer,
+        horizonUrl,
+        outputPath: validationJsonPath,
+        delta,
+        privacyMode,
+      });
+    } catch (error) {
+      core.warning(`Failed to write validation.json: ${getErrorMessage(error)}`);
+    }
+  }
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
