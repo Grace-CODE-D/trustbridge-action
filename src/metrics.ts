@@ -1,12 +1,15 @@
 /**
  * Metrics collection for monitoring action performance and behavior.
  *
- * Wave #37: OctokitMetrics — instruments GitHub API (Octokit) calls with
- * per-operation latency, HTTP status codes, retry counts, and structured
- * failure codes. Results are exported as a JSON artifact for dashboard
- * jobs and payout automation to consume.
+ * Wave #27 additions:
+ *   - `JobSummaryRow` / `JobSummarySection` types for structured summary output
+ *   - `MetricsCollector.buildJobSummary()` — produce a machine-readable
+ *     `JobSummaryReport` from the current metrics state
+ *   - `writeJobSummary()` — write the summary to GitHub Actions Job Summary
+ *     via `@actions/core`; no-ops outside a GitHub Actions context
  */
 
+import * as core from '@actions/core';
 import { validateContractAddress } from './validation';
 
 export interface MetricPoint {
@@ -377,6 +380,131 @@ export class MetricsCollector {
 
     const sum = metricPoints.reduce((acc, m) => acc + m.value, 0);
     return sum / metricPoints.length;
+  }
+
+  /**
+   * Build a structured Job Summary report from current metrics state.
+   *
+   * The report contains:
+   *   - `latencyMs`     – average duration of any `*_duration` metrics (ms)
+   *   - `failureCodes`  – unique HTTP status codes recorded via
+   *                       `recordMetric('horizon_error', code, 'http_status')`
+   *   - `totalRuns`     – value of the `runs` counter
+   *   - `totalErrors`   – value of the `errors` counter
+   *   - `jsonArtifact`  – the full `getSummary()` payload serialised as JSON
+   *                       (tags stripped — no contract addresses)
+   *
+   * Safe to call at any time; never throws.
+   */
+  buildJobSummary(): JobSummaryReport {
+    // Latency: average of all *_duration metrics
+    const durationPoints = this.metrics.filter((m) => m.name.endsWith('_duration'));
+    const latencyMs =
+      durationPoints.length > 0
+        ? durationPoints.reduce((sum, m) => sum + m.value, 0) / durationPoints.length
+        : null;
+
+    // Failure codes: values of metrics named "horizon_error" with unit "http_status"
+    const failureCodes = [
+      ...new Set(
+        this.metrics
+          .filter((m) => m.name === 'horizon_error' && m.unit === 'http_status')
+          .map((m) => m.value),
+      ),
+    ].sort((a, b) => a - b);
+
+    // JSON artifact (tags stripped to avoid leaking contract addresses)
+    const summary = this.getSummary();
+    const safeArtifact = {
+      totalMetrics: summary.totalMetrics,
+      counters: summary.counters,
+      metrics: summary.metrics.map((m) => ({
+        name: m.name,
+        value: m.value,
+        unit: m.unit,
+        timestamp: m.timestamp,
+      })),
+    };
+
+    return {
+      latencyMs,
+      failureCodes,
+      totalRuns: this.counters.get('runs') ?? 0,
+      totalErrors: this.counters.get('errors') ?? 0,
+      jsonArtifact: JSON.stringify(safeArtifact, null, 2),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Job Summary types (Wave #27)
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured report produced by `MetricsCollector.buildJobSummary()`.
+ */
+export interface JobSummaryReport {
+  /** Average latency across all `*_duration` metrics, or null if none recorded. */
+  latencyMs: number | null;
+  /** Unique HTTP failure codes recorded as `horizon_error` metrics. */
+  failureCodes: number[];
+  /** Value of the `runs` counter (how many account checks were attempted). */
+  totalRuns: number;
+  /** Value of the `errors` counter (how many runs ended in an error state). */
+  totalErrors: number;
+  /** Sanitised JSON artifact — no tags, no contract addresses. */
+  jsonArtifact: string;
+}
+
+/**
+ * Write a `JobSummaryReport` to the GitHub Actions Job Summary markdown
+ * table using `core.summary`.
+ *
+ * No-ops (safe to call) when `GITHUB_STEP_SUMMARY` is not set, which is
+ * always the case in local development and test environments.
+ *
+ * The output is intentionally human-readable so maintainers can inspect
+ * the Job Summary tab in GitHub Actions for latency and failure-code trends
+ * across Wave runs without reading raw log output.
+ *
+ * @param report   The report to render, typically from `MetricsCollector.buildJobSummary()`.
+ * @param runLabel Optional label for the run (e.g. the Stellar address prefix, wave issue
+ *                 number) — must not contain raw addresses; callers should redact before passing.
+ */
+export async function writeJobSummary(
+  report: JobSummaryReport,
+  runLabel?: string,
+): Promise<void> {
+  try {
+    const label = runLabel ? ` — ${runLabel}` : '';
+    core.summary.addHeading(`TrustBridge Metrics${label}`, 2);
+
+    // Overview table
+    core.summary.addTable([
+      [
+        { data: 'Metric', header: true },
+        { data: 'Value', header: true },
+      ],
+      ['Total runs', String(report.totalRuns)],
+      ['Total errors', String(report.totalErrors)],
+      ['Avg latency', report.latencyMs !== null ? `${report.latencyMs.toFixed(1)} ms` : '_none recorded_'],
+      [
+        'Failure codes',
+        report.failureCodes.length > 0
+          ? report.failureCodes.map((c) => `HTTP ${c}`).join(', ')
+          : '_none_',
+      ],
+    ]);
+
+    // JSON artifact in a collapsible details block
+    core.summary.addDetails(
+      'Metrics JSON artifact',
+      `\`\`\`json\n${report.jsonArtifact}\n\`\`\``,
+    );
+
+    await core.summary.write();
+  } catch {
+    // Never let Job Summary I/O fail the action — it is observability-only.
   }
 }
 

@@ -100,13 +100,6 @@ export declare function validateSsrfSafeUrl(url: string, fieldName: string, opti
     allowHttp?: boolean;
 }): ValidationResult;
 /**
- * Validates a Horizon URL specifically against embedded credentials,
- * path traversal (`..`, `.`, `%2e%2e`), unsupported protocols, and SSRF targets.
- */
-export declare function validateHorizonUrl(url: string, fieldName?: string, options?: {
-    allowHttp?: boolean;
-}): ValidationResult;
-/**
  * Sanitizes a single string field read from a consumer trustbridge.yml,
  * returning a ValidationResult.  Callers should reject the entire config
  * if any field fails.

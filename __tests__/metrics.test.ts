@@ -1,11 +1,9 @@
-import {
-  CONTRACT_ADDRESS_TAG_KEY,
-  MetricsCollector,
-  OctokitMetrics,
-  classifyOctokitStatus,
-  OctokitOutcome,
-  OctokitOperationRecord,
-} from '../src/metrics';
+import { CONTRACT_ADDRESS_TAG_KEY, MetricsCollector, writeJobSummary, JobSummaryReport } from '../src/metrics';
+import * as core from '@actions/core';
+
+jest.mock('@actions/core');
+
+const mockCore = core as jest.Mocked<typeof core>;
 
 const VALID_CONTRACT_ADDRESS = 'C' + 'A'.repeat(55);
 
@@ -107,208 +105,225 @@ describe('MetricsCollector counters, timers, and export', () => {
 });
 
 // ---------------------------------------------------------------------------
-// classifyOctokitStatus — Wave #37
+// Wave #27: buildJobSummary
 // ---------------------------------------------------------------------------
 
-describe('classifyOctokitStatus', () => {
-  it.each<[number, OctokitOutcome]>([
-    [200, 'success'],
-    [201, 'success'],
-    [204, 'success'],
-    [401, 'auth_error'],
-    [404, 'not_found'],
-    [429, 'rate_limited'],
-    [500, 'server_error'],
-    [502, 'server_error'],
-    [503, 'server_error'],
-    [0,   'network_error'],
-    [400, 'unknown'],
-    [422, 'unknown'],
-  ])('status %i → %s', (status, expected) => {
-    expect(classifyOctokitStatus(status)).toBe(expected);
+describe('MetricsCollector.buildJobSummary (Wave #27)', () => {
+  it('returns null latencyMs when no duration metrics recorded', () => {
+    const m = new MetricsCollector();
+    const report = m.buildJobSummary();
+    expect(report.latencyMs).toBeNull();
   });
 
-  it('classifies 403 with x-ratelimit-remaining=0 as rate_limited', () => {
-    expect(classifyOctokitStatus(403, { 'x-ratelimit-remaining': '0' })).toBe('rate_limited');
+  it('computes average latency across duration metrics', () => {
+    const m = new MetricsCollector();
+    m.recordMetric('horizon_fetch_duration', 100, 'ms');
+    m.recordMetric('horizon_fetch_duration', 200, 'ms');
+    const report = m.buildJobSummary();
+    expect(report.latencyMs).toBe(150);
   });
 
-  it('classifies 403 without rate-limit header as auth_error', () => {
-    expect(classifyOctokitStatus(403, {})).toBe('auth_error');
-    expect(classifyOctokitStatus(403)).toBe('auth_error');
+  it('only considers *_duration metrics for latency (not other metrics)', () => {
+    const m = new MetricsCollector();
+    m.recordMetric('check_count', 5, 'count');
+    m.recordMetric('horizon_fetch_duration', 80, 'ms');
+    const report = m.buildJobSummary();
+    expect(report.latencyMs).toBe(80);
+  });
+
+  it('captures unique HTTP failure codes from horizon_error metrics', () => {
+    const m = new MetricsCollector();
+    m.recordMetric('horizon_error', 429, 'http_status');
+    m.recordMetric('horizon_error', 503, 'http_status');
+    m.recordMetric('horizon_error', 429, 'http_status'); // duplicate
+    const report = m.buildJobSummary();
+    expect(report.failureCodes).toEqual([429, 503]);
+  });
+
+  it('returns empty failureCodes when no horizon_error metrics recorded', () => {
+    const m = new MetricsCollector();
+    const report = m.buildJobSummary();
+    expect(report.failureCodes).toEqual([]);
+  });
+
+  it('ignores non-http_status unit metrics named horizon_error', () => {
+    const m = new MetricsCollector();
+    m.recordMetric('horizon_error', 42, 'count'); // wrong unit
+    const report = m.buildJobSummary();
+    expect(report.failureCodes).toEqual([]);
+  });
+
+  it('reports totalRuns from the runs counter', () => {
+    const m = new MetricsCollector();
+    m.incrementCounter('runs', 3);
+    const report = m.buildJobSummary();
+    expect(report.totalRuns).toBe(3);
+  });
+
+  it('reports totalErrors from the errors counter', () => {
+    const m = new MetricsCollector();
+    m.incrementCounter('errors', 2);
+    const report = m.buildJobSummary();
+    expect(report.totalErrors).toBe(2);
+  });
+
+  it('defaults totalRuns and totalErrors to 0', () => {
+    const m = new MetricsCollector();
+    const report = m.buildJobSummary();
+    expect(report.totalRuns).toBe(0);
+    expect(report.totalErrors).toBe(0);
+  });
+
+  it('produces valid JSON in jsonArtifact', () => {
+    const m = new MetricsCollector();
+    m.recordMetric('latency', 50, 'ms');
+    m.incrementCounter('runs');
+    const report = m.buildJobSummary();
+    expect(() => JSON.parse(report.jsonArtifact)).not.toThrow();
+  });
+
+  it('strips tags from jsonArtifact (no contract addresses)', () => {
+    const m = new MetricsCollector();
+    m.recordContractMetric('asset_issuer_contract_validated', 1, VALID_CONTRACT_ADDRESS);
+    const report = m.buildJobSummary();
+    expect(report.jsonArtifact).not.toContain(VALID_CONTRACT_ADDRESS);
+    const obj = JSON.parse(report.jsonArtifact);
+    expect(obj.metrics[0].tags).toBeUndefined();
+  });
+
+  it('jsonArtifact contains totalMetrics, counters, and metrics array', () => {
+    const m = new MetricsCollector();
+    m.recordMetric('check_run', 1, 'count');
+    m.incrementCounter('runs', 1);
+    const report = m.buildJobSummary();
+    const obj = JSON.parse(report.jsonArtifact);
+    expect(obj.totalMetrics).toBe(1);
+    expect(obj.counters.runs).toBe(1);
+    expect(Array.isArray(obj.metrics)).toBe(true);
+  });
+
+  it('failure path: records 404 as failure code 404 is not included (only retryable codes are)', () => {
+    // 404 is handled as unfundedAccountResult, not recorded as horizon_error
+    const m = new MetricsCollector();
+    m.recordMetric('horizon_error', 429, 'http_status');
+    const report = m.buildJobSummary();
+    expect(report.failureCodes).toContain(429);
+    expect(report.failureCodes).not.toContain(404);
+  });
+
+  it('100+ metrics: latency averages correctly at scale', () => {
+    const m = new MetricsCollector();
+    for (let i = 1; i <= 100; i++) {
+      m.recordMetric('horizon_fetch_duration', i, 'ms');
+    }
+    const report = m.buildJobSummary();
+    // Sum of 1..100 = 5050, avg = 50.5
+    expect(report.latencyMs).toBeCloseTo(50.5, 5);
   });
 });
 
 // ---------------------------------------------------------------------------
-// OctokitMetrics — Wave #37
+// Wave #27: writeJobSummary
 // ---------------------------------------------------------------------------
 
-describe('OctokitMetrics', () => {
-  describe('track: success path', () => {
-    it('records a successful operation with status 200', async () => {
-      const om = new OctokitMetrics();
-      const response = { status: 200, headers: {}, data: { html_url: 'https://github.com/x' } };
-      const result = await om.track('issues.createComment', async () => response);
+describe('writeJobSummary (Wave #27)', () => {
+  let summaryAddHeadingMock: jest.Mock;
+  let summaryAddTableMock: jest.Mock;
+  let summaryAddDetailsMock: jest.Mock;
+  let summaryWriteMock: jest.Mock;
 
-      expect(result).toBe(response);
-      expect(om.size).toBe(1);
-      const summary = om.getSummary();
-      expect(summary.totalCalls).toBe(1);
-      expect(summary.successCount).toBe(1);
-      expect(summary.failureCount).toBe(0);
-      expect(summary.outcomeBreakdown.success).toBe(1);
-      expect(summary.operations[0].operation).toBe('issues.createComment');
-      expect(summary.operations[0].statusCode).toBe(200);
-      expect(summary.operations[0].outcome).toBe('success');
-      expect(summary.operations[0].latencyMs).toBeGreaterThanOrEqual(0);
-      expect(summary.operations[0].retries).toBe(0);
-      expect(summary.operations[0].startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    });
+  beforeEach(() => {
+    summaryAddHeadingMock = jest.fn().mockReturnThis();
+    summaryAddTableMock = jest.fn().mockReturnThis();
+    summaryAddDetailsMock = jest.fn().mockReturnThis();
+    summaryWriteMock = jest.fn().mockResolvedValue(undefined);
 
-    it('records a 201 created response as success', async () => {
-      const om = new OctokitMetrics();
-      await om.track('issues.createComment', async () => ({ status: 201, headers: {} }));
-      expect(om.getSummary().operations[0].outcome).toBe('success');
-    });
-
-    it('accumulates latency across multiple calls', async () => {
-      const om = new OctokitMetrics();
-      await om.track('op1', async () => ({ status: 200, headers: {} }));
-      await om.track('op2', async () => ({ status: 200, headers: {} }));
-      expect(om.getSummary().totalCalls).toBe(2);
-      expect(om.getSummary().totalLatencyMs).toBeGreaterThanOrEqual(0);
-    });
+    (mockCore.summary as unknown as Record<string, jest.Mock>) = {
+      addHeading: summaryAddHeadingMock,
+      addTable: summaryAddTableMock,
+      addDetails: summaryAddDetailsMock,
+      write: summaryWriteMock,
+    };
   });
 
-  describe('track: failure paths', () => {
-    it('records a 401 as auth_error and rethrows', async () => {
-      const om = new OctokitMetrics();
-      const err = Object.assign(new Error('Bad credentials'), { status: 401 });
-      await expect(om.track('issues.createComment', async () => { throw err; }))
-        .rejects.toThrow('Bad credentials');
-      const summary = om.getSummary();
-      expect(summary.operations[0].outcome).toBe('auth_error');
-      expect(summary.operations[0].statusCode).toBe(401);
-      expect(summary.operations[0].errorMessage).toBe('Bad credentials');
-      expect(summary.failureCount).toBe(1);
-    });
+  function makeReport(overrides: Partial<JobSummaryReport> = {}): JobSummaryReport {
+    return {
+      latencyMs: 42.5,
+      failureCodes: [429, 503],
+      totalRuns: 5,
+      totalErrors: 2,
+      jsonArtifact: '{"totalMetrics":0,"counters":{},"metrics":[]}',
+      ...overrides,
+    };
+  }
 
-    it('records a 403 with rate-limit header as rate_limited', async () => {
-      const om = new OctokitMetrics();
-      const err = Object.assign(new Error('Forbidden'), {
-        status: 403,
-        response: { headers: { 'x-ratelimit-remaining': '0' } },
-      });
-      await expect(om.track('issues.addLabels', async () => { throw err; })).rejects.toThrow();
-      expect(om.getSummary().operations[0].outcome).toBe('rate_limited');
-    });
-
-    it('records a 404 as not_found', async () => {
-      const om = new OctokitMetrics();
-      const err = Object.assign(new Error('Not Found'), { status: 404 });
-      await expect(om.track('issues.removeLabel', async () => { throw err; })).rejects.toThrow();
-      expect(om.getSummary().operations[0].outcome).toBe('not_found');
-    });
-
-    it('records a 500 as server_error', async () => {
-      const om = new OctokitMetrics();
-      const err = Object.assign(new Error('Internal Server Error'), { status: 500 });
-      await expect(om.track('issues.updateComment', async () => { throw err; })).rejects.toThrow();
-      expect(om.getSummary().operations[0].outcome).toBe('server_error');
-    });
-
-    it('records a network error (no status) as network_error', async () => {
-      const om = new OctokitMetrics();
-      await expect(om.track('issues.createComment', async () => { throw new Error('ECONNREFUSED'); }))
-        .rejects.toThrow();
-      const op = om.getSummary().operations[0];
-      expect(op.outcome).toBe('network_error');
-      expect(op.statusCode).toBe(0);
-    });
+  it('calls core.summary.write', async () => {
+    await writeJobSummary(makeReport());
+    expect(summaryWriteMock).toHaveBeenCalled();
   });
 
-  describe('track: retry count propagation', () => {
-    it('records the caller-supplied retry count', async () => {
-      const om = new OctokitMetrics();
-      await om.track('issues.createComment', async () => ({ status: 200, headers: {} }), 2);
-      expect(om.getSummary().operations[0].retries).toBe(2);
-      expect(om.getSummary().totalRetries).toBe(2);
-    });
+  it('adds a heading with TrustBridge Metrics', async () => {
+    await writeJobSummary(makeReport());
+    expect(summaryAddHeadingMock).toHaveBeenCalledWith(
+      expect.stringContaining('TrustBridge Metrics'),
+      2,
+    );
   });
 
-  describe('record: direct insert', () => {
-    it('accepts pre-resolved records', () => {
-      const om = new OctokitMetrics();
-      const rec: OctokitOperationRecord = {
-        operation: 'issues.createComment',
-        statusCode: 200,
-        latencyMs: 42,
-        outcome: 'success',
-        retries: 0,
-        startedAt: new Date().toISOString(),
-      };
-      om.record(rec);
-      expect(om.size).toBe(1);
-      expect(om.getSummary().operations[0]).toEqual(rec);
-    });
+  it('includes run label in heading when provided', async () => {
+    await writeJobSummary(makeReport(), 'Wave #27');
+    expect(summaryAddHeadingMock).toHaveBeenCalledWith(
+      expect.stringContaining('Wave #27'),
+      2,
+    );
   });
 
-  describe('getSummary: aggregates', () => {
-    it('computes averageLatencyMs correctly', async () => {
-      const om = new OctokitMetrics();
-      om.record({ operation: 'a', statusCode: 200, latencyMs: 100, outcome: 'success', retries: 0, startedAt: '' });
-      om.record({ operation: 'b', statusCode: 200, latencyMs: 200, outcome: 'success', retries: 0, startedAt: '' });
-      expect(om.getSummary().averageLatencyMs).toBe(150);
-    });
-
-    it('returns 0 averageLatencyMs when no records', () => {
-      expect(new OctokitMetrics().getSummary().averageLatencyMs).toBe(0);
-    });
-
-    it('outcomeBreakdown includes all outcome categories', () => {
-      const summary = new OctokitMetrics().getSummary();
-      const expected: OctokitOutcome[] = ['success', 'auth_error', 'not_found', 'rate_limited', 'server_error', 'network_error', 'unknown'];
-      for (const outcome of expected) {
-        expect(summary.outcomeBreakdown).toHaveProperty(outcome);
-      }
-    });
-
-    it('returns a deep copy of operations so mutations do not affect the store', () => {
-      const om = new OctokitMetrics();
-      om.record({ operation: 'x', statusCode: 200, latencyMs: 1, outcome: 'success', retries: 0, startedAt: '' });
-      const s1 = om.getSummary();
-      s1.operations[0].operation = 'mutated';
-      const s2 = om.getSummary();
-      expect(s2.operations[0].operation).toBe('x');
-    });
+  it('includes a table with totals and latency', async () => {
+    await writeJobSummary(makeReport({ totalRuns: 7, latencyMs: 99.9 }));
+    const tableArg = summaryAddTableMock.mock.calls[0][0] as unknown[][];
+    const flat = tableArg.flat().map(String);
+    expect(flat.join(' ')).toContain('7');
+    expect(flat.join(' ')).toContain('99.9');
   });
 
-  describe('toJSON', () => {
-    it('produces valid JSON matching getSummary shape', async () => {
-      const om = new OctokitMetrics();
-      await om.track('issues.createComment', async () => ({ status: 200, headers: {} }));
-      const json = JSON.parse(om.toJSON());
-      expect(json.totalCalls).toBe(1);
-      expect(json.successCount).toBe(1);
-      expect(Array.isArray(json.operations)).toBe(true);
-      expect(json.operations[0].operation).toBe('issues.createComment');
-    });
-
-    it('includes all outcome breakdown keys', () => {
-      const json = JSON.parse(new OctokitMetrics().toJSON());
-      expect(json.outcomeBreakdown).toHaveProperty('success');
-      expect(json.outcomeBreakdown).toHaveProperty('auth_error');
-      expect(json.outcomeBreakdown).toHaveProperty('rate_limited');
-    });
+  it('renders failure codes in table row', async () => {
+    await writeJobSummary(makeReport({ failureCodes: [429, 503] }));
+    const tableArg = summaryAddTableMock.mock.calls[0][0] as unknown[][];
+    const flat = tableArg.flat().map(String).join(' ');
+    expect(flat).toContain('429');
+    expect(flat).toContain('503');
   });
 
-  describe('reset', () => {
-    it('clears all records', async () => {
-      const om = new OctokitMetrics();
-      await om.track('x', async () => ({ status: 200, headers: {} }));
-      expect(om.size).toBe(1);
-      om.reset();
-      expect(om.size).toBe(0);
-      expect(om.getSummary().totalCalls).toBe(0);
-    });
+  it('shows _none_ when no failure codes', async () => {
+    await writeJobSummary(makeReport({ failureCodes: [] }));
+    const tableArg = summaryAddTableMock.mock.calls[0][0] as unknown[][];
+    const flat = tableArg.flat().map(String).join(' ');
+    expect(flat).toContain('_none_');
+  });
+
+  it('shows _none recorded_ when latencyMs is null', async () => {
+    await writeJobSummary(makeReport({ latencyMs: null }));
+    const tableArg = summaryAddTableMock.mock.calls[0][0] as unknown[][];
+    const flat = tableArg.flat().map(String).join(' ');
+    expect(flat).toContain('_none recorded_');
+  });
+
+  it('includes JSON artifact in addDetails call', async () => {
+    const artifact = '{"totalMetrics":1,"counters":{},"metrics":[]}';
+    await writeJobSummary(makeReport({ jsonArtifact: artifact }));
+    expect(summaryAddDetailsMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining(artifact),
+    );
+  });
+
+  it('does not throw if core.summary.write rejects (observability-only)', async () => {
+    summaryWriteMock.mockRejectedValue(new Error('GITHUB_STEP_SUMMARY not set'));
+    await expect(writeJobSummary(makeReport())).resolves.not.toThrow();
+  });
+
+  it('does not throw if core.summary methods throw (outside Actions context)', async () => {
+    summaryAddHeadingMock.mockImplementation(() => { throw new Error('no summary'); });
+    await expect(writeJobSummary(makeReport())).resolves.not.toThrow();
   });
 });

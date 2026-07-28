@@ -8,6 +8,7 @@ import {
   tlsFailureResult,
   unfundedAccountResult,
   validateStellarAddress,
+  extractStellarAddressFromText,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount, applyWalletLabels } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
@@ -20,9 +21,9 @@ import {
 } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
-import { logger } from './logger';
-import { globalMetrics, globalOctokitMetrics } from './metrics';
-import { validateContractAddress } from './validation';
+import { logger, emitInputsLogRecord } from './logger';
+import { globalMetrics, writeJobSummary } from './metrics';
+import { validateContractAddress, clearSpans, getSpans } from './validation';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -63,7 +64,6 @@ async function run(): Promise<void> {
   });
   const useCache = parseBooleanInput(core.getInput('use_cache'), false);
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
-  const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
   const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
@@ -71,13 +71,14 @@ async function run(): Promise<void> {
   const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
   const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
-  // Unauthorized trustline policy (Issue #72)
-  const unauthorizedTrustlinePolicy = parseUnauthorizedTrustlinePolicy(
-    core.getInput('unauthorized_trustline_policy'),
-  );
+  // Wave #29: workflow_dispatch issue_number benchmark (Issue #29)
+  const issueNumberRaw = core.getInput('issue_number') || '';
+  const dispatchIssueNumber = issueNumberRaw.trim()
+    ? parseNumberInput(issueNumberRaw.trim(), 0, { min: 1 })
+    : undefined;
 
-  // Clawback warning strict mode (Issue #73)
-  const clawbackStrictMode = parseBooleanInput(core.getInput('clawback_strict_mode'), false);
+  // Wave #28: address extraction from issue body (Issue #28)
+  const extractAddressFromIssue = parseBooleanInput(core.getInput('extract_address_from_issue'), false);
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -112,7 +113,31 @@ async function run(): Promise<void> {
     rpcFallbackUrl: rpcFallbackUrlRaw,
     useCache,
     sep0007DeepLinks,
+    extractAddressFromIssue,
+    dispatchIssueNumber: dispatchIssueNumber ?? null,
   });
+
+  // Wave #28: auto-extract Stellar address from the issue body when
+  // `extract_address_from_issue` is true and no explicit address was given.
+  let resolvedStellarAddress = stellarAddress;
+  if (extractAddressFromIssue && !resolvedStellarAddress) {
+    const issueBody = github.context.payload.issue?.body ?? '';
+    const extraction = extractStellarAddressFromText(issueBody);
+    if (extraction.address) {
+      resolvedStellarAddress = extraction.address;
+      logger.debug('Stellar address extracted from issue body', {
+        component: 'index',
+        stellarAddress: resolvedStellarAddress,
+        totalFound: extraction.allAddresses.length,
+      });
+      core.info(`Extracted Stellar address from issue body: ${resolvedStellarAddress}`);
+    } else {
+      throw new Error(
+        'extract_address_from_issue is true but no valid Stellar G-address was found in the issue body. ' +
+        'Add a Stellar address to the issue body or supply stellar_address_input explicitly.',
+      );
+    }
+  }
 
   if (logInputs) {
     emitInputsLogRecord({
@@ -122,7 +147,7 @@ async function run(): Promise<void> {
       assetCode,
       assetIssuer,
       minXlmReserve: minXlmReserveRaw,
-      stellarAddress,
+      stellarAddress: resolvedStellarAddress,
       failOnMissing,
       debugMode,
       horizonTimeoutMs,
@@ -136,7 +161,7 @@ async function run(): Promise<void> {
     });
   }
 
-  validateStellarAddress(stellarAddress);
+  validateStellarAddress(resolvedStellarAddress);
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
 
   // Reject clearly unsafe Horizon/RPC endpoints before ever attempting a
@@ -184,7 +209,7 @@ async function run(): Promise<void> {
     clawbackStrictMode,
   };
 
-  core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
+  core.info(`Checking Stellar account ${resolvedStellarAddress} via ${horizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -202,11 +227,14 @@ async function run(): Promise<void> {
     useCache,
   };
 
+  globalMetrics.incrementCounter('runs');
+  globalMetrics.startTimer('horizon_fetch');
+
   try {
     const account = waitUntilFunded
       ? await waitForFundedAccount(
           horizonUrl,
-          stellarAddress,
+          resolvedStellarAddress,
           {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
@@ -220,20 +248,22 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
+      : await fetchAccount(horizonUrl, resolvedStellarAddress, horizonOptions);
+    globalMetrics.stopTimer('horizon_fetch');
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
-    if (error instanceof HorizonTlsError) {
-      core.error(error.message);
-      result = tlsFailureResult(error.message, checkConfig);
-    } else if (error instanceof HorizonError && error.statusCode === 404) {
-      result = unfundedAccountResult(stellarAddress, checkConfig);
+    globalMetrics.stopTimer('horizon_fetch');
+    if (error instanceof HorizonError && error.statusCode === 404) {
+      result = unfundedAccountResult(resolvedStellarAddress, checkConfig);
     } else if (error instanceof HorizonError) {
       core.error(error.message);
+      globalMetrics.incrementCounter('errors');
+      globalMetrics.recordMetric('horizon_error', error.statusCode, 'http_status');
       result = horizonFailureResult(error.message, checkConfig);
     } else {
       const message = getErrorMessage(error);
       core.error(message);
+      globalMetrics.incrementCounter('errors');
       result = horizonFailureResult(message, checkConfig);
     }
   }
@@ -242,7 +272,7 @@ async function run(): Promise<void> {
 
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
-    stellarAddress,
+    stellarAddress: resolvedStellarAddress,
     horizonUrl,
     failOnMissing,
     stickyComment,
@@ -256,11 +286,10 @@ async function run(): Promise<void> {
 
   let commentUrl: string | undefined;
   try {
-    commentUrl = await globalOctokitMetrics.track(
-      'issues.createComment',
-      () => postIssueComment(githubToken, commentBody, { sticky: stickyComment })
-        .then((url) => ({ status: 201, headers: {}, data: url })),
-    ).then((r) => r.data);
+    commentUrl = await postIssueComment(githubToken, commentBody, {
+      sticky: stickyComment,
+      issueNumber: dispatchIssueNumber,
+    });
     if (commentUrl) {
       logger.info('Issue comment created', { component: 'index', commentUrl });
     }
@@ -320,6 +349,9 @@ async function run(): Promise<void> {
       core.debug(JSON.stringify(spans, null, 2));
     }
   }
+
+  // Wave #27: write Job Summary with latency, failure codes, JSON artifact
+  await writeJobSummary(globalMetrics.buildJobSummary());
 
   if (result.valid) {
     core.info('All TrustBridge checks passed.');

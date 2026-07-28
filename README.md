@@ -95,9 +95,8 @@ See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet
 | `log_inputs` | No | `false` | Emit a structured JSON log record of all resolved action inputs at run start. Stellar addresses and Horizon URLs are redacted (first-4…last-4) before the record is written to GitHub Actions log output. Useful for auditing which inputs were active during a run. |
 | `trustbridge_config_path` | No | `.trustbridge.yml` | Path (relative to repository root, or absolute) to a consumer `trustbridge.yml` config file that can supply defaults for `horizon_url`, `asset_code`, `asset_issuer`, `min_xlm_reserve`, and other inputs. Explicit action inputs always override file values. The file is validated for SSRF-safe URLs, injection-clean strings, and secret field redaction before any value is used. Leave empty to skip the file entirely. |
 | `fail_on_missing` | No | `true` | `true` → `core.setFailed()`; `false` → warning only |
-| `auto_wallet_labels` | No | `false` | Automatically apply a wallet state label to the issue (`wallet: funded`, `wallet: unfunded`, `wallet: trustline-missing`, `wallet: reserve-low`, `wallet: horizon-error`). Requires `issues: write`. |
-
-Full input semantics and output reference: [docs/USAGE.md](docs/USAGE.md).
+| `issue_number` | No | _(empty)_ | GitHub issue number to post the result comment on. Intended for `workflow_dispatch` benchmark runs where the event context does not carry an issue payload. Must be a positive integer (e.g. `"29"`). Overrides any issue number derived from the event context. |
+| `extract_address_from_issue` | No | `false` | When `true`, scans the issue body for the first valid Stellar G-address and uses it as `stellar_address_input`. Fails fast if no address is found. Set `false` (default) to require an explicit `stellar_address_input`. |
 
 ---
 
@@ -176,6 +175,54 @@ Set `trustbridge_config_path: ''` to skip the file entirely and rely only on exp
 ## Soroban contract asset issuers
 
 `asset_issuer` normally holds a classic Stellar issuer address (`G...`). If you pass a Soroban contract address (`C...`) instead — e.g. for a SEP-41 fungible token contract — TrustBridge validates it against the Stellar StrKey contract-address policy (56 characters, `C` prefix, base32 alphabet) before proceeding. An invalid contract address fails the run immediately with a clear error instead of reaching Horizon or being written into the metrics/JSON output. Valid contract addresses are recorded as a metric point (`asset_issuer_contract_validated`) tagged with the contract address, visible in the metrics summary logged under `debug_mode: true`.
+
+
+---
+
+## Horizon SSRF allowlist (Wave #20)
+
+TrustBridge enforces a strict server-side-request-forgery (SSRF) block-list on every Horizon and RPC URL it accepts — whether from action inputs or a consumer `.trustbridge.yml` config file. Any URL that targets an address in the following categories is rejected immediately, **before** any HTTP call is made:
+
+| Category | Example blocked addresses |
+|----------|--------------------------|
+| IPv4 loopback | `127.0.0.1`, `127.x.x.x` |
+| IPv4 link-local | `169.254.x.x` |
+| AWS instance metadata | `169.254.169.254` |
+| GCP metadata | `metadata.google.internal` |
+| Private class-A | `10.x.x.x` |
+| Private class-B | `172.16.x.x` – `172.31.x.x` |
+| Private class-C | `192.168.x.x` |
+| IPv6 loopback | `::1`, `[::1]` |
+| IPv6 link-local | `fe80::` |
+| Bare localhost | `localhost` (any port) |
+| `file://` protocol | `file:///etc/passwd` |
+
+URLs with embedded credentials (e.g. `http://user:pass@192.168.1.1/`) are also blocked — the validator strips the userinfo component and checks the resolved host.
+
+The block-list is exported as `SSRF_BLOCKED_PATTERNS` from `src/validation.ts` and is covered by a dedicated CI audit job (`ssrf-audit`) that runs on every push and pull request. A regression that removes or weakens any entry will break the build before a release is cut.
+
+Legitimate public Horizon endpoints are always accepted:
+
+```yaml
+horizon_url: https://horizon.stellar.org          # mainnet
+horizon_url: https://horizon-testnet.stellar.org  # testnet
+horizon_url: https://horizon-futurenet.stellar.org
+```
+
+---
+
+## Workflow Job Summary (Wave #27)
+
+At the end of every run, TrustBridge writes a structured [GitHub Actions Job Summary](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#adding-a-job-summary) to the `GITHUB_STEP_SUMMARY` file. The summary includes:
+
+- Total runs and error count for the job
+- Average Horizon fetch latency (ms)
+- Unique HTTP failure codes encountered (e.g. `HTTP 429`, `HTTP 503`)
+- A collapsible JSON artifact with the full metrics snapshot (tags stripped — no contract addresses or account IDs)
+
+The summary is visible in the GitHub Actions UI under the "Summary" tab for any workflow run and is useful for diagnosing latency trends, retry storms, and systematic Horizon outages across a Wave without reading raw log output.
+
+The summary is written via `core.summary` and is safe to call outside a GitHub Actions context (local dev, tests) — it no-ops silently when `GITHUB_STEP_SUMMARY` is not set.
 
 ---
 

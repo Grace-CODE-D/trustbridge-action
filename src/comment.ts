@@ -280,6 +280,14 @@ export interface UpsertCommentOptions {
    * lookup itself fails (e.g. transient GitHub API error).
    */
   sticky?: boolean;
+  /**
+   * Explicit issue number to target. Used by `workflow_dispatch` runs that
+   * pass `issue_number` as an input so the action can post a comment on a
+   * specific issue even when the event context does not carry an issue
+   * payload. When provided, this overrides any issue number derived from
+   * `github.context.payload.issue.number`.
+   */
+  issueNumber?: number;
 }
 
 type Octokit = ReturnType<typeof github.getOctokit>;
@@ -333,11 +341,14 @@ export async function postIssueComment(
 ): Promise<string | undefined> {
   const sticky = options.sticky ?? true;
   const context = github.context;
-  const issueNumber = context.payload.issue?.number;
+  // Prefer an explicitly-supplied issue number (e.g. from workflow_dispatch
+  // input) over the event context payload so manual benchmark runs can
+  // target a specific issue.
+  const issueNumber = options.issueNumber ?? context.payload.issue?.number;
 
   if (!issueNumber) {
     core.warning(
-      'No issue context found — skipping comment. This action posts comments on `issues` events.',
+      'No issue context found — skipping comment. Pass `issue_number` as a workflow_dispatch input or run this action on an `issues` event.',
     );
     return undefined;
   }

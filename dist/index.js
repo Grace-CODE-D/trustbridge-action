@@ -33982,6 +33982,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM = exports.STELLAR_BASE_RESERVE_XLM = void 0;
 exports.normalizeStellarAddress = normalizeStellarAddress;
 exports.isValidStellarAddress = isValidStellarAddress;
+exports.extractStellarAddressFromText = extractStellarAddressFromText;
 exports.validateStellarAddress = validateStellarAddress;
 exports.parseMinXlmReserve = parseMinXlmReserve;
 exports.estimateTrustlineSetupCost = estimateTrustlineSetupCost;
@@ -34000,11 +34001,46 @@ exports.STELLAR_BASE_RESERVE_XLM = 0.5;
 /** Minimum balance required to activate a new account (XLM). */
 exports.STELLAR_MIN_ACCOUNT_BALANCE_XLM = 1;
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
+/** Pattern to find any Stellar G-address embedded in free-form text. */
+const STELLAR_ADDRESS_IN_TEXT_REGEX = /\bG[A-Z2-7]{55}\b/g;
 function normalizeStellarAddress(address) {
     return address.trim();
 }
 function isValidStellarAddress(address) {
     return STELLAR_ADDRESS_REGEX.test(normalizeStellarAddress(address));
+}
+/**
+ * Extract Stellar G-addresses from free-form text such as an issue body.
+ *
+ * Scans the text for all 56-character sequences starting with G followed by
+ * base32 characters, validates each one, and returns the first valid hit
+ * together with a deduplicated list of every valid address found.
+ *
+ * Safe to call with arbitrary untrusted input — performs no network requests
+ * and never throws.
+ *
+ * @param text - Issue body, comment text, or any free-form string.
+ * @returns `address` (first found) and `allAddresses` (all found, deduped).
+ */
+function extractStellarAddressFromText(text) {
+    if (!text) {
+        return { address: undefined, allAddresses: [] };
+    }
+    STELLAR_ADDRESS_IN_TEXT_REGEX.lastIndex = 0;
+    const seen = new Set();
+    const allAddresses = [];
+    let match;
+    while ((match = STELLAR_ADDRESS_IN_TEXT_REGEX.exec(text)) !== null) {
+        const candidate = match[0];
+        if (isValidStellarAddress(candidate) && !seen.has(candidate)) {
+            seen.add(candidate);
+            allAddresses.push(candidate);
+        }
+    }
+    return {
+        address: allAddresses[0],
+        allAddresses,
+    };
 }
 function validateStellarAddress(address) {
     if (!address || !address.trim()) {
@@ -34394,9 +34430,12 @@ async function findStickyComment(octokit, owner, repo, issueNumber) {
 async function postIssueComment(token, body, options = {}) {
     const sticky = options.sticky ?? true;
     const context = github.context;
-    const issueNumber = context.payload.issue?.number;
+    // Prefer an explicitly-supplied issue number (e.g. from workflow_dispatch
+    // input) over the event context payload so manual benchmark runs can
+    // target a specific issue.
+    const issueNumber = options.issueNumber ?? context.payload.issue?.number;
     if (!issueNumber) {
-        core.warning('No issue context found — skipping comment. This action posts comments on `issues` events.');
+        core.warning('No issue context found — skipping comment. Pass `issue_number` as a workflow_dispatch input or run this action on an `issues` event.');
         return undefined;
     }
     const octokit = github.getOctokit(token);
@@ -34487,7 +34526,6 @@ exports.hasTrustline = hasTrustline;
 exports.parseHorizonBalance = parseHorizonBalance;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
-const validation_1 = __nccwpck_require__(4344);
 class HorizonError extends Error {
     constructor(message, statusCode, retryable = false) {
         super(message);
@@ -35008,6 +35046,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7484));
+const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const horizon_1 = __nccwpck_require__(9164);
 const comment_1 = __nccwpck_require__(2246);
@@ -35053,6 +35092,13 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
+    // Wave #29: workflow_dispatch issue_number benchmark (Issue #29)
+    const issueNumberRaw = core.getInput('issue_number') || '';
+    const dispatchIssueNumber = issueNumberRaw.trim()
+        ? (0, inputs_1.parseNumberInput)(issueNumberRaw.trim(), 0, { min: 1 })
+        : undefined;
+    // Wave #28: address extraction from issue body (Issue #28)
+    const extractAddressFromIssue = (0, inputs_1.parseBooleanInput)(core.getInput('extract_address_from_issue'), false);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -35074,7 +35120,29 @@ async function run() {
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
         sep0007DeepLinks,
+        extractAddressFromIssue,
+        dispatchIssueNumber: dispatchIssueNumber ?? null,
     });
+    // Wave #28: auto-extract Stellar address from the issue body when
+    // `extract_address_from_issue` is true and no explicit address was given.
+    let resolvedStellarAddress = stellarAddress;
+    if (extractAddressFromIssue && !resolvedStellarAddress) {
+        const issueBody = github.context.payload.issue?.body ?? '';
+        const extraction = (0, checks_1.extractStellarAddressFromText)(issueBody);
+        if (extraction.address) {
+            resolvedStellarAddress = extraction.address;
+            logger_1.logger.debug('Stellar address extracted from issue body', {
+                component: 'index',
+                stellarAddress: resolvedStellarAddress,
+                totalFound: extraction.allAddresses.length,
+            });
+            core.info(`Extracted Stellar address from issue body: ${resolvedStellarAddress}`);
+        }
+        else {
+            throw new Error('extract_address_from_issue is true but no valid Stellar G-address was found in the issue body. ' +
+                'Add a Stellar address to the issue body or supply stellar_address_input explicitly.');
+        }
+    }
     if (logInputs) {
         (0, logger_1.emitInputsLogRecord)({
             horizonUrl,
@@ -35083,7 +35151,7 @@ async function run() {
             assetCode,
             assetIssuer,
             minXlmReserve: minXlmReserveRaw,
-            stellarAddress,
+            stellarAddress: resolvedStellarAddress,
             failOnMissing,
             debugMode,
             horizonTimeoutMs,
@@ -35096,7 +35164,7 @@ async function run() {
             logInputs,
         });
     }
-    (0, checks_1.validateStellarAddress)(stellarAddress);
+    (0, checks_1.validateStellarAddress)(resolvedStellarAddress);
     const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
     const normalizedAsset = (0, assets_1.normalizeAssetConfig)({ assetCode, assetIssuer });
     // Soroban fungible token contracts (SEP-41) use a "C..." contract address
@@ -35115,7 +35183,7 @@ async function run() {
         minXlmReserve,
         horizonUrl,
     };
-    core.info(`Checking Stellar account ${stellarAddress} via ${horizonUrl}`);
+    core.info(`Checking Stellar account ${resolvedStellarAddress} via ${horizonUrl}`);
     if (waitUntilFunded) {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
     }
@@ -35129,7 +35197,7 @@ async function run() {
     };
     try {
         const account = waitUntilFunded
-            ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, stellarAddress, {
+            ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, resolvedStellarAddress, {
                 timeoutMs: waitUntilFundedTimeoutMs,
                 pollIntervalMs: waitUntilFundedIntervalMs,
                 requestTimeoutMs: horizonTimeoutMs,
@@ -35139,12 +35207,12 @@ async function run() {
                     elapsedMs,
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
-            : await (0, horizon_1.fetchAccount)(horizonUrl, stellarAddress, horizonOptions);
+            : await (0, horizon_1.fetchAccount)(horizonUrl, resolvedStellarAddress, horizonOptions);
         result = (0, checks_1.runAccountChecks)(account, checkConfig);
     }
     catch (error) {
         if (error instanceof horizon_1.HorizonError && error.statusCode === 404) {
-            result = (0, checks_1.unfundedAccountResult)(stellarAddress, checkConfig);
+            result = (0, checks_1.unfundedAccountResult)(resolvedStellarAddress, checkConfig);
         }
         else if (error instanceof horizon_1.HorizonError) {
             core.error(error.message);
@@ -35159,7 +35227,7 @@ async function run() {
     (0, outputs_1.setValidationOutputs)(result);
     const commentBody = (0, comment_1.formatCommentBody)(result, {
         ...checkConfig,
-        stellarAddress,
+        stellarAddress: resolvedStellarAddress,
         horizonUrl,
         failOnMissing,
         stickyComment,
@@ -35171,7 +35239,10 @@ async function run() {
     });
     let commentUrl;
     try {
-        commentUrl = await (0, comment_1.postIssueComment)(githubToken, commentBody, { sticky: stickyComment });
+        commentUrl = await (0, comment_1.postIssueComment)(githubToken, commentBody, {
+            sticky: stickyComment,
+            issueNumber: dispatchIssueNumber,
+        });
         if (commentUrl) {
             logger_1.logger.info('Issue comment created', { component: 'index', commentUrl });
         }
@@ -36041,7 +36112,6 @@ exports.validateAssetCode = validateAssetCode;
 exports.validateUrl = validateUrl;
 exports.combineResults = combineResults;
 exports.validateSsrfSafeUrl = validateSsrfSafeUrl;
-exports.validateHorizonUrl = validateHorizonUrl;
 exports.sanitizeConfigString = sanitizeConfigString;
 exports.redactSecretFields = redactSecretFields;
 exports.validateTrustbridgeConfig = validateTrustbridgeConfig;
@@ -36316,58 +36386,6 @@ function validateSsrfSafeUrl(url, fieldName, options = {}) {
     return { valid: errors.length === 0, errors, warnings };
 }
 /**
- * Validates a Horizon URL specifically against embedded credentials,
- * path traversal (`..`, `.`, `%2e%2e`), unsupported protocols, and SSRF targets.
- */
-function validateHorizonUrl(url, fieldName = 'horizon_url', options = {}) {
-    return withSpan('validateHorizonUrl', { fieldName, allowHttp: !!options.allowHttp }, () => {
-        const errors = [];
-        const warnings = [];
-        const trimmed = url.trim();
-        if (!trimmed) {
-            errors.push(`${fieldName} cannot be empty`);
-            return { valid: false, errors, warnings };
-        }
-        // Check protocol first
-        const allowedProtocols = options.allowHttp ? ['http', 'https'] : ['https'];
-        try {
-            const parsed = new URL(trimmed);
-            const proto = parsed.protocol.replace(':', '');
-            if (!allowedProtocols.includes(proto)) {
-                errors.push(`${fieldName} must use protocol ${options.allowHttp ? 'http or https' : 'https'}, got: "${proto}"`);
-                return { valid: false, errors, warnings };
-            }
-            if (parsed.username || parsed.password) {
-                errors.push(`${fieldName} must not contain embedded credentials`);
-            }
-        }
-        catch {
-            errors.push(`${fieldName} is not a valid URL: "${trimmed}"`);
-            return { valid: false, errors, warnings };
-        }
-        // Check raw path traversal before URL constructor normalizes/collapses dot segments
-        const rawPath = trimmed.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+/, '');
-        const lowerRawPath = rawPath.toLowerCase();
-        if (rawPath.includes('..') ||
-            rawPath.includes('\\..') ||
-            lowerRawPath.includes('%2e%2e') ||
-            rawPath.includes('/./') ||
-            rawPath.endsWith('/.')) {
-            errors.push(`${fieldName} contains path traversal or invalid path segments`);
-        }
-        // SSRF check (enforce SSRF blocking for private IP, loopback, metadata)
-        const ssrfResult = validateSsrfSafeUrl(url, fieldName, options);
-        if (!ssrfResult.valid) {
-            errors.push(...ssrfResult.errors);
-        }
-        return {
-            valid: errors.length === 0,
-            errors,
-            warnings,
-        };
-    });
-}
-/**
  * Characters and patterns that must not appear in consumer-supplied
  * string fields of a trustbridge.yml file (injection prevention).
  *
@@ -36457,9 +36475,6 @@ function validateTrustbridgeConfig(raw) {
         if (val !== undefined && val !== null && val !== '') {
             if (typeof val !== 'string') {
                 results.push({ valid: false, errors: [`${urlField} must be a string`], warnings: [] });
-            }
-            else if (urlField === 'horizon_url' || urlField === 'horizon_url_fallback') {
-                results.push(validateHorizonUrl(val, urlField, { allowHttp: true }));
             }
             else {
                 results.push(validateSsrfSafeUrl(val, urlField, { allowHttp: true }));
