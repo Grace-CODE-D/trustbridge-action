@@ -329,6 +329,8 @@ export interface ActionInputsLogRecord {
   waitUntilFundedIntervalMs: number;
   horizonCacheTtlMs: number;
   useCache: boolean;
+  horizonMaxRequests: number;
+  retryMaxDelayMs: number;
   logInputs: boolean;
 }
 
@@ -360,6 +362,8 @@ export function buildInputsLogRecord(inputs: ActionInputsLogRecord): ActionInput
     waitUntilFundedIntervalMs: inputs.waitUntilFundedIntervalMs,
     horizonCacheTtlMs: inputs.horizonCacheTtlMs,
     useCache: inputs.useCache,
+    horizonMaxRequests: inputs.horizonMaxRequests,
+    retryMaxDelayMs: inputs.retryMaxDelayMs,
     logInputs: inputs.logInputs,
   };
 }

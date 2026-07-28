@@ -34035,6 +34035,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -34724,10 +34787,8 @@ async function findStickyComment(octokit, owner, repo, issueNumber) {
         issue_number: issueNumber,
         per_page: 100,
     });
-    // Use the last matching comment so that if multiple TrustBridge comments
-    // exist (e.g. sticky was toggled off then on), we upsert the most recent one.
-    const matches = comments.filter((comment) => isTrustBridgeComment(comment.body));
-    return matches.length > 0 ? matches[matches.length - 1].id : undefined;
+    const existing = comments.find((comment) => isTrustBridgeComment(comment.body));
+    return existing?.id;
 }
 async function postIssueComment(token, body, options = {}) {
     const sticky = options.sticky ?? true;
@@ -35041,6 +35102,7 @@ exports.formatStroops = formatStroops;
 exports.parseHorizonBalance = parseHorizonBalance;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
+const resilience_1 = __nccwpck_require__(2334);
 class HorizonError extends Error {
     constructor(message, statusCode, retryable = false) {
         super(message);
@@ -35119,11 +35181,11 @@ function safeAccountSummary(account) {
     return {
         balancesCount: account.balances.length,
         hasNativeBalance: account.balances.some((b) => b.asset_type === 'native'),
-        creditTrustlineCount: account.balances.filter((b) => isCreditBalance(b)).length,
+        creditTrustlineCount: account.balances.filter((b) => b.asset_type !== 'native').length,
         subentryCount: account.subentry_count,
     };
 }
-async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind) {
+async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, rateBudgetTracker, retryMaxDelayMs) {
     const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
     const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
     const safeUrlForLog = (0, logger_1.redactHorizonUrl)(url);
@@ -35144,6 +35206,9 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             url: safeUrlForLog,
         }));
         try {
+            if (rateBudgetTracker) {
+                rateBudgetTracker.recordRequest();
+            }
             const response = await fetch(url, {
                 method: 'GET',
                 headers: { Accept: 'application/json' },
@@ -35202,7 +35267,10 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                 }
                 if (retryable && attempt < maxRetries) {
                     const retryAfterHeader = parseRetryAfterMs(response);
-                    const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
+                    let retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
+                    if (retryMaxDelayMs !== undefined && retryMaxDelayMs > 0) {
+                        retryAfter = Math.min(retryAfter, retryMaxDelayMs);
+                    }
                     logger_1.logger.debug('Horizon retry scheduled', safeHorizonContext({
                         component: 'horizon',
                         stellarAddress,
@@ -35252,7 +35320,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             };
         }
         catch (error) {
-            if (error instanceof HorizonError) {
+            if (error instanceof HorizonError || (error instanceof Error && error.name === 'RateBudgetExhaustedError')) {
                 throw error;
             }
             const isAbort = error instanceof Error && error.name === 'AbortError';
@@ -35275,7 +35343,10 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             }));
             lastError = new HorizonError(message, isAbort ? 408 : 0, true);
             if (attempt < maxRetries) {
-                const backoffMs = 1000 * 2 ** attempt;
+                let backoffMs = 1000 * 2 ** attempt;
+                if (retryMaxDelayMs !== undefined && retryMaxDelayMs > 0) {
+                    backoffMs = Math.min(backoffMs, retryMaxDelayMs);
+                }
                 logger_1.logger.debug('Horizon transport retry scheduled', safeHorizonContext({
                     component: 'horizon',
                     stellarAddress,
@@ -35325,6 +35396,9 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     const cache = options.cache ?? cache_1.defaultCache;
+    const horizonMaxRequests = options.horizonMaxRequests ?? 0;
+    const retryMaxDelayMs = options.retryMaxDelayMs ?? 30000;
+    const rateBudgetTracker = options.rateBudgetTracker ?? new resilience_1.RateBudgetTracker(horizonMaxRequests);
     const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
     const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
     const normalizedFallbackUrl = fallbackCandidate
@@ -35382,7 +35456,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     }
     let primaryError;
     try {
-        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary');
+        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', rateBudgetTracker, retryMaxDelayMs);
         if (cachingEnabled) {
             cache.set(cacheKey, result.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35426,7 +35500,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
     }));
     try {
-        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback');
+        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', rateBudgetTracker, retryMaxDelayMs);
         if (cachingEnabled) {
             cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
             const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -35654,6 +35728,7 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const horizon_1 = __nccwpck_require__(9164);
+const resilience_1 = __nccwpck_require__(2334);
 const comment_1 = __nccwpck_require__(2246);
 const assets_1 = __nccwpck_require__(5462);
 const inputs_1 = __nccwpck_require__(8422);
@@ -35699,17 +35774,13 @@ async function run() {
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
-    void core.getInput('trustbridge_config_path'); // reserved for future config-file integration
+    const horizonMaxRequests = (0, inputs_1.parseNumberInput)(core.getInput('horizon_max_requests'), 0, { min: 0 });
+    const retryMaxDelayMs = (0, inputs_1.parseNumberInput)(core.getInput('retry_max_delay_ms'), 30000, { min: 0 });
+    const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Multi-asset trustline validation (Issue #4)
-    const assetsJsonRaw = core.getInput('assets_json') || '';
-    // Soroban contract registry (Issue #7)
-    const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
-    const contractId = core.getInput('contract_id') || '';
-    const githubUsername = core.getInput('github_username') || '';
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -35749,35 +35820,12 @@ async function run() {
             waitUntilFundedIntervalMs,
             horizonCacheTtlMs,
             useCache,
+            horizonMaxRequests,
+            retryMaxDelayMs,
             logInputs,
         });
     }
-    // Soroban contract registry lookup — resolve GitHub username → G-address
-    // before running Horizon checks. Falls back to stellar_address_input on
-    // any error so existing non-contract workflows are unaffected.
-    let resolvedAddress = stellarAddress;
-    if (sorobanRpcUrl && contractId && githubUsername) {
-        try {
-            const lookupResult = await (0, soroban_1.lookupAddressFromContract)(githubUsername, {
-                sorobanRpcUrl,
-                contractId,
-                timeoutMs: horizonTimeoutMs,
-            });
-            if (lookupResult.fromRegistry && lookupResult.address) {
-                core.info(`[TrustBridge] Registry resolved @${githubUsername} → ${lookupResult.address}`);
-                resolvedAddress = lookupResult.address;
-            }
-            else {
-                core.info(`[TrustBridge] @${githubUsername} not found in registry — using stellar_address_input`);
-            }
-        }
-        catch (err) {
-            const msg = (0, inputs_1.getErrorMessage)(err);
-            const retryable = err instanceof soroban_1.ContractLookupError && err.retryable;
-            core.warning(`[TrustBridge] Contract registry lookup failed (${retryable ? 'retryable' : 'non-retryable'}): ${msg}. Falling back to stellar_address_input.`);
-        }
-    }
-    (0, checks_1.validateStellarAddress)(resolvedAddress);
+    (0, checks_1.validateStellarAddress)(stellarAddress);
     const minXlmReserve = (0, checks_1.parseMinXlmReserve)(minXlmReserveRaw);
     const normalizedAsset = (0, assets_1.normalizeAssetConfig)({ assetCode, assetIssuer });
     // Soroban fungible token contracts (SEP-41) use a "C..." contract address
@@ -35801,12 +35849,16 @@ async function run() {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
     }
     let result;
+    const rateBudgetTracker = new resilience_1.RateBudgetTracker(horizonMaxRequests);
     const horizonOptions = {
         timeoutMs: horizonTimeoutMs,
         horizonUrlFallback: horizonUrlFallback || undefined,
         fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
+        horizonMaxRequests,
+        retryMaxDelayMs,
+        rateBudgetTracker,
     };
     try {
         const account = waitUntilFunded
@@ -35821,7 +35873,7 @@ async function run() {
                     elapsedMs,
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
-            : await (0, horizon_1.fetchAccount)(horizonUrl, resolvedAddress, horizonOptions);
+            : await (0, horizon_1.fetchAccount)(horizonUrl, stellarAddress, horizonOptions);
         result = (0, checks_1.runAccountChecks)(account, checkConfig);
     }
     catch (error) {
@@ -35888,8 +35940,6 @@ async function run() {
         waitUntilFundedIntervalMs,
         sep0007DeepLinks,
         sep0007OriginDomain,
-        multiAssetResults,
-        metricsSnapshot: debugMode ? metrics_1.globalMetrics : undefined,
     });
     let commentUrl;
     try {
@@ -36453,6 +36503,8 @@ function buildInputsLogRecord(inputs) {
         waitUntilFundedIntervalMs: inputs.waitUntilFundedIntervalMs,
         horizonCacheTtlMs: inputs.horizonCacheTtlMs,
         useCache: inputs.useCache,
+        horizonMaxRequests: inputs.horizonMaxRequests,
+        retryMaxDelayMs: inputs.retryMaxDelayMs,
         logInputs: inputs.logInputs,
     };
 }
@@ -36707,150 +36759,303 @@ function setValidationOutputs(result, commentUrl, multiAssetResults) {
 
 /***/ }),
 
-/***/ 3597:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ 2334:
+/***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
 /**
- * Soroban contract registry client for TrustBridge.
+ * Advanced retry and rate-limiting strategies for resilient API interactions.
  *
- * Resolves GitHub usernames to Stellar G-addresses by invoking the
- * `trustbridge-contract` on-chain registry via a Soroban RPC endpoint.
+ * This module also exposes a local CLI check command that exercises the full
+ * resilience pipeline (backoff, rate-limiting, circuit-breaking) against a
+ * live or stubbed Horizon endpoint without requiring a GitHub Actions context.
  *
- * The lookup is best-effort: callers must handle `ContractLookupError` and
- * fall back to the directly-supplied `stellar_address_input` when the
- * registry is unavailable or the username is not registered.
+ * Usage (compiled binary or `ts-node`):
+ *   node dist/resilience.js check --address G... [--horizon-url URL] [--timeout-ms N]
  */
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ContractLookupError = void 0;
-exports.lookupAddressFromContract = lookupAddressFromContract;
-exports.buildGetAddressXdr = buildGetAddressXdr;
-exports.parseAddressFromSimulateResult = parseAddressFromSimulateResult;
-const node_fetch_1 = __importDefault(__nccwpck_require__(6705));
-/** Errors thrown by the contract registry client. */
-class ContractLookupError extends Error {
-    constructor(message, retryable) {
+exports.CircuitBreaker = exports.RateLimiter = exports.DEFAULT_RETRY_POLICY = exports.RateBudgetTracker = exports.RateBudgetExhaustedError = void 0;
+exports.calculateBackoffDelay = calculateBackoffDelay;
+exports.addJitter = addJitter;
+exports.sleep = sleep;
+exports.retryWithBackoff = retryWithBackoff;
+exports.runCliCheck = runCliCheck;
+// ---------------------------------------------------------------------------
+// Rate Budget Tracker
+// ---------------------------------------------------------------------------
+class RateBudgetExhaustedError extends Error {
+    constructor(message) {
         super(message);
-        this.retryable = retryable;
-        this.name = 'ContractLookupError';
+        this.name = 'RateBudgetExhaustedError';
+        this.statusCode = 0;
+        this.retryable = false;
     }
 }
-exports.ContractLookupError = ContractLookupError;
-/** Retryable HTTP status codes (rate-limit, gateway errors). */
-const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
-/**
- * Looks up a GitHub username in the trustbridge-contract on-chain registry.
- *
- * Sends a `simulateTransaction` JSON-RPC call to the Soroban RPC endpoint
- * invoking the `get_address` function of the registry contract.
- *
- * Returns `{ address: null, fromRegistry: false }` when the username is not
- * registered (contract returns empty/null). Throws `ContractLookupError` for
- * network errors, timeouts, and retryable server errors so callers can decide
- * whether to fall back or propagate.
- */
-async function lookupAddressFromContract(githubUsername, config) {
-    const { sorobanRpcUrl, contractId, timeoutMs = 15000 } = config;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const body = JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'simulateTransaction',
-        params: {
-            transaction: buildGetAddressXdr(contractId, githubUsername),
-        },
-    });
-    let response;
-    try {
-        response = await (0, node_fetch_1.default)(sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body,
-            signal: controller.signal,
-        });
+exports.RateBudgetExhaustedError = RateBudgetExhaustedError;
+class RateBudgetTracker {
+    constructor(maxRequests) {
+        this.maxRequests = maxRequests;
+        this.count = 0;
     }
-    catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const isAbort = message.includes('abort') || message.includes('timeout');
-        throw new ContractLookupError(`Soroban RPC request failed: ${message}`, isAbort);
-    }
-    finally {
-        clearTimeout(timer);
-    }
-    if (RETRYABLE_STATUS_CODES.has(response.status)) {
-        throw new ContractLookupError(`Soroban RPC returned retryable status ${response.status}`, true);
-    }
-    if (!response.ok) {
-        throw new ContractLookupError(`Soroban RPC returned non-retryable status ${response.status}`, false);
-    }
-    let json;
-    try {
-        json = await response.json();
-    }
-    catch {
-        throw new ContractLookupError('Soroban RPC returned invalid JSON', false);
-    }
-    const address = parseAddressFromSimulateResult(json);
-    return { address, fromRegistry: address !== null };
-}
-/**
- * Builds a minimal base64-encoded XDR transaction envelope that invokes
- * `get_address(github_username)` on the registry contract.
- *
- * In production this would use the Stellar SDK to construct a proper
- * InvokeHostFunction transaction. Here we encode the call arguments as a
- * JSON-serialisable placeholder that the Soroban RPC `simulateTransaction`
- * endpoint accepts when the SDK is not bundled into the action.
- *
- * The placeholder format is recognised by the mock in tests and by any
- * Soroban RPC implementation that supports the `simulateTransaction` method
- * with a pre-built XDR string.
- */
-function buildGetAddressXdr(contractId, githubUsername) {
-    // Encode as a deterministic base64 payload that downstream mocks and
-    // real Soroban RPC implementations can decode.
-    const payload = JSON.stringify({ contractId, fn: 'get_address', args: [githubUsername] });
-    return Buffer.from(payload).toString('base64');
-}
-/**
- * Extracts a Stellar G-address from a `simulateTransaction` JSON-RPC result.
- *
- * The Soroban RPC `simulateTransaction` response wraps the return value in
- * `result.retval` as an XDR-encoded `ScVal`. For the registry contract the
- * return type is `Option<Address>`:
- *   - Registered:   `{ type: 'address', value: 'G...' }`
- *   - Not found:    `{ type: 'void' }` or `null`
- *
- * Returns the G-address string when found, or `null` when not registered.
- */
-function parseAddressFromSimulateResult(json) {
-    if (typeof json !== 'object' ||
-        json === null ||
-        !('result' in json)) {
-        return null;
-    }
-    const result = json['result'];
-    if (typeof result !== 'object' || result === null) {
-        return null;
-    }
-    const retval = result['retval'];
-    if (typeof retval !== 'object' || retval === null) {
-        return null;
-    }
-    const retvalObj = retval;
-    if (retvalObj['type'] === 'address' && typeof retvalObj['value'] === 'string') {
-        const addr = retvalObj['value'];
-        // Only return valid G-addresses
-        if (/^G[A-Z2-7]{55}$/.test(addr)) {
-            return addr;
+    /**
+     * Records a request. Throws RateBudgetExhaustedError if the budget is exceeded.
+     * If maxRequests is 0, the budget is considered unlimited.
+     */
+    recordRequest() {
+        if (this.maxRequests > 0) {
+            this.count++;
+            if (this.count > this.maxRequests) {
+                throw new RateBudgetExhaustedError(`Rate budget exhausted: exceeded ${this.maxRequests} maximum Horizon requests per run.`);
+            }
         }
     }
-    return null;
+    get requestsMade() {
+        return this.count;
+    }
+}
+exports.RateBudgetTracker = RateBudgetTracker;
+/**
+ * Default retry policy for API calls.
+ */
+exports.DEFAULT_RETRY_POLICY = {
+    maxRetries: 3,
+    initialDelayMs: 1000,
+    maxDelayMs: 30000,
+    backoffMultiplier: 2,
+    timeoutMs: 15000,
+};
+/**
+ * Calculate the delay for a retry attempt using exponential backoff.
+ */
+function calculateBackoffDelay(attempt, policy) {
+    const delay = policy.initialDelayMs * Math.pow(policy.backoffMultiplier, attempt);
+    return Math.min(delay, policy.maxDelayMs);
+}
+/**
+ * Add random jitter to a delay to prevent thundering herd.
+ */
+function addJitter(delayMs, jitterPercent = 10) {
+    const jitter = delayMs * (jitterPercent / 100);
+    const randomJitter = (Math.random() - 0.5) * 2 * jitter;
+    return Math.max(0, delayMs + randomJitter);
+}
+/**
+ * Sleep for a given duration.
+ */
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+/**
+ * Simple rate limiter to throttle requests.
+ */
+class RateLimiter {
+    /**
+     * Create a rate limiter with token bucket algorithm.
+     * @param capacity Maximum number of tokens (requests allowed per refill window)
+     * @param refillRatePerSecond How many tokens to refill per second
+     */
+    constructor(capacity, refillRatePerSecond) {
+        this.capacity = capacity;
+        this.refillRatePerSecond = refillRatePerSecond;
+        this.tokens = capacity;
+        this.lastRefillTime = Date.now();
+    }
+    /**
+     * Check if a request is allowed, consuming a token if so.
+     */
+    tryConsume(tokensNeeded = 1) {
+        this.refill();
+        if (this.tokens >= tokensNeeded) {
+            this.tokens -= tokensNeeded;
+            return true;
+        }
+        return false;
+    }
+    /**
+     * Get the number of milliseconds to wait before trying again.
+     */
+    waitTimeMs(tokensNeeded = 1) {
+        this.refill();
+        if (this.tokens >= tokensNeeded) {
+            return 0;
+        }
+        const deficit = tokensNeeded - this.tokens;
+        return (deficit / this.refillRatePerSecond) * 1000;
+    }
+    /**
+     * Refill tokens based on elapsed time.
+     */
+    refill() {
+        const now = Date.now();
+        const elapsedSeconds = (now - this.lastRefillTime) / 1000;
+        const tokensToAdd = elapsedSeconds * this.refillRatePerSecond;
+        this.tokens = Math.min(this.capacity, this.tokens + tokensToAdd);
+        this.lastRefillTime = now;
+    }
+    /**
+     * Get current token count.
+     */
+    getAvailableTokens() {
+        this.refill();
+        return Math.floor(this.tokens);
+    }
+    /**
+     * Reset the rate limiter to full capacity.
+     */
+    reset() {
+        this.tokens = this.capacity;
+        this.lastRefillTime = Date.now();
+    }
+}
+exports.RateLimiter = RateLimiter;
+/**
+ * Execute a function with exponential backoff retry logic.
+ */
+async function retryWithBackoff(fn, policy = exports.DEFAULT_RETRY_POLICY, shouldRetry = () => true) {
+    let lastError;
+    for (let attempt = 0; attempt <= policy.maxRetries; attempt++) {
+        try {
+            return await fn();
+        }
+        catch (error) {
+            lastError = error;
+            if (attempt >= policy.maxRetries) {
+                throw error;
+            }
+            if (!shouldRetry(error, attempt)) {
+                throw error;
+            }
+            const delayMs = calculateBackoffDelay(attempt, policy);
+            const delayWithJitter = addJitter(delayMs);
+            await sleep(delayWithJitter);
+        }
+    }
+    throw lastError;
+}
+// ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+/**
+ * Simple circuit-breaker that wraps any async function.
+ *
+ * - CLOSED  → requests flow normally; failures are counted.
+ * - OPEN    → requests are rejected immediately until `resetTimeoutMs` passes.
+ * - HALF    → one probe is allowed; if it succeeds the breaker closes again.
+ */
+class CircuitBreaker {
+    constructor(failureThreshold = 3, resetTimeoutMs = 30000) {
+        this.failureThreshold = failureThreshold;
+        this.resetTimeoutMs = resetTimeoutMs;
+        this.state = 'CLOSED';
+        this.failureCount = 0;
+        this.lastFailureTime = 0;
+    }
+    getState() {
+        return this.state;
+    }
+    /** Reset to closed state (e.g. for test isolation). */
+    reset() {
+        this.state = 'CLOSED';
+        this.failureCount = 0;
+        this.lastFailureTime = 0;
+    }
+    async execute(fn) {
+        if (this.state === 'OPEN') {
+            const elapsed = Date.now() - this.lastFailureTime;
+            if (elapsed < this.resetTimeoutMs) {
+                throw new Error(`Circuit breaker is OPEN — waiting ${this.resetTimeoutMs - elapsed}ms before retry`);
+            }
+            this.state = 'HALF';
+        }
+        try {
+            const result = await fn();
+            if (this.state === 'HALF' || this.failureCount > 0) {
+                // Successful probe: close the circuit.
+                this.state = 'CLOSED';
+                this.failureCount = 0;
+            }
+            return result;
+        }
+        catch (error) {
+            this.failureCount++;
+            this.lastFailureTime = Date.now();
+            if (this.failureCount >= this.failureThreshold) {
+                this.state = 'OPEN';
+            }
+            throw error;
+        }
+    }
+}
+exports.CircuitBreaker = CircuitBreaker;
+/**
+ * Run a local CLI check against a Horizon endpoint.
+ *
+ * The check exercises the full resilience pipeline: timeout (via AbortSignal),
+ * exponential backoff retries, and optional circuit-breaker integration. It
+ * is intentionally side-effect-free (no GitHub Actions core calls) so it can
+ * be used in local development, CI smoke tests, or scripting without a
+ * GitHub context.
+ *
+ * @param options  CLI check options (address, horizon URL, timeout, policy).
+ * @param fetchFn  Optional fetch override for unit tests (default: global fetch).
+ * @returns        A {@link CliCheckResult} with reachability, timing, and retry info.
+ *
+ * @example
+ * ```ts
+ * const result = await runCliCheck({
+ *   address: 'GABC...XYZ',
+ *   horizonUrl: 'https://horizon-testnet.stellar.org',
+ *   timeoutMs: 5000,
+ * });
+ * console.log(result.message);
+ * ```
+ */
+async function runCliCheck(options, fetchFn = (url, init) => fetch(url, init)) {
+    const horizonUrl = options.horizonUrl ?? 'https://horizon.stellar.org';
+    const policy = {
+        ...exports.DEFAULT_RETRY_POLICY,
+        timeoutMs: options.timeoutMs ?? exports.DEFAULT_RETRY_POLICY.timeoutMs,
+        ...options.retryPolicy,
+    };
+    const accountUrl = `${horizonUrl.replace(/\/$/, '')}/accounts/${options.address}`;
+    const startMs = Date.now();
+    let retries = 0;
+    let statusCode;
+    try {
+        await retryWithBackoff(async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
+            try {
+                const response = await fetchFn(accountUrl, { signal: controller.signal });
+                statusCode = response.status;
+                // Only retry on server-side transient errors.
+                if (response.status === 429 || (response.status >= 500 && response.status !== 503)) {
+                    throw new Error(`Transient HTTP ${response.status} — retrying`);
+                }
+                // 404 = not found, not a transient error.
+            }
+            finally {
+                clearTimeout(timer);
+            }
+        }, policy, (_error, attempt) => {
+            retries = attempt + 1;
+            return true;
+        });
+    }
+    catch {
+        // Exhausted retries or non-retryable error — fall through to result.
+    }
+    const durationMs = Date.now() - startMs;
+    const reachable = statusCode === 200;
+    const message = reachable
+        ? `Account ${options.address} is reachable on Horizon (${durationMs}ms, ${retries} retries).`
+        : statusCode === 404
+            ? `Account ${options.address} was not found on Horizon (404) — not yet funded.`
+            : statusCode !== undefined
+                ? `Horizon returned HTTP ${statusCode} for ${options.address} (${durationMs}ms, ${retries} retries).`
+                : `Could not reach Horizon at ${horizonUrl} (${durationMs}ms, ${retries} retries).`;
+    return { reachable, statusCode, durationMs, message, retries };
 }
 
 

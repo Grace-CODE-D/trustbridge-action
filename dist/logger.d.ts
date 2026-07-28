@@ -135,6 +135,8 @@ export interface ActionInputsLogRecord {
     waitUntilFundedIntervalMs: number;
     horizonCacheTtlMs: number;
     useCache: boolean;
+    horizonMaxRequests: number;
+    retryMaxDelayMs: number;
     logInputs: boolean;
 }
 /**

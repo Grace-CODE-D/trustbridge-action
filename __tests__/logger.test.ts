@@ -44,6 +44,8 @@ function makeInputs(overrides: Partial<ActionInputsLogRecord> = {}): ActionInput
     waitUntilFundedIntervalMs: 5000,
     horizonCacheTtlMs: 60000,
     useCache: false,
+    horizonMaxRequests: 0,
+    retryMaxDelayMs: 30000,
     logInputs: true,
     ...overrides,
   };

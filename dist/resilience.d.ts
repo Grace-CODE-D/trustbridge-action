@@ -8,6 +8,22 @@
  * Usage (compiled binary or `ts-node`):
  *   node dist/resilience.js check --address G... [--horizon-url URL] [--timeout-ms N]
  */
+export declare class RateBudgetExhaustedError extends Error {
+    statusCode: number;
+    retryable: boolean;
+    constructor(message: string);
+}
+export declare class RateBudgetTracker {
+    private readonly maxRequests;
+    private count;
+    constructor(maxRequests: number);
+    /**
+     * Records a request. Throws RateBudgetExhaustedError if the budget is exceeded.
+     * If maxRequests is 0, the budget is considered unlimited.
+     */
+    recordRequest(): void;
+    get requestsMade(): number;
+}
 /**
  * Options accepted by the local CLI check command.
  */

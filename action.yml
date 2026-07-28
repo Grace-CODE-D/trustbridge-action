@@ -108,6 +108,14 @@ inputs:
     description: 'Optional secondary/fallback Horizon or RPC URL if primary fails'
     required: false
     default: ''
+  horizon_max_requests:
+    description: 'Global cap on Horizon requests per run to prevent 429 stampedes (0 for unlimited)'
+    required: false
+    default: '0'
+  retry_max_delay_ms:
+    description: 'Maximum backoff delay in milliseconds for Horizon retries'
+    required: false
+    default: '30000'
   use_cache:
     description: 'Cache successful Horizon responses in job memory (true/false)'
     required: false

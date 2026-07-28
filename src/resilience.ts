@@ -14,7 +14,90 @@
 import * as core from '@actions/core';
 
 // ---------------------------------------------------------------------------
-// RetryPolicy
+// Rate Budget Tracker
+// ---------------------------------------------------------------------------
+
+export class RateBudgetExhaustedError extends Error {
+  statusCode: number;
+  retryable: boolean;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'RateBudgetExhaustedError';
+    this.statusCode = 0;
+    this.retryable = false;
+  }
+}
+
+export class RateBudgetTracker {
+  private count = 0;
+
+  constructor(private readonly maxRequests: number) {}
+
+  /**
+   * Records a request. Throws RateBudgetExhaustedError if the budget is exceeded.
+   * If maxRequests is 0, the budget is considered unlimited.
+   */
+  recordRequest(): void {
+    if (this.maxRequests > 0) {
+      this.count++;
+      if (this.count > this.maxRequests) {
+        throw new RateBudgetExhaustedError(
+          `Rate budget exhausted: exceeded ${this.maxRequests} maximum Horizon requests per run.`,
+        );
+      }
+    }
+  }
+
+  get requestsMade(): number {
+    return this.count;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLI check command types
+// ---------------------------------------------------------------------------
+
+/**
+ * Options accepted by the local CLI check command.
+ */
+export interface CliCheckOptions {
+  /** Stellar G-address to validate (required). */
+  address: string;
+  /** Horizon base URL (default: https://horizon.stellar.org). */
+  horizonUrl?: string;
+  /** Request timeout in milliseconds (default: 15 000). */
+  timeoutMs?: number;
+  /** Retry policy overrides. */
+  retryPolicy?: Partial<RetryPolicy>;
+}
+
+/**
+ * Result returned by the local CLI check command.
+ */
+export interface CliCheckResult {
+  /** True when Horizon returned a 200 for the address. */
+  reachable: boolean;
+  /** HTTP status code from Horizon, or undefined on network error. */
+  statusCode?: number;
+  /** Duration of the check in milliseconds (including retries). */
+  durationMs: number;
+  /** Human-readable summary. */
+  message: string;
+  /** Number of retry attempts made (0 = first try succeeded). */
+  retries: number;
+}
+
+/**
+ * Circuit-breaker state machine.
+ * CLOSED  = normal operation
+ * OPEN    = requests are rejected immediately
+ * HALF    = one probe request is allowed to test recovery
+ */
+export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF';
+
+// ---------------------------------------------------------------------------
+// RetryPolicy and defaults
 // ---------------------------------------------------------------------------
 
 export interface RetryPolicy {

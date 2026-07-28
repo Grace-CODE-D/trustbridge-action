@@ -889,4 +889,63 @@ describe('AbortSignal cancellation', () => {
       expect((error as HorizonError).message).not.toContain('wait_until_funded');
     });
   });
+
+  describe('RateBudgetTracker integration', () => {
+    it('throws RateBudgetExhaustedError when horizonMaxRequests is exceeded', async () => {
+      const { RateBudgetExhaustedError } = require('../src/resilience');
+      const account = makeAccount(TEST_ADDRESS);
+      const mock = makeMockFetch(async () => makeMockResponse(200, account));
+      
+      const rateBudgetTracker = new (require('../src/resilience').RateBudgetTracker)(2);
+
+      await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        fetchFn: mock,
+        rateBudgetTracker,
+        cacheTtlMs: 0,
+      });
+
+      await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        fetchFn: mock,
+        rateBudgetTracker,
+        cacheTtlMs: 0,
+      });
+
+      expect(rateBudgetTracker.requestsMade).toBe(2);
+
+      await expect(
+        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          fetchFn: mock,
+          rateBudgetTracker,
+          cacheTtlMs: 0,
+        }),
+      ).rejects.toThrow(RateBudgetExhaustedError);
+    });
+
+    it('caps retry delay at retryMaxDelayMs', async () => {
+      const mock = makeMockFetch(async () => {
+        return makeMockResponse(429, {}, { headers: { 'retry-after': '100' } });
+      });
+      
+      const { calls, restore } = captureDebugCalls();
+      loggerModule.logger.setDebugMode(true);
+
+      try {
+        await expect(
+          fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+            fetchFn: mock,
+            maxRetries: 1,
+            retryMaxDelayMs: 2000,
+            cacheTtlMs: 0,
+          })
+        ).rejects.toThrow(HorizonError);
+
+        const retryLog = calls.find(c => c.message === 'Horizon retry scheduled');
+        expect(retryLog).toBeDefined();
+        const ctx = requireContext(retryLog);
+        expect(ctx.retryAfterMs).toBe(2000);
+      } finally {
+        restore();
+      }
+    });
+  });
 });

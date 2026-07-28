@@ -1,6 +1,6 @@
 import { defaultCache, SimpleCache } from './cache';
-import { logger, redactHorizonUrl, redactStellarAddress, redactString, LogContext } from './logger';
-import { globalMetrics } from './metrics';
+import { logger, redactHorizonUrl, redactString, LogContext } from './logger';
+import { RateBudgetTracker } from './resilience';
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -94,10 +94,9 @@ export interface FetchAccountOptions {
   cacheTtlMs?: number;
   cache?: SimpleCache;
   fetchFn?: FetchLike;
-  /** Optional AbortSignal from a parent controller (e.g. job cancellation).
-   *  When the signal fires, in-flight and pending requests are aborted
-   *  immediately; no misleading "account not funded" result is produced. */
-  signal?: AbortSignal;
+  horizonMaxRequests?: number;
+  retryMaxDelayMs?: number;
+  rateBudgetTracker?: RateBudgetTracker;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -278,7 +277,8 @@ async function fetchAccountOnce(
   timeoutMs: number,
   maxRetries: number,
   endpointKind: 'primary' | 'fallback',
-  parentSignal?: AbortSignal,
+  rateBudgetTracker?: RateBudgetTracker,
+  retryMaxDelayMs?: number,
 ): Promise<FetchOnceResult> {
   const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
   const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
@@ -316,6 +316,10 @@ async function fetchAccountOnce(
     }));
 
     try {
+      if (rateBudgetTracker) {
+        rateBudgetTracker.recordRequest();
+      }
+
       const response = await fetch(url, {
         method: 'GET',
         headers: { Accept: 'application/json' },
@@ -380,7 +384,10 @@ async function fetchAccountOnce(
 
         if (retryable && attempt < maxRetries) {
           const retryAfterHeader = parseRetryAfterMs(response);
-          const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
+          let retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
+          if (retryMaxDelayMs !== undefined && retryMaxDelayMs > 0) {
+            retryAfter = Math.min(retryAfter, retryMaxDelayMs);
+          }
           logger.debug('Horizon retry scheduled', safeHorizonContext({
             component: 'horizon',
             stellarAddress,
@@ -438,7 +445,7 @@ async function fetchAccountOnce(
         attempts: attempt + 1,
       };
     } catch (error) {
-      if (error instanceof HorizonError) {
+      if (error instanceof HorizonError || (error instanceof Error && error.name === 'RateBudgetExhaustedError')) {
         throw error;
       }
 
@@ -497,7 +504,10 @@ async function fetchAccountOnce(
       lastError = new HorizonError(message, isAbort ? 408 : 0, true);
 
       if (attempt < maxRetries) {
-        const backoffMs = 1000 * 2 ** attempt;
+        let backoffMs = 1000 * 2 ** attempt;
+        if (retryMaxDelayMs !== undefined && retryMaxDelayMs > 0) {
+          backoffMs = Math.min(backoffMs, retryMaxDelayMs);
+        }
         logger.debug('Horizon transport retry scheduled', safeHorizonContext({
           component: 'horizon',
           stellarAddress,
@@ -558,7 +568,10 @@ export async function fetchAccount(
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = options.cache ?? defaultCache;
-  const signal = options.signal;
+  const horizonMaxRequests = options.horizonMaxRequests ?? 0;
+  const retryMaxDelayMs = options.retryMaxDelayMs ?? 30000;
+  
+  const rateBudgetTracker = options.rateBudgetTracker ?? new RateBudgetTracker(horizonMaxRequests);
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
   const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
   const normalizedFallbackUrl = fallbackCandidate
@@ -636,7 +649,8 @@ export async function fetchAccount(
       timeoutMs,
       maxRetries,
       'primary',
-      signal,
+      rateBudgetTracker,
+      retryMaxDelayMs,
     );
 
     if (cachingEnabled) {
@@ -691,7 +705,8 @@ export async function fetchAccount(
       timeoutMs,
       maxRetries,
       'fallback',
-      signal,
+      rateBudgetTracker,
+      retryMaxDelayMs,
     );
 
     if (cachingEnabled) {
