@@ -49,10 +49,6 @@ export declare class HorizonError extends Error {
     readonly retryable: boolean;
     constructor(message: string, statusCode: number, retryable?: boolean);
 }
-export declare class HorizonRateLimitError extends HorizonError {
-    readonly retryAfterMs?: number | undefined;
-    constructor(message: string, retryAfterMs?: number | undefined);
-}
 type FetchLike = (url: string | import('node-fetch').Request, init?: import('node-fetch').RequestInit) => Promise<import('node-fetch').Response>;
 export interface FetchAccountOptions {
     timeoutMs?: number;
@@ -63,8 +59,6 @@ export interface FetchAccountOptions {
     cacheTtlMs?: number;
     cache?: SimpleCache;
     fetchFn?: FetchLike;
-    retryMaxDelayMs?: number;
-    retryMaxTotalWaitMs?: number;
 }
 export declare function normalizeHorizonUrl(baseUrl: string): string;
 export declare function isRetryableStatus(status: number): boolean;

@@ -180,14 +180,13 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  retry_max_delay_ms:
-    description: 'Maximum sleep per retry (ms). Overrides Retry-After if it exceeds this cap.'
+  preflight_only:
+    description: >-
+      When true, run the issues:write preflight check and exit immediately
+      without calling Horizon. Useful for verifying token permissions in a new
+      repository without spending Horizon API quota. Defaults to false.
     required: false
-    default: '60000'
-  retry_max_total_wait_ms:
-    description: 'Maximum total wait time across all retries (ms). Fails if exceeded.'
-    required: false
-    default: '120000'
+    default: 'false'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

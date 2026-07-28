@@ -500,216 +500,186 @@ Run through this on your own GHES org before relying on TrustBridge there:
 
 ---
 
-## Permissions reference
+## workflow_run chained triggers (#146)
 
-### Minimum permissions
+Use `workflow_run` when you want TrustBridge to run as a trusted downstream job triggered by an upstream address-resolution workflow. This is common in organizations that separate the untrusted "read the issue" step from the trusted "validate and comment" step.
+
+### Why use workflow_run instead of a direct issues: trigger?
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Simple: address in issue body, single repo | `issues: [assigned]` directly on the TrustBridge step |
+| Complex: address from external API/bot, matrix payouts, fork trust isolation | `workflow_run` + artifact passing |
+
+### Critical differences from a direct `issues:` trigger
+
+1. **No issue context in `github.event`** — `workflow_run` events do not carry `github.event.issue`. You must pass the issue number from the upstream workflow via an artifact or repository variable.
+2. **GITHUB_TOKEN has write access to the base repo** — correct for posting issue comments; safe even on fork-triggered `pull_request` or `issues` events.
+3. **Re-runs are idempotent** — `sticky_comment: true` (default) ensures TrustBridge updates its existing comment rather than spamming the issue on each re-run.
+
+### Required permissions
 
 ```yaml
 permissions:
-  issues: write    # required to post or update issue comments
-  contents: read   # standard for checkout-less actions
+  issues: write      # post/update the TrustBridge comment
+  contents: read     # standard
+  actions: read      # download artifacts from the upstream run
 ```
 
-`issues: write` is the only permission TrustBridge needs. `contents: read` is not strictly required unless you also check out the repository in the same job, but it is good practice to include it so the permission block documents the full job surface.
+### Passing the Stellar address between workflows
 
-### When `GITHUB_TOKEN` is enough
+The upstream workflow uploads a JSON artifact; the downstream workflow reads it:
 
-| Trigger | `GITHUB_TOKEN` sufficient? | Notes |
-|---------|---------------------------|-------|
-| `issues: assigned` on default branch | ✅ Yes | Standard case — token is scoped to the repo |
-| `workflow_dispatch` | ✅ Yes | Same repo, no fork isolation |
-| `pull_request` from a fork | ❌ No | Fork PRs run with a read-only token; comment posting will fail with 403 |
-| Repository under org with restricted Actions token | ❌ Depends | Check **Organization → Settings → Actions → General → Workflow permissions** |
-| GitHub Enterprise Server (GHES) | ❌ Often needs PAT | Default token scopes vary by GHES version and admin policy |
+**Upstream (intake workflow):**
+```yaml
+- name: Upload TrustBridge inputs
+  uses: actions/upload-artifact@v4
+  with:
+    name: trustbridge-inputs
+    path: /tmp/trustbridge/inputs.json
+    # inputs.json: {"stellar_address":"G...","issue_number":42}
+```
 
-### When you need a PAT or GitHub App token
+**Downstream (TrustBridge workflow):**
+```yaml
+- uses: actions/download-artifact@v4
+  with:
+    name: trustbridge-inputs
+    run-id: ${{ github.event.workflow_run.id }}
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    path: /tmp/trustbridge
+```
 
-Use a fine-grained PAT (or a GitHub App installation token) when:
+### Injecting issue context
 
-- The workflow is triggered by a **fork pull request** (`pull_request` event from a forked repo). Fork PRs receive a restricted token with no write access. Store the PAT as an Actions secret: `${{ secrets.MY_TRUSTBRIDGE_TOKEN }}`.
-- Your organization policy **sets default token permissions to read-only**. A PAT or App token scoped to `Issues: Read and write` bypasses the org policy.
-- You are on **GHES** and the instance admin has not granted `issues: write` to the default token.
-
-For GitHub Apps: request the **Issues (read and write)** permission during app registration, then pass the generated installation token via `${{ steps.generate_token.outputs.token }}`.
-
-### Troubleshooting 403 / 404 comment errors
-
-| Error | Likely cause | Fix |
-|-------|-------------|-----|
-| `Resource not accessible by integration` (403) | Token lacks `issues: write` | Add `permissions: issues: write` to the job or use a PAT |
-| `Not Found` (404) when posting a comment | Issue was deleted, transferred, or the repo has issues disabled | Verify the issue exists and issues are enabled |
-| `GitHub Actions is not permitted to create or approve pull requests` | Wrong permission for PRs (not needed by TrustBridge) | Ensure you are on the `issues` trigger, not `pull_request` |
-| Comment posted but empty / malformed | Snapshot mismatch in comment format | Open a bug report with the action log excerpt |
-| Comment not posted, no error | Workflow not running in issue context | Expected for `workflow_dispatch` without issue number; outputs are still set |
-
-### Least-privilege example
+Because `workflow_run` events have no `payload.issue`, you must patch the event file before TrustBridge runs:
 
 ```yaml
-name: TrustBridge — Stellar wallet check
-
-on:
-  issues:
-    types: [assigned]
-
-jobs:
-  verify-stellar-account:
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write     # allow TrustBridge to post comments
-      contents: read    # standard read access
-    steps:
-      - uses: Stellar-TrustBridge/trustbridge-action@v1
-        with:
-          stellar_address_input: GCONTRIBUTORADDRESSHERE
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+- uses: actions/github-script@v7
+  with:
+    script: |
+      const fs = require('fs');
+      const eventPath = process.env.GITHUB_EVENT_PATH;
+      const event = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+      event.issue = { number: parseInt('${{ steps.inputs.outputs.issue }}', 10) };
+      fs.writeFileSync(eventPath, JSON.stringify(event));
 ```
 
-This is the minimal permission block. Do not add `pull-requests: write`, `id-token: write`, or other scopes unless a separate step in the same job requires them.
+### GITHUB_TOKEN limitations across repos
+
+`GITHUB_TOKEN` can only post comments on the **same repository** as the workflow file. For cross-repo comment posting (rare), use a PAT with `repo` scope or a GitHub App token.
+
+### Troubleshooting "comment skipped" in workflow_run context
+
+If TrustBridge warns "No issue context found — skipping comment", the most common causes are:
+
+| Cause | Fix |
+|-------|-----|
+| `github.event.issue` not injected | Add the "Inject issue context" step above |
+| `issue_number` is `NaN` or `0` | Verify your `jq` command extracts a valid integer |
+| Token lacks `issues: write` | Add `permissions: issues: write` to the job |
+| Upstream workflow was a `push` or PR event | Only `issues`-context runs have issue numbers; use `workflow_dispatch` for manual checks |
+
+See the complete working example: [docs/examples/workflow_run_chained.yml](examples/workflow_run_chained.yml)
 
 ---
 
-## GitHub App token guide
+## Per-check env vars for payout jobs (#147)
 
-Some organizations restrict the default `GITHUB_TOKEN` to prevent cross-repo access or to enforce finer-grained permissions. In these cases, use a **GitHub App installation token** instead.
+For payout bots and matrix workflows, TrustBridge supports a `TRUSTBRIDGE_*` environment variable layer so you can configure asset and network settings without duplicating `with:` inputs across matrix legs.
 
-### Why use a GitHub App token?
+### Precedence
 
-| Concern | `GITHUB_TOKEN` | GitHub App token |
-|---------|---------------|------------------|
-| Cross-repo access | Limited to the current repo | Can be scoped to specific repos |
-| Permission granularity | Fixed per-event permissions | Customizable per-app |
-| Org policy compliance | May be blocked by org settings | Allowed when app is installed |
-| Token rotation | Automatic (short-lived) | Manual rotation required |
-
-### Setup steps
-
-1. **Create a GitHub App** in your organization or personal account:
-   - Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
-   - Set the **Homepage URL** to your repo URL
-   - Set the **Webhook URL** to a placeholder (not required for this use case)
-
-2. **Grant permissions** to the App:
-   - Under **Repository permissions**, grant:
-     - **Issues**: `Read and write`
-     - **Metadata**: `Read-only`
-   - Under **Organization permissions**, grant only what is needed
-
-3. **Install the App** on the target repository:
-   - On the App settings page, click **Install** and select the repository
-
-4. **Generate an installation access token** in your workflow:
-
-```yaml
-- name: Generate GitHub App token
-  id: app-token
-  uses: actions/create-github-app-token@v1
-  with:
-    app-id: ${{ secrets.GITHUB_APP_ID }}
-    private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+```
+with: input  >  TRUSTBRIDGE_* env var  >  action.yml default
 ```
 
-5. **Pass the token** to the action:
+An explicit `with:` value always wins. The env var is only consulted when the `with:` value is empty.
+
+### Supported env vars
+
+| Env var | Maps to input | Notes |
+|---------|--------------|-------|
+| `TRUSTBRIDGE_HORIZON_URL` | `horizon_url` | |
+| `TRUSTBRIDGE_HORIZON_URL_FALLBACK` | `horizon_url_fallback` | |
+| `TRUSTBRIDGE_RPC_FALLBACK_URL` | `rpc_fallback_url` | |
+| `TRUSTBRIDGE_ASSET_CODE` | `asset_code` | |
+| `TRUSTBRIDGE_ASSET_ISSUER` | `asset_issuer` | |
+| `TRUSTBRIDGE_MIN_XLM_RESERVE` | `min_xlm_reserve` | |
+| `TRUSTBRIDGE_FAIL_ON_MISSING` | `fail_on_missing` | `true`/`false` |
+| `TRUSTBRIDGE_DEBUG_MODE` | `debug_mode` | |
+| `TRUSTBRIDGE_HORIZON_TIMEOUT_MS` | `horizon_timeout_ms` | |
+| `TRUSTBRIDGE_STICKY_COMMENT` | `sticky_comment` | |
+| `TRUSTBRIDGE_WAIT_UNTIL_FUNDED` | `wait_until_funded` | |
+| `TRUSTBRIDGE_WAIT_UNTIL_FUNDED_TIMEOUT_MS` | `wait_until_funded_timeout_ms` | |
+| `TRUSTBRIDGE_WAIT_UNTIL_FUNDED_INTERVAL_MS` | `wait_until_funded_interval_ms` | |
+| `TRUSTBRIDGE_HORIZON_CACHE_TTL_MS` | `horizon_cache_ttl_ms` | |
+| `TRUSTBRIDGE_USE_CACHE` | `use_cache` | |
+| `TRUSTBRIDGE_LOG_INPUTS` | `log_inputs` | |
+| `TRUSTBRIDGE_PREFLIGHT_ONLY` | `preflight_only` | |
+
+**Not supported** (intentionally excluded): `github_token`, `stellar_address_input`. These must always be supplied via explicit `with:` inputs. Never place token values in environment variables where they may be printed to job logs.
+
+### Matrix payout example
+
+```yaml
+strategy:
+  matrix:
+    include:
+      - asset_code: USDC
+        asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+        min_xlm_reserve: '1.5'
+      - asset_code: EURC
+        asset_issuer: GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP
+        min_xlm_reserve: '2.0'
+
+env:
+  TRUSTBRIDGE_ASSET_CODE:    ${{ matrix.asset_code }}
+  TRUSTBRIDGE_ASSET_ISSUER:  ${{ matrix.asset_issuer }}
+  TRUSTBRIDGE_MIN_XLM_RESERVE: ${{ matrix.min_xlm_reserve }}
+  TRUSTBRIDGE_FAIL_ON_MISSING: 'true'
+
+steps:
+  - uses: Stellar-TrustBridge/trustbridge-action@v1
+    with:
+      stellar_address_input: ${{ steps.addr.outputs.value }}
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      # asset_code, asset_issuer, min_xlm_reserve resolved from env vars above
+```
+
+See the full working example: [docs/examples/payout_matrix.yml](examples/payout_matrix.yml)
+
+---
+
+## issues:write preflight (#145)
+
+TrustBridge automatically runs a **preflight check** before any Horizon calls to verify that the token can post issue comments. This prevents wasting Horizon API quota when permissions are misconfigured.
+
+### What the preflight checks
+
+1. **Issue context** — is there an issue number in the event payload? If not (e.g. `workflow_dispatch` without an issue), comment posting is silently skipped and Horizon runs normally.
+2. **Token permission** — calls `GET /repos/{owner}/{repo}/issues/{number}/comments` (read-only). A 401 or 403 response fails the run immediately with a clear permission error before any Horizon work.
+
+### Preflight-only mode
+
+Set `preflight_only: true` to run only the permission check and exit without calling Horizon. Useful when setting up TrustBridge for the first time:
 
 ```yaml
 - uses: Stellar-TrustBridge/trustbridge-action@v1
   with:
-    stellar_address_input: ${{ steps.address.outputs.address }}
-    github_token: ${{ steps.app-token.outputs.token }}
-    fail_on_missing: true
+    stellar_address_input: ${{ steps.addr.outputs.value }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    preflight_only: true   # exits after permission check, no Horizon call
 ```
 
-### Security warnings
+### Troubleshooting preflight failures
 
-- **Do not log the token.** The action redacts `github_token` values in diagnostic output, but avoid printing it in workflow logs.
-- **Rotate keys regularly.** GitHub App private keys should be rotated on a schedule. Delete old keys after generating new ones.
-- **Use least privilege.** Grant only the permissions the App needs. The action requires `issues: write` to post comments.
-- **Store secrets in GitHub Secrets.** Never commit private keys or App IDs to the repository.
-
-### Events without issue context
-
-When the action runs in a `workflow_dispatch` or `push` context (not an issue event), there is no issue to comment on. The action still performs all checks and sets outputs, but comment posting is skipped with a warning. This applies regardless of token type.
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `GitHub token lacks issues: write permission (403)` | Token scope too narrow | Add `permissions: issues: write` to the workflow job |
+| `GitHub token is not authorized (401)` | Invalid or expired token | Verify the token / regenerate the PAT |
+| `Issue #N was not found (404)` | Closed or deleted issue | Run the check on an open issue |
 
 ---
 
-## Org-level policy inheritance
-
-Integrators managing many repositories can centralize TrustBridge policy (asset, reserve, fail behavior) using **GitHub organization variables and secrets**, so child repos don't need to re-specify everything.
-
-### Naming conventions
-
-| Action input | Org variable/secret name | Description |
-|-------------|--------------------------|-------------|
-| `horizon_url` | `TRUSTBRIDGE_HORIZON_URL` | Horizon API base URL |
-| `asset_code` | `TRUSTBRIDGE_ASSET_CODE` | Asset code for trustline verification |
-| `asset_issuer` | `TRUSTBRIDGE_ASSET_ISSUER` | Issuer Stellar address |
-| `min_xlm_reserve` | `TRUSTBRIDGE_MIN_XLM_RESERVE` | Minimum native XLM balance required |
-| `fail_on_missing` | `TRUSTBRIDGE_FAIL_ON_MISSING` | `true` to fail, `false` to warn |
-| `horizon_timeout_ms` | `TRUSTBRIDGE_HORIZON_TIMEOUT_MS` | Horizon request timeout |
-| `sticky_comment` | `TRUSTBRIDGE_STICKY_COMMENT` | Update previous comment instead of posting new one |
-| `wait_until_funded` | `TRUSTBRIDGE_WAIT_UNTIL_FUNDED` | Poll until account is funded |
-
-### Reusable workflow example
-
-Create `.github/workflows/trustbridge.yml` in the organization template repo:
-
-```yaml
-name: TrustBridge — Stellar wallet check
-
-on:
-  issues:
-    types: [assigned]
-  workflow_dispatch:
-    inputs:
-      stellar_address:
-        description: 'Stellar G-address to validate'
-        required: true
-
-jobs:
-  verify-stellar-account:
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      contents: read
-    steps:
-      - name: TrustBridge check
-        uses: Stellar-TrustBridge/trustbridge-action@v1
-        with:
-          stellar_address_input: ${{ inputs.stellar_address }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          horizon_url: ${{ vars.TRUSTBRIDGE_HORIZON_URL }}
-          asset_code: ${{ vars.TRUSTBRIDGE_ASSET_CODE }}
-          asset_issuer: ${{ vars.TRUSTBRIDGE_ASSET_ISSUER }}
-          min_xlm_reserve: ${{ vars.TRUSTBRIDGE_MIN_XLM_RESERVE }}
-          fail_on_missing: ${{ vars.TRUSTBRIDGE_FAIL_ON_MISSING }}
-          horizon_timeout_ms: ${{ vars.TRUSTBRIDGE_HORIZON_TIMEOUT_MS }}
-          sticky_comment: ${{ vars.TRUSTBRIDGE_STICKY_COMMENT }}
-          wait_until_funded: ${{ vars.TRUSTBRIDGE_WAIT_UNTIL_FUNDED }}
-```
-
-### Override precedence
-
-Explicit action inputs always win over org variable defaults. The precedence order is:
-
-1. **Action input** (explicit value in the workflow step)
-2. **Org variable** (set via `vars` or `secrets`)
-3. **Default value** (the built-in default in `action.yml`)
-
-This means a repo can override the org default by setting an explicit input, while repos that omit the input inherit the org-level policy.
-
-### Using org secrets for sensitive values
-
-For values that should not be visible in the repository settings UI (e.g., custom Horizon URLs with embedded tokens), use **GitHub Secrets** instead of Variables:
-
-```yaml
-horizon_url: ${{ secrets.TRUSTBRIDGE_HORIZON_URL }}
-```
-
-Secrets are masked in workflow logs and are not visible to repository collaborators.
-
-### Org policy enforcement
-
-GitHub organization rulesets can enforce that certain workflows use the centralized TrustBridge configuration. Mention this as a possibility — rulesets can require the `trustbridge.yml` config file or specific workflow inputs to be present, but TrustBridge itself does not enforce rulesets programmatically.
-
----
-
-## Extracting Stellar addresses from issues
+[← Back to README](../README.md)
