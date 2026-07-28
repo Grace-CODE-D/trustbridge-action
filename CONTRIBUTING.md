@@ -25,7 +25,7 @@ Be respectful and constructive. We follow standard open-source community norms: 
 
 ### Requirements
 
-- Node.js **20+**
+- Node.js **20 LTS or 22 LTS** (both are tested in CI — see `.github/workflows/ci.yml`)
 - npm **9+**
 
 ### Setup
@@ -131,6 +131,8 @@ test: cover zero-trustline account path
 6. Consumers pin `@v1` or specific patch tag
 
 **Build note:** `npm run build` runs TypeScript checking and `@vercel/ncc` to bundle `dist/index.js`. Commit `dist/` when releasing.
+
+**`runs.using` note:** `action.yml` currently specifies `runs.using: node20`. Bumping this to `node22` requires waiting for GitHub Actions to ship an official `node22` label — this is deferred to a future major/minor release. Node 22 compatibility is already verified in the CI matrix.
 
 ---
 

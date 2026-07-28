@@ -1,7 +1,6 @@
 import * as github from '@actions/github';
 import { CheckConfig, ValidationResult } from './checks';
 import { MetricsCollector } from './metrics';
-import { ValidationDelta } from './delta';
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -27,12 +26,6 @@ export interface CommentConfig extends CheckConfig {
      * snapshot so the comment reflects the run that generated it.
      */
     metricsSnapshot?: MetricsCollector;
-    /**
-     * Optional delta vs the previous workflow-run validation artifact.
-     * When present, a "Delta vs previous run" section is rendered after Results.
-     * Omit (or pass null) on the first run so the section is not shown.
-     */
-    delta?: ValidationDelta | null;
 }
 export declare const TRUSTBRIDGE_FOOTER = "_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_";
 /**

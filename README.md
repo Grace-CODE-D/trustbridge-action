@@ -599,6 +599,22 @@ npm run lint           # ESLint
 npm run build          # compile TypeScript → dist/
 ```
 
+### Node.js runtime support
+
+| Version | Status | Notes |
+|---------|--------|-------|
+| **Node 20 LTS** | ✅ Tested & supported | Matches `runs.using: node20` in `action.yml` |
+| **Node 22 LTS** | ✅ Tested & supported | Verified in CI matrix; compatible with all production code paths |
+
+CI runs `build-and-test` in parallel on both versions (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+> **Why does `action.yml` still say `runs.using: node20`?**
+> GitHub Actions only accepts `node20` (and `node16`) as stable runtime labels
+> today — `node22` is not yet a supported value. When GitHub ships an official
+> `node22` label, TrustBridge will bump `runs.using` in a dedicated release.
+> Until then, the action runs under the Node 20 binary supplied by GitHub-hosted
+> runners, which is well within the supported range of every dependency used.
+
 ### Comment Golden Snapshots & Coverage Gates
 
 - **Comment Golden Snapshots**: TrustBridge enforces golden snapshots for Markdown issue comments (`__tests__/comment.test.ts`) across success and failure paths to prevent formatting regressions during active Waves and release cycles.

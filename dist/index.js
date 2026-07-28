@@ -34602,6 +34602,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35129,7 +35192,6 @@ const github = __importStar(__nccwpck_require__(3228));
 const checks_1 = __nccwpck_require__(2122);
 const links_1 = __nccwpck_require__(3346);
 const markdown_1 = __nccwpck_require__(3758);
-const delta_1 = __nccwpck_require__(1493);
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
@@ -36589,11 +36651,6 @@ async function run() {
     // SEP-0007 wallet deep links (Issue #44)
     const sep0007DeepLinks = (0, inputs_1.parseBooleanInput)(core.getInput('sep0007_deep_links'), false);
     const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
-    // Security artifacts / delta vs previous run (Issue #148)
-    const writeValidationJsonEnabled = (0, inputs_1.parseBooleanInput)(core.getInput('write_validation_json'), false);
-    const validationJsonPath = core.getInput('validation_json_path') || 'validation.json';
-    const previousValidationPath = core.getInput('previous_validation_path') || '';
-    const privacyMode = (0, inputs_1.parseBooleanInput)(core.getInput('privacy_mode'), false);
     // Clear validation spans from any prior run in the same process (safety).
     (0, validation_1.clearSpans)();
     logger_1.logger.setDebugMode(debugMode);
@@ -36725,7 +36782,6 @@ async function run() {
         waitUntilFundedIntervalMs,
         sep0007DeepLinks,
         sep0007OriginDomain,
-        delta,
     });
     let commentUrl;
     try {
