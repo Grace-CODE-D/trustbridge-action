@@ -7,11 +7,18 @@ export interface CheckConfig {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: number;
+    horizonUrl?: string;
 }
 export interface CheckResultItem {
     passed: boolean;
     label: string;
     detail: string;
+}
+export interface SponsorshipInfo {
+    /** Number of accounts this account is sponsoring (num_sponsoring from Horizon). */
+    numSponsoring: number;
+    /** Number of accounts sponsoring this account (num_sponsored from Horizon). */
+    numSponsored: number;
 }
 export interface ValidationResult {
     valid: boolean;
@@ -21,6 +28,8 @@ export interface ValidationResult {
     xlmReserveMet: boolean;
     checks: CheckResultItem[];
     remediation?: string;
+    /** Sponsorship relationship counts from Horizon. */
+    sponsorshipInfo?: SponsorshipInfo;
 }
 export declare function normalizeStellarAddress(address: string): string;
 export declare function isValidStellarAddress(address: string): boolean;

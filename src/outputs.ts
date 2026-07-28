@@ -10,6 +10,8 @@ export interface ActionOutputs {
   comment_url: string;
   readiness_badge_markdown: string;
   readiness_badge_url: string;
+  num_sponsoring: string;
+  num_sponsored: string;
 }
 
 export function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs {
@@ -21,6 +23,8 @@ export function toActionOutputs(result: ValidationResult, commentUrl?: string): 
     comment_url: commentUrl ?? '',
     readiness_badge_markdown: badgeSnippets.markdown,
     readiness_badge_url: badgeSnippets.url,
+    num_sponsoring: String(result.sponsorshipInfo?.numSponsoring ?? 0),
+    num_sponsored: String(result.sponsorshipInfo?.numSponsored ?? 0),
   };
 }
 

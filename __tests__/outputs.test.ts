@@ -8,6 +8,7 @@ const result: ValidationResult = {
   xlmBalance: '5.0000000',
   xlmReserveMet: true,
   checks: [],
+  sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
 };
 
 describe('toActionOutputs', () => {
@@ -21,6 +22,8 @@ describe('toActionOutputs', () => {
     });
     expect(outputs).toHaveProperty('readiness_badge_markdown');
     expect(outputs).toHaveProperty('readiness_badge_url');
+    expect(outputs).toHaveProperty('num_sponsoring');
+    expect(outputs).toHaveProperty('num_sponsored');
   });
 
   it('includes a comment URL when provided', () => {
@@ -33,6 +36,8 @@ describe('toActionOutputs', () => {
     });
     expect(outputs).toHaveProperty('readiness_badge_markdown');
     expect(outputs).toHaveProperty('readiness_badge_url');
+    expect(outputs).toHaveProperty('num_sponsoring');
+    expect(outputs).toHaveProperty('num_sponsored');
   });
 
   it('generates pass badge for valid results', () => {
@@ -50,6 +55,7 @@ describe('toActionOutputs', () => {
       xlmBalance: '0',
       xlmReserveMet: false,
       checks: [],
+      sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
     };
     const outputs = toActionOutputs(failResult);
     expect(outputs.readiness_badge_url).toContain('red');
@@ -63,5 +69,20 @@ describe('toActionOutputs', () => {
     expect(combined).not.toContain('5.0000000');
     expect(combined).not.toContain('USDC');
     expect(combined).not.toContain('github.com/account');
+  });
+
+  it('includes sponsor counts in outputs', () => {
+    const sponsoredResult: ValidationResult = {
+      valid: true,
+      accountFunded: true,
+      trustlineExists: true,
+      xlmBalance: '5.0',
+      xlmReserveMet: true,
+      checks: [],
+      sponsorshipInfo: { numSponsoring: 2, numSponsored: 1 },
+    };
+    const outputs = toActionOutputs(sponsoredResult);
+    expect(outputs.num_sponsoring).toBe('2');
+    expect(outputs.num_sponsored).toBe('1');
   });
 });

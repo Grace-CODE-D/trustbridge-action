@@ -247,6 +247,33 @@ Add the badge to your repository README using the Markdown output:
 
 The badge reflects the validation result without exposing PII (addresses, balances, or asset details).
 
+### Sponsorship outputs
+
+The action exposes sponsorship relationship counts from the Stellar Horizon API when available:
+
+- **`num_sponsoring`** — Number of accounts this account is sponsoring (numeric string)
+- **`num_sponsored`** — Number of accounts sponsoring this account (numeric string)
+
+#### Using sponsorship outputs in workflows
+
+Sponsorship outputs are useful for understanding reserve requirements and sponsorship relationships:
+
+```yaml
+- name: TrustBridge check
+  id: trustbridge
+  uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    stellar_address_input: ${{ steps.address.outputs.address }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Check sponsorship status
+  run: |
+    echo "Sponsoring: ${{ steps.trustbridge.outputs.num_sponsoring }} accounts"
+    echo "Sponsored by: ${{ steps.trustbridge.outputs.num_sponsored }} accounts"
+```
+
+When an account is **sponsored** (`num_sponsored > 0`), reserve requirements are covered by the sponsoring account. The TrustBridge comment will automatically note this and provide links to Stellar sponsorship documentation for clarity.
+
 ---
 
 ## Extracting Stellar addresses from issues

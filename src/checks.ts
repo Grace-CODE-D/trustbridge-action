@@ -21,6 +21,13 @@ export interface CheckResultItem {
   detail: string;
 }
 
+export interface SponsorshipInfo {
+  /** Number of accounts this account is sponsoring (num_sponsoring from Horizon). */
+  numSponsoring: number;
+  /** Number of accounts sponsoring this account (num_sponsored from Horizon). */
+  numSponsored: number;
+}
+
 export interface ValidationResult {
   valid: boolean;
   accountFunded: boolean;
@@ -29,6 +36,8 @@ export interface ValidationResult {
   xlmReserveMet: boolean;
   checks: CheckResultItem[];
   remediation?: string;
+  /** Sponsorship relationship counts from Horizon. */
+  sponsorshipInfo?: SponsorshipInfo;
 }
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
@@ -125,6 +134,12 @@ export function runAccountChecks(
     remediation = steps.join('\n\n');
   }
 
+  // Extract sponsorship info from account (Issue #141)
+  const sponsorshipInfo: SponsorshipInfo = {
+    numSponsoring: account.num_sponsoring ?? 0,
+    numSponsored: account.num_sponsored ?? 0,
+  };
+
   return {
     valid,
     accountFunded: true,
@@ -133,6 +148,7 @@ export function runAccountChecks(
     xlmReserveMet,
     checks,
     remediation,
+    sponsorshipInfo,
   };
 }
 
@@ -174,6 +190,7 @@ export function unfundedAccountResult(
       `Then add a **${safeAssetCode}** trustline via [Stellar Laboratory](${buildChangeTrustLink(network)}) or [LOBSTR](${buildLobstrLink()}).`,
       `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
     ].join('\n\n'),
+    sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
   };
 }
 
@@ -217,6 +234,7 @@ export function horizonFailureResult(message: string, config: CheckConfig): Vali
     checks,
     remediation:
       'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
+    sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
   };
 }
 
