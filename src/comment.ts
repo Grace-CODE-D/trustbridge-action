@@ -1,5 +1,4 @@
 import * as core from '@actions/core';
-import * as core from '@actions/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as github from '@actions/github';
@@ -18,10 +17,14 @@ import {
   buildLobstrLink,
   buildSep0007PayLink,
   inferStellarNetwork,
+  buildFaqLinkForCheck,
 } from './links';
 import { buildOnboardingChecklist, inlineCode } from './markdown';
 import { MetricsCollector } from './metrics';
 import { formatSnoozeMarker, parseSnoozeMarker, evaluateSnoozeState } from './snooze';
+import { buildDiagnosticsBlock, DiagnosticsConfig } from './diagnostics';
+import { Locale, getStrings } from './i18n';
+import { formatDeltaMarkdown, ValidationDelta } from './delta';
 
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
@@ -68,6 +71,29 @@ export interface CommentConfig extends CheckConfig {
    * Falls back to English if unset or invalid.
    */
   locale?: Locale;
+  /**
+   * When provided and `debugMode` is true, appends an expert diagnostics
+   * collapsible block with Horizon request details and normalized inputs.
+   * Never includes secrets. (Issue #102)
+   */
+  diagnosticsConfig?: DiagnosticsConfig;
+  /**
+   * Optional base URL for FAQ/docs deep links. When set, failing check
+   * bullets link to anchor-level FAQ entries in docs/FAQ.md.
+   * Defaults to the repo's docs/FAQ.md. Invalid values fall back to the
+   * default silently so comment posting is never blocked. (Issue #104)
+   */
+  docsBaseUrl?: string;
+  /**
+   * Delta vs previous validation run (Issue #148). When present, a delta
+   * section is appended to the comment showing newly-passed/failed checks.
+   */
+  delta?: ValidationDelta | null;
+  /**
+   * Minimum asset balance required (e.g. '10' for 10 USDC). When set,
+   * the configuration summary includes a min_asset_balance row.
+   */
+  minAssetBalance?: string;
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
@@ -100,10 +126,13 @@ export function formatCommentBody(
 ): string {
   const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
   const gate = buildValidationGate(result);
-  
+  const strings = getStrings(config.locale ?? 'en');
+  const assetBalanceCheckEnabled = !!config.minAssetBalance;
+
   // Generate snooze marker with current check status (Issue #155)
   const snoozeMarker = formatSnoozeMarker(result.valid ? 'pass' : 'fail');
-  
+
+  const buildWithRemediation = (remediation: string | undefined): string => {
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
@@ -119,7 +148,17 @@ export function formatCommentBody(
   ];
 
   for (const check of result.checks) {
-    lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
+    // Append a FAQ deep link for failing checks so contributors land on the
+    // exact fix (Issue #104). Passing checks do not include the link to keep
+    // the happy path clean.
+    let faqSuffix = '';
+    if (!check.passed) {
+      const faqUrl = buildFaqLinkForCheck(check.label, config.docsBaseUrl);
+      if (faqUrl) {
+        faqSuffix = ` [→ FAQ](${faqUrl})`;
+      }
+    }
+    lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}${faqSuffix}`);
   }
 
   const deltaSection = formatDeltaMarkdown(config.delta);
@@ -173,7 +212,7 @@ export function formatCommentBody(
       `_${strings.sepWalletActionsDescription}_`,
       '',
       `- [${strings.sendXlmToActivate.replace('{amount}', String(STELLAR_MIN_ACCOUNT_BALANCE_XLM))}](${payLink})`,
-    );
+  );
   }
 
   // Sponsorship info explainer (Issue #141)
@@ -190,11 +229,11 @@ export function formatCommentBody(
       `- Accounts sponsoring this account: **${result.sponsorshipInfo.numSponsored}**`,
       '',
       '**Reserve implications:** Sponsored accounts may have different reserve requirements than their balance suggests. The sponsoring account bears the reserve cost. [Learn more about sponsorship.](https://developers.stellar.org/learn/fundamentals/stellar-data-structures/ledger-entries#sponsorships)',
-    );
+  );
   }
 
-  if (result.remediation) {
-    lines.push('', `### ${strings.remediationHeading}`, '', result.remediation);
+  if (remediation) {
+    lines.push('', `### ${strings.remediationHeading}`, '', remediation);
   }
 
   lines.push(
@@ -211,7 +250,7 @@ export function formatCommentBody(
   if (assetBalanceCheckEnabled) {
     lines.push(
       `| \`min_asset_balance\` | \`${config.minAssetBalance} ${config.assetCode}\` |`,
-    );
+  );
   }
 
   if (config.waitUntilFunded) {
@@ -220,7 +259,7 @@ export function formatCommentBody(
     lines.push(
       `| \`wait_until_funded_timeout_ms\` | ${strings.waitUntilFundedTimeoutMs.replace('{ms}', String(timeout))} |`,
       `| \`wait_until_funded_interval_ms\` | ${strings.waitUntilFundedIntervalMs.replace('{ms}', String(interval))} |`,
-    );
+  );
   }
 
   lines.push(
@@ -249,16 +288,24 @@ export function formatCommentBody(
       '```json',
       metricsJson,
       '```',
-    );
+  );
+  }
+
+  // Expert diagnostics block (Issue #102) — only appended in debug/expert mode
+  if (config.debugMode && config.diagnosticsConfig) {
+    const diagnosticsBlock = buildDiagnosticsBlock(config.diagnosticsConfig);
+    if (diagnosticsBlock) {
+      lines.push(diagnosticsBlock);
+    }
   }
 
   lines.push(
     '',
     '---',
     TRUSTBRIDGE_FOOTER,
-    );
+  );
 
-    return lines.join('\n');
+  return lines.join('\n');
   };
 
   let fullBody = buildWithRemediation(result.remediation);
@@ -507,7 +554,7 @@ export async function postIssueComment(
   if (!issueNumber) {
     core.warning(
       'No issue context found — skipping comment. Pass `issue_number` as a workflow_dispatch input or run this action on an `issues` event.',
-    );
+  );
     return undefined;
   }
 
@@ -544,7 +591,7 @@ export async function postIssueComment(
       const message = error instanceof Error ? error.message : String(error);
       core.warning(
         `Could not look up existing TrustBridge comment, falling back to a new comment: ${message}`,
-      );
+    );
     }
   }
 
@@ -561,7 +608,7 @@ export async function postIssueComment(
     if (snoozeState.isSnoozed) {
       core.info(
         `Snooze window active (${Math.round((snoozeState.elapsedMs ?? 0) / 1000)}s elapsed). Suppressing comment update. Outputs remain updated.`,
-      );
+    );
       return existingCommentId ? `https://github.com/${owner}/${repo}/issues/${issueNumber}#issuecomment-${existingCommentId}` : undefined;
     }
   }
@@ -580,7 +627,7 @@ export async function postIssueComment(
       const message = error instanceof Error ? error.message : String(error);
       core.warning(
         `Could not update existing TrustBridge comment (id=${existingCommentId}), falling back to a new comment: ${message}`,
-      );
+    );
     }
   }
 
