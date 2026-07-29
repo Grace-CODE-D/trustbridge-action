@@ -147,7 +147,7 @@ that mirrors the `inputs:` section of `action.yml`. Each property:
 1. Add the input to `action.yml` with `description`, `required`, and `default`.
 2. Add a matching property to `schemas/action-inputs.schema.json` under `"properties"` with at minimum `"type": "string"` and `"description"`.
 3. If the new input is `required: true` in `action.yml`, add its name to the `"required"` array in the schema.
-4. Run `npm test -- --testPathPattern action-schema-sync` locally � it must pass.
+4. Run `npm test -- --testPathPattern action-schema-sync` locally � it must pass.
 5. Document the new input in `docs/USAGE.md` and `README.md`.
 6. Update `docs/BREAKING_CHANGES.md` if the change is breaking.
 
@@ -335,3 +335,95 @@ Open a [GitHub Discussion](https://github.com/Stellar-TrustBridge/trustbridge-ac
 ---
 
 [← Back to README](README.md)
+
+---
+
+## Bundle size budget
+
+The action runs from `dist/index.js` — a single-file bundle compiled by
+`@vercel/ncc` that includes all dependencies. Size regressions slow every
+assignment job and hint at accidental imports.
+
+### Current budget
+
+| Metric | Value |
+|--------|-------|
+| **Budget (hard limit)** | 2,097,152 bytes (2 MB) |
+| **Baseline (as of 2024-12-29)** | 1,688,671 bytes (~1.6 MB) |
+| **Headroom** | 408,481 bytes (~24%) |
+| **Warn threshold** | 1,887,436 bytes (90% of budget) |
+
+### How it works
+
+`__tests__/bundle-size.test.ts` measures `dist/index.js` using Node's
+`fs.statSync` (deterministic across platforms — no shell `wc -c` variance)
+and fails CI when the bundle exceeds the budget.
+
+The test always logs current size, budget usage, and headroom so PR reviewers
+see the trend before merge.
+
+### Checking locally
+
+```bash
+# Quick check — just the bundle size test
+npm run bundle-size
+
+# Full build + check
+npm run build && npm run bundle-size
+```
+
+### When to increase the budget
+
+**Before** bumping `MAX_BUNDLE_SIZE_BYTES` in `__tests__/bundle-size.test.ts`:
+
+1. ✅ Confirm the size increase is from a **necessary** dependency (e.g., a
+   new Stellar SDK function, required polyfill, localization strings).
+2. ✅ Verify the increase is **proportional** to the value delivered (not
+   just bloat).
+3. ✅ Check that no **lighter alternative** exists:
+   - Can you import a single function instead of the entire library?
+   - Is there a micro-package alternative (e.g., `date-fns` vs `moment`)?
+   - Can the logic be implemented directly in ~50 lines instead of adding
+     a 200 KB dependency?
+4. ✅ Analyze **what's contributing** the bytes:
+   ```bash
+   npx ncc build src/index.ts -o dist-test --stats
+   ```
+   This outputs a module-by-module breakdown. Look for surprises (dev
+   fixtures, test helpers, entire libraries imported when only one function
+   is used).
+5. ✅ **Document the reason** in the `MAX_BUNDLE_SIZE_BYTES` comment block:
+   ```typescript
+   /**
+    * CURRENT BASELINE: X bytes (as of YYYY-MM-DD)
+    * BUDGET:           Y bytes (Z% headroom)
+    *
+    * Last increase: [PR #123] Added foo-sdk (150 KB) for feature X.
+    */
+   ```
+6. ✅ Update the budget table in this CONTRIBUTING.md section.
+
+### When CI fails with "Bundle size exceeds budget"
+
+The failure message includes:
+- Current size vs budget
+- Overage in bytes and percentage
+- Actionable next steps
+
+Common causes:
+- A new dependency was added without checking size (`npm ls --depth=0` shows
+  direct deps; use `npm why <package>` to see why a transitive dep is present).
+- A dev-only fixture was accidentally imported into `src/` (check recent
+  `git diff` for new imports).
+- A heavyweight library was used when a lighter alternative exists.
+
+### Intentional budget increase checklist
+
+When you've verified the increase is justified:
+
+1. Update `MAX_BUNDLE_SIZE_BYTES` in `__tests__/bundle-size.test.ts`.
+2. Update the comment block in that file with the new baseline and reason.
+3. Update the budget table in this CONTRIBUTING.md section.
+4. Run `npm run bundle-size` locally — it must pass.
+5. Include the bundle size analysis output (`ncc build --stats`) in the PR
+   description so reviewers can see what changed.
