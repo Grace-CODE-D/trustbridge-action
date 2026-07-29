@@ -254,6 +254,14 @@ export class OctokitMetrics {
 // MetricsCollector (existing — unchanged public API)
 // ---------------------------------------------------------------------------
 
+export interface TimingBreakdown {
+  input_parse_ms: number;
+  horizon_fetch_ms: number;
+  checks_ms: number;
+  comment_post_ms: number;
+  total_ms: number;
+}
+
 export class MetricsCollector {
   private metrics: MetricPoint[] = [];
   private counters: Map<string, number> = new Map();
@@ -336,6 +344,29 @@ export class MetricsCollector {
     this.recordMetric(`${name}_duration`, elapsed, unit);
     this.timers.delete(name);
     return elapsed;
+  }
+
+  /**
+   * Get a timing breakdown of execution phases in milliseconds (Issue #93).
+   */
+  getTimingBreakdown(): TimingBreakdown {
+    const getMs = (name: string) => {
+      const point = this.metrics.find((m) => m.name === `${name}_duration`);
+      return point ? point.value : 0;
+    };
+    const input_parse_ms = getMs('input_parse');
+    const horizon_fetch_ms = getMs('horizon_fetch');
+    const checks_ms = getMs('checks');
+    const comment_post_ms = getMs('comment_post');
+    const total_ms = getMs('total_execution') || (input_parse_ms + horizon_fetch_ms + checks_ms + comment_post_ms);
+
+    return {
+      input_parse_ms,
+      horizon_fetch_ms,
+      checks_ms,
+      comment_post_ms,
+      total_ms,
+    };
   }
 
   /**

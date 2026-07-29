@@ -522,12 +522,56 @@ trustline check:
 
 ## Outputs in downstream jobs
 
+TrustBridge exposes both legacy outputs and comprehensive audit & timing metadata for downstream automation, payout gating, and compliance monitoring.
+
+### Available Action Outputs
+
+| Output | Type | Description |
+|---|---|---|
+| `ready` | `boolean` (`"true"`/`"false"`) | **Overall readiness gate**: `true` when all validation checks pass, `false` otherwise. Ideal for `if:` condition in downstream payout jobs. |
+| `validated_at` | `string` | ISO 8601 UTC timestamp of when validation occurred. |
+| `horizon_url` | `string` | Horizon endpoint base URL used for account queries. |
+| `asset_code` | `string` | Asset code checked (e.g. `USDC`). |
+| `asset_issuer` | `string` | Asset issuer Stellar G-address checked. |
+| `reason_code` | `string` | Machine-readable failure classification code (see Catalog below). |
+| `checks_json` | `string` (JSON) | Array of check objects: `[{"label": "...", "passed": true, "detail": "..."}]`. |
+| `timings_json` | `string` (JSON) | Execution timing breakdown object in milliseconds. |
+| `timing_input_parse_ms` | `string` | Input parsing phase latency in milliseconds. |
+| `timing_horizon_fetch_ms` | `string` | Horizon API query latency in milliseconds. |
+| `timing_checks_ms` | `string` | Account checks evaluation latency in milliseconds. |
+| `timing_comment_post_ms` | `string` | Issue comment posting latency in milliseconds. |
+| `timing_total_ms` | `string` | Total action execution duration in milliseconds. |
+| `trustline_exists` | `string` (legacy) | Whether the account holds a trustline for the asset (`"true"`/`"false"`). |
+| `xlm_balance` | `string` (legacy) | Native XLM balance as reported by Horizon. |
+| `account_funded` | `string` (legacy) | Whether the account exists on the ledger (`"true"`/`"false"`). |
+| `comment_url` | `string` (legacy) | Created/updated issue comment URL. |
+| `full_report_path` | `string` (legacy) | Workspace path to full report when comment body exceeded size limits. |
+
+### Failure Reason Code Catalog (`reason_code`)
+
+| Reason Code | Description |
+|---|---|
+| `SUCCESS` | All checks passed successfully. |
+| `ACCOUNT_NOT_FUNDED` | Account was not found on Horizon (404 / unfunded). |
+| `TRUSTLINE_MISSING` | Account exists but is missing a trustline for the specified asset. |
+| `TRUSTLINE_UNAUTHORIZED` | Trustline exists but is not authorized by the issuer. |
+| `TRUSTLINE_LIMIT_TOO_LOW` | Trustline limit is below `min_trustline_limit`. |
+| `RESERVE_TOO_LOW` | XLM balance does not meet the reserve requirement floor or protocol minimum. |
+| `HORIZON_TIMEOUT` | Horizon API request timed out before returning a response. |
+| `HORIZON_ERROR` | Horizon API returned an HTTP error (5xx or non-404 4xx). |
+| `TLS_ERROR` | Transport-layer TLS/certificate verification failed connecting to Horizon. |
+| `INVALID_ADDRESS` | Provided Stellar address failed StrKey format/checksum validation. |
+
+### Example — Downstream Payout Gating
+
 ```yaml
 jobs:
   verify:
     runs-on: ubuntu-latest
     outputs:
-      funded: ${{ steps.bridge.outputs.account_funded }}
+      ready: ${{ steps.bridge.outputs.ready }}
+      reason: ${{ steps.bridge.outputs.reason_code }}
+      checks: ${{ steps.bridge.outputs.checks_json }}
     steps:
       - id: bridge
         uses: Stellar-TrustBridge/trustbridge-action@v1
@@ -537,11 +581,19 @@ jobs:
 
   payout:
     needs: verify
-    if: needs.verify.outputs.funded == 'true'
+    if: needs.verify.outputs.ready == 'true'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Ready for payout pipeline"
+      - name: Execute automated payout
+        run: echo "Account verified ready! Proceeding with payout..."
 ```
+
+### Timing Breakdown & Triage (`timings_json`)
+
+Downstream workflows and maintainers can inspect phase timings to triage slow runs and detect availability anomalies:
+- **`timing_horizon_fetch_ms`**: Indicates latency introduced by the Horizon API endpoint. High values suggest Horizon congestion or rate limiting.
+- **`timing_comment_post_ms`**: Indicates GitHub API latency.
+- **`timing_checks_ms`**: Evaluation time in Node runner (typically < 10ms).
 
 > **Balance parsing for release scripts:** The `xlm_balance` output is a raw
 > Horizon decimal string (e.g. `"14.9999700"`). Use `parseFloat()` for

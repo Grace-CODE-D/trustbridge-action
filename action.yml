@@ -229,6 +229,36 @@ outputs:
       workspace when the comment body exceeded GitHub's size limit.  Empty
       when the comment was within the limit and no file was written.
 
+  # ── Audit & Integration outputs (Issue #66, #67) ─────────────────────────
+  ready:
+    description: 'Whether all validation checks passed (true/false)'
+  validated_at:
+    description: 'ISO-8601 timestamp when the validation checks were performed'
+  horizon_url:
+    description: 'Horizon API base URL used for validation'
+  asset_code:
+    description: 'Asset code validated by the action'
+  asset_issuer:
+    description: 'Asset issuer address validated by the action'
+  reason_code:
+    description: 'Machine-readable failure reason code (e.g. SUCCESS, ACCOUNT_NOT_FUNDED, TRUSTLINE_MISSING, RESERVE_TOO_LOW)'
+  checks_json:
+    description: 'JSON string array of individual check results and pass/fail statuses'
+
+  # ── Timing breakdown outputs (Issue #93) ──────────────────────────────────
+  timings_json:
+    description: 'JSON string containing millisecond execution timings for all major phases'
+  timing_input_parse_ms:
+    description: 'Execution duration of input parsing phase in milliseconds'
+  timing_horizon_fetch_ms:
+    description: 'Execution duration of Horizon API fetch phase in milliseconds'
+  timing_checks_ms:
+    description: 'Execution duration of validation checks phase in milliseconds'
+  timing_comment_post_ms:
+    description: 'Execution duration of comment posting phase in milliseconds'
+  timing_total_ms:
+    description: 'Total execution duration in milliseconds'
+
 runs:
   using: 'node20'
   main: 'dist/index.js'
