@@ -2,7 +2,7 @@
 
 How to integrate **trustbridge-action** into your repository workflows.
 
-Related docs: [README](../README.md) · [Architecture](ARCHITECTURE.md) · [Error handling](ERROR_HANDLING.md)
+Related docs: [README](../README.md) · [Architecture](ARCHITECTURE.md) · [Error handling](ERROR_HANDLING.md) · [Cron re-validation](CRON_REVALIDATION.md)
 
 ---
 
@@ -265,6 +265,20 @@ jobs:
 
 ---
 
+## Scheduled wallet re-validation (cron)
+
+A one-time assignment check is insufficient for long-running Waves. Wallets can drift after assignment — trustline removed, balance spent, or address rotated. Run a scheduled sweep before payout to catch stale trustlines early.
+
+See **[CRON_REVALIDATION.md](CRON_REVALIDATION.md)** for a full guide and a ready-to-copy workflow at [`docs/examples/cron-revalidation.yml`](examples/cron-revalidation.yml).
+
+Key recommendations for cron runs:
+
+- Set `fail_on_missing: false` — keeps the cron job green; ❌ appears in the issue comment, not as a CI badge failure.
+- Keep `sticky_comment: true` — updates the existing TrustBridge comment rather than flooding the issue thread.
+- Wire up the maintainer alert step so drift is surfaced even when the job succeeds.
+
+---
+
 ## Pinning versions
 
 | Reference | When to use |
@@ -287,4 +301,4 @@ If using `GITHUB_TOKEN`, no extra secret is required beyond workflow permissions
 
 ---
 
-[← Back to README](../README.md)
+[← Back to README](../README.md) · [Cron re-validation →](CRON_REVALIDATION.md)
