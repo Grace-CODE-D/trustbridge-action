@@ -212,6 +212,32 @@ inputs:
       a fix attempt. Default false. (Issue #155)
     required: false
     default: 'false'
+  webhook_url:
+    description: >-
+      Optional HTTPS URL to POST a signed webhook notification to after every
+      validation run. When empty (default) no webhook is sent and comment
+      posting is completely unaffected. The payload is signed with
+      HMAC-SHA256 when `webhook_secret` is also supplied. Disabled by default.
+      (Issue #101)
+    required: false
+    default: ''
+  webhook_secret:
+    description: >-
+      Shared secret used to sign the webhook payload with HMAC-SHA256. The
+      signature is included as the `X-TrustBridge-Signature` HTTP header in
+      the format `sha256=<hex-digest>`. Never logged or embedded in comments.
+      Leave empty to send unsigned webhooks (not recommended for production).
+      Only used when `webhook_url` is set. (Issue #101)
+    required: false
+    default: ''
+  webhook_timeout_ms:
+    description: >-
+      Maximum time in milliseconds to wait for the webhook endpoint to
+      respond. When the timeout elapses the request is aborted and a warning
+      is logged — comment posting and validation results are unaffected.
+      Default 5000 (5 seconds). (Issue #101)
+    required: false
+    default: '5000'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
