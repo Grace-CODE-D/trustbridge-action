@@ -1,5 +1,6 @@
 import { defaultCache, SimpleCache } from './cache';
 import { logger, redactHorizonUrl, redactString, LogContext } from './logger';
+import { inferStellarNetwork } from './links';
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -26,6 +27,7 @@ export interface HorizonAccount {
   balances: HorizonBalance[];
   num_sponsoring: number;
   num_sponsored: number;
+  _servedByUrl?: string;
 }
 
 export interface HorizonErrorResponse {
@@ -55,7 +57,9 @@ export interface FetchAccountOptions {
   timeoutMs?: number;
   maxRetries?: number;
   horizonUrlFallback?: string;
+  secondaryHorizonUrl?: string;
   fallbackUrls?: string[];
+  allowCrossNetworkFailover?: boolean;
   useCache?: boolean;
   cacheTtlMs?: number;
   cache?: SimpleCache;
@@ -394,7 +398,13 @@ export async function fetchAccount(
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = options.cache ?? defaultCache;
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
-  const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
+  const candidateFallbacks = [
+    options.secondaryHorizonUrl,
+    options.horizonUrlFallback,
+    ...(options.fallbackUrls ?? []),
+  ].filter((u): u is string => Boolean(u && u.trim()));
+
+  const fallbackCandidate = candidateFallbacks[0];
   const normalizedFallbackUrl = fallbackCandidate
     ? normalizeHorizonUrl(fallbackCandidate)
     : '';
@@ -465,6 +475,8 @@ export async function fetchAccount(
       'primary',
     );
 
+    result.account._servedByUrl = normalizedHorizonUrl;
+
     if (cachingEnabled) {
       cache.set(cacheKey, result.account, cacheTtlMs);
       const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -498,6 +510,20 @@ export async function fetchAccount(
     throw primaryError;
   }
 
+  const primaryNetwork = inferStellarNetwork(normalizedHorizonUrl);
+  const fallbackNetwork = inferStellarNetwork(normalizedFallbackUrl);
+  if (primaryNetwork !== fallbackNetwork && !options.allowCrossNetworkFailover) {
+    logger.debug('Horizon RPC fallback prevented: cross-network mismatch (mainnet vs testnet)', safeHorizonContext({
+      component: 'horizon',
+      stellarAddress,
+      horizonUrl,
+      horizonUrlFallback: normalizedFallbackUrl,
+      primaryNetwork,
+      fallbackNetwork,
+    }));
+    throw primaryError;
+  }
+
   logger.debug('Horizon RPC fallback: primary exhausted, switching to fallback URL', safeHorizonContext({
     component: 'horizon',
     stellarAddress,
@@ -518,6 +544,8 @@ export async function fetchAccount(
       maxRetries,
       'fallback',
     );
+
+    fallbackResult.account._servedByUrl = normalizedFallbackUrl;
 
     if (cachingEnabled) {
       cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
@@ -543,6 +571,7 @@ export async function fetchAccount(
       horizonUrlFallback: normalizedFallbackUrl,
       fallbackAttempts: fallbackResult.attempts,
       fallbackLatencyMs: fallbackResult.latencyMs,
+      servedByUrl: normalizedFallbackUrl,
     }));
 
     return fallbackResult.account;

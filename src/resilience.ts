@@ -13,6 +13,8 @@
 // CLI check command types
 // ---------------------------------------------------------------------------
 
+import { inferStellarNetwork } from './links';
+
 /**
  * Options accepted by the local CLI check command.
  */
@@ -21,6 +23,12 @@ export interface CliCheckOptions {
   address: string;
   /** Horizon base URL (default: https://horizon.stellar.org). */
   horizonUrl?: string;
+  /** Secondary Horizon URL for failover. */
+  secondaryHorizonUrl?: string;
+  /** List of fallback Horizon URLs. */
+  fallbackUrls?: string[];
+  /** Allow failover across different networks (e.g. mainnet to testnet). Default false. */
+  allowCrossNetworkFailover?: boolean;
   /** Request timeout in milliseconds (default: 15 000). */
   timeoutMs?: number;
   /** Retry policy overrides. */
@@ -41,6 +49,10 @@ export interface CliCheckResult {
   message: string;
   /** Number of retry attempts made (0 = first try succeeded). */
   retries: number;
+  /** Base URL of the Horizon endpoint that served the successful response. */
+  horizonUrlUsed?: string;
+  /** True if the response was served by the secondary endpoint after primary failover. */
+  failedOver?: boolean;
 }
 
 /**
@@ -309,6 +321,7 @@ export async function runCliCheck(
   fetchFn: FetchFn = (url, init) => fetch(url, init) as Promise<{ status: number }>,
 ): Promise<CliCheckResult> {
   const horizonUrl = options.horizonUrl ?? 'https://horizon.stellar.org';
+  const secondaryUrl = options.secondaryHorizonUrl || (options.fallbackUrls && options.fallbackUrls[0]);
   const policy: RetryPolicy = {
     ...DEFAULT_RETRY_POLICY,
     timeoutMs: options.timeoutMs ?? DEFAULT_RETRY_POLICY.timeoutMs,
@@ -320,6 +333,8 @@ export async function runCliCheck(
   const startMs = Date.now();
   let retries = 0;
   let statusCode: number | undefined;
+  let horizonUrlUsed = horizonUrl;
+  let failedOver = false;
 
   try {
     await retryWithBackoff(
@@ -350,16 +365,57 @@ export async function runCliCheck(
     // Exhausted retries or non-retryable error — fall through to result.
   }
 
+  // If primary failed on transient error (not 404), fail over to secondary URL
+  if (statusCode !== 200 && statusCode !== 404 && secondaryUrl) {
+    const primaryNet = inferStellarNetwork(horizonUrl);
+    const secondaryNet = inferStellarNetwork(secondaryUrl);
+    if (primaryNet === secondaryNet || options.allowCrossNetworkFailover) {
+      const secondaryAccountUrl = `${secondaryUrl.replace(/\/$/, '')}/accounts/${options.address}`;
+      let secondaryRetries = 0;
+      try {
+        await retryWithBackoff(
+          async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
+            try {
+              const response = await fetchFn(secondaryAccountUrl, { signal: controller.signal });
+              statusCode = response.status;
+              if (response.status === 429 || (response.status >= 500 && response.status !== 503)) {
+                throw new Error(`Transient HTTP ${response.status} on secondary — retrying`);
+              }
+            } finally {
+              clearTimeout(timer);
+            }
+          },
+          policy,
+          (_error, attempt) => {
+            secondaryRetries = attempt + 1;
+            return true;
+          },
+        );
+        if (statusCode === 200 || statusCode === 404) {
+          failedOver = true;
+          horizonUrlUsed = secondaryUrl;
+          retries += secondaryRetries;
+        }
+      } catch {
+        retries += secondaryRetries;
+      }
+    }
+  }
+
   const durationMs = Date.now() - startMs;
   const reachable = statusCode === 200;
 
   const message = reachable
-    ? `Account ${options.address} is reachable on Horizon (${durationMs}ms, ${retries} retries).`
+    ? failedOver
+      ? `Account ${options.address} is reachable on secondary Horizon ${horizonUrlUsed} (${durationMs}ms after primary failover).`
+      : `Account ${options.address} is reachable on Horizon (${durationMs}ms, ${retries} retries).`
     : statusCode === 404
       ? `Account ${options.address} was not found on Horizon (404) — not yet funded.`
       : statusCode !== undefined
         ? `Horizon returned HTTP ${statusCode} for ${options.address} (${durationMs}ms, ${retries} retries).`
         : `Could not reach Horizon at ${horizonUrl} (${durationMs}ms, ${retries} retries).`;
 
-  return { reachable, statusCode, durationMs, message, retries };
+  return { reachable, statusCode, durationMs, message, retries, horizonUrlUsed, failedOver };
 }

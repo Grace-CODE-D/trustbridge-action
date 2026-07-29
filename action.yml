@@ -133,6 +133,27 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
+  network:
+    description: >-
+      Stellar network or preset name (e.g. "public", "testnet"). When set to "testnet",
+      populates testnet Horizon URL, asset issuer, and reserve defaults.
+    required: false
+    default: ''
+  preset:
+    description: >-
+      Campaign preset identifier (e.g. "testnet", "public"). Alias for network preset.
+    required: false
+    default: ''
+  secondary_horizon_url:
+    description: >-
+      Optional secondary or canary Horizon API base URL for resilience failover.
+    required: false
+    default: ''
+  allow_cross_network_failover:
+    description: >-
+      Allow failover between different Stellar networks (e.g. mainnet to testnet). Default false.
+    required: false
+    default: 'false'
 
 outputs:
   trustline_exists:

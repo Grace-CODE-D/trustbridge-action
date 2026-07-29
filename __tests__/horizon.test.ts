@@ -560,6 +560,65 @@ describe('Horizon debug log redaction', () => {
         restore();
       }
     });
+
+    it('bypasses failover when primary returns 404 (account missing is not retryable)', async () => {
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(404, { title: 'Resource Missing' });
+        }
+        return makeMockResponse(200, makeAccount(TEST_ADDRESS));
+      });
+
+      await expect(
+        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          horizonUrlFallback: FALLBACK_HORIZON,
+          fetchFn: mock,
+        }),
+      ).rejects.toThrow(/not found on Horizon/);
+
+      expect(mock).toHaveBeenCalledTimes(1);
+    });
+
+    it('prevents failover across different networks when allowCrossNetworkFailover is false', async () => {
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(500, { title: 'Internal Error' });
+        }
+        return makeMockResponse(200, makeAccount(TEST_ADDRESS));
+      });
+
+      const testnetSecondary = 'https://horizon-testnet.stellar.org';
+
+      await expect(
+        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 0,
+          secondaryHorizonUrl: testnetSecondary,
+          allowCrossNetworkFailover: false,
+          fetchFn: mock,
+        }),
+      ).rejects.toThrow(/Horizon request failed/);
+
+      expect(mock).toHaveBeenCalledTimes(1);
+    });
+
+    it('attaches _servedByUrl to the returned account object on primary and secondary success', async () => {
+      const mock = makeMockFetch(async (url) => {
+        if (typeof url === 'string' && url.startsWith(PRIMARY_HORIZON)) {
+          return makeMockResponse(500, { title: 'Internal Error' });
+        }
+        return makeMockResponse(200, makeAccount(TEST_ADDRESS));
+      });
+
+      const secondaryHorizon = 'https://horizon-secondary.stellar.org';
+      const account = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        maxRetries: 0,
+        secondaryHorizonUrl: secondaryHorizon,
+        fetchFn: mock,
+      });
+
+      expect(account._servedByUrl).toBe(secondaryHorizon);
+    });
   });
 
   describe('safeAccountSummary: never emits sensitive account fields into debug context', () => {

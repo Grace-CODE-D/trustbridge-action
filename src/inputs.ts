@@ -41,3 +41,14 @@ export function parseNumberInput(
 export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+export function parsePresetInput(networkInput?: string, presetInput?: string): string {
+  if (presetInput && presetInput.trim()) {
+    return presetInput.trim().toLowerCase();
+  }
+  if (networkInput && networkInput.trim()) {
+    return networkInput.trim().toLowerCase();
+  }
+  return '';
+}
+

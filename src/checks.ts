@@ -29,6 +29,8 @@ export interface ValidationResult {
   xlmReserveMet: boolean;
   checks: CheckResultItem[];
   remediation?: string;
+  horizonUrlUsed?: string;
+  presetApplied?: string;
 }
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
@@ -133,6 +135,7 @@ export function runAccountChecks(
     xlmReserveMet,
     checks,
     remediation,
+    horizonUrlUsed: account._servedByUrl || config.horizonUrl,
   };
 }
 

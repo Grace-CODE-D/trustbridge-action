@@ -136,6 +136,17 @@ export class MetricsCollector {
   }
 
   /**
+   * Record campaign preset metric.
+   */
+  recordPresetMetric(presetId: string, network: string): void {
+    this.recordMetric('campaign_preset_applied', 1, 'count', {
+      preset: presetId,
+      network,
+    });
+    this.incrementCounter(`preset_${presetId}_applied`);
+  }
+
+  /**
    * Get average value for a metric.
    */
   getAverageMetric(name: string): number | null {

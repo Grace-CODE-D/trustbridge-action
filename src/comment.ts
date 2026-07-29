@@ -71,20 +71,33 @@ export function formatCommentBody(
   result: ValidationResult,
   config: CommentConfig,
 ): string {
-  const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
+  const effectiveHorizonUrl = result.horizonUrlUsed || config.horizonUrl;
+  const stellarLabNetwork = inferStellarNetwork(effectiveHorizonUrl);
   const gate = buildValidationGate(result);
+
+  const horizonDisplay = result.horizonUrlUsed && result.horizonUrlUsed !== config.horizonUrl
+    ? `${inlineCode(result.horizonUrlUsed)} *(failover)*`
+    : inlineCode(config.horizonUrl);
+
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
     '## TrustBridge — Stellar Account Check',
     '',
     `Checked account: ${inlineCode(config.stellarAddress)}`,
-    `Horizon: ${inlineCode(config.horizonUrl)}`,
+    `Horizon: ${horizonDisplay}`,
     `Asset: **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
+  ];
+
+  if (result.presetApplied) {
+    lines.push(`Preset: ${inlineCode(result.presetApplied)}`);
+  }
+
+  lines.push(
     '',
     '### Results',
     '',
-  ];
+  );
 
   for (const check of result.checks) {
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);

@@ -9,8 +9,13 @@ import {
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment } from './comment';
-import { normalizeAssetConfig } from './assets';
-import { getErrorMessage, parseBooleanInput, parseNumberInput } from './inputs';
+import {
+  getCampaignPreset,
+  MAINNET_USDC_ISSUER,
+  normalizeAssetConfig,
+  validateNetworkAssetCompatibility,
+} from './assets';
+import { getErrorMessage, parseBooleanInput, parseNumberInput, parsePresetInput } from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs } from './outputs';
 import { logger, emitInputsLogRecord } from './logger';
@@ -18,12 +23,40 @@ import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 
 async function run(): Promise<void> {
-  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
-  const assetCode = core.getInput('asset_code') || 'USDC';
-  const assetIssuer =
-    core.getInput('asset_issuer') ||
-    'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
-  const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+  const rawNetwork = core.getInput('network') || '';
+  const rawPreset = core.getInput('preset') || '';
+  const presetKey = parsePresetInput(rawNetwork, rawPreset);
+  const presetObj = getCampaignPreset(presetKey);
+
+  let horizonUrl = core.getInput('horizon_url');
+  let assetCode = core.getInput('asset_code');
+  let assetIssuer = core.getInput('asset_issuer');
+  let minXlmReserveRaw = core.getInput('min_xlm_reserve');
+
+  if (presetObj) {
+    if (!horizonUrl) horizonUrl = presetObj.horizonUrl;
+    if (!assetCode) assetCode = presetObj.assetCode;
+    if (!assetIssuer) assetIssuer = presetObj.assetIssuer;
+    if (!minXlmReserveRaw) minXlmReserveRaw = presetObj.minXlmReserve;
+    globalMetrics.recordPresetMetric(presetObj.id, presetObj.network);
+    logger.info('Applied network campaign preset', {
+      component: 'preset',
+      preset: presetObj.id,
+      network: presetObj.network,
+      horizonUrl,
+      assetCode,
+      assetIssuer,
+    });
+  } else {
+    if (!horizonUrl) horizonUrl = 'https://horizon.stellar.org';
+    if (!assetCode) assetCode = 'USDC';
+    if (!assetIssuer) assetIssuer = MAINNET_USDC_ISSUER;
+    if (!minXlmReserveRaw) minXlmReserveRaw = '1.5';
+  }
+
+  // Fail-fast validation for incompatible network & asset settings (e.g. mainnet issuer on testnet Horizon)
+  validateNetworkAssetCompatibility(horizonUrl, assetCode, assetIssuer, presetKey || undefined);
+
   const stellarAddress = core.getInput('stellar_address_input').trim();
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
@@ -43,13 +76,17 @@ async function run(): Promise<void> {
     5000,
     { min: 1000, max: 60000 },
   );
-  const horizonUrlFallback = core.getInput('horizon_url_fallback') || '';
+  const secondaryHorizonUrl = core.getInput('secondary_horizon_url') || '';
+  const allowCrossNetworkFailover = parseBooleanInput(core.getInput('allow_cross_network_failover'), false);
+  const horizonUrlFallback = core.getInput('horizon_url_fallback') || secondaryHorizonUrl || '';
   const rpcFallbackUrlRaw = core.getInput('rpc_fallback_url') || '';
   const fallbackUrls = rpcFallbackUrlRaw
     ? rpcFallbackUrlRaw.split(',').map((u) => u.trim()).filter(Boolean)
-    : horizonUrlFallback
-      ? [horizonUrlFallback]
-      : [];
+    : secondaryHorizonUrl
+      ? [secondaryHorizonUrl]
+      : horizonUrlFallback
+        ? [horizonUrlFallback]
+        : [];
   const horizonCacheTtlMs = parseNumberInput(core.getInput('horizon_cache_ttl_ms'), 60000, {
     min: 0,
     max: 3_600_000,
@@ -149,7 +186,9 @@ async function run(): Promise<void> {
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
+    secondaryHorizonUrl: secondaryHorizonUrl || undefined,
     fallbackUrls,
+    allowCrossNetworkFailover,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
   };
@@ -174,16 +213,22 @@ async function run(): Promise<void> {
         )
       : await fetchAccount(horizonUrl, stellarAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
+    if (presetObj) {
+      result.presetApplied = presetObj.id;
+    }
   } catch (error) {
     if (error instanceof HorizonError && error.statusCode === 404) {
       result = unfundedAccountResult(stellarAddress, checkConfig);
+      if (presetObj) result.presetApplied = presetObj.id;
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       result = horizonFailureResult(error.message, checkConfig);
+      if (presetObj) result.presetApplied = presetObj.id;
     } else {
       const message = getErrorMessage(error);
       core.error(message);
       result = horizonFailureResult(message, checkConfig);
+      if (presetObj) result.presetApplied = presetObj.id;
     }
   }
 

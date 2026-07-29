@@ -300,4 +300,55 @@ describe('runCliCheck', () => {
     const result = await runCliCheck(baseOptions, fetch);
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
   });
+
+  it('fails over to secondary Horizon endpoint when primary returns 503', async () => {
+    let callIndex = 0;
+    const fetch: FetchFn = async (url) => {
+      callIndex++;
+      if (url.includes('horizon.stellar.org')) {
+        return { status: 503 };
+      }
+      return { status: 200 };
+    };
+
+    const result = await runCliCheck(
+      {
+        ...baseOptions,
+        horizonUrl: 'https://horizon.stellar.org',
+        secondaryHorizonUrl: 'https://horizon-secondary.stellar.org',
+        retryPolicy: { maxRetries: 0, initialDelayMs: 1, maxDelayMs: 10, backoffMultiplier: 1, timeoutMs: 5000 },
+      },
+      fetch,
+    );
+
+    expect(result.reachable).toBe(true);
+    expect(result.failedOver).toBe(true);
+    expect(result.horizonUrlUsed).toBe('https://horizon-secondary.stellar.org');
+    expect(result.message).toContain('secondary Horizon');
+  });
+
+  it('bypasses failover when primary returns 404', async () => {
+    let secondaryCalled = false;
+    const fetch: FetchFn = async (url) => {
+      if (url.includes('secondary')) {
+        secondaryCalled = true;
+        return { status: 200 };
+      }
+      return { status: 404 };
+    };
+
+    const result = await runCliCheck(
+      {
+        ...baseOptions,
+        horizonUrl: 'https://horizon.stellar.org',
+        secondaryHorizonUrl: 'https://horizon-secondary.stellar.org',
+        retryPolicy: { maxRetries: 0, initialDelayMs: 1, maxDelayMs: 10, backoffMultiplier: 1, timeoutMs: 5000 },
+      },
+      fetch,
+    );
+
+    expect(result.reachable).toBe(false);
+    expect(result.statusCode).toBe(404);
+    expect(secondaryCalled).toBe(false);
+  });
 });

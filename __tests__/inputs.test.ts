@@ -1,4 +1,4 @@
-import { getErrorMessage, parseBooleanInput, parseNumberInput } from '../src/inputs';
+import { getErrorMessage, parseBooleanInput, parseNumberInput, parsePresetInput } from '../src/inputs';
 
 describe('parseBooleanInput', () => {
   it.each(['true', 'TRUE', '1', 'yes', ' Yes '])(
@@ -58,3 +58,18 @@ describe('getErrorMessage', () => {
     expect(getErrorMessage('plain')).toBe('plain');
   });
 });
+
+describe('parsePresetInput', () => {
+  it('prioritizes preset over network', () => {
+    expect(parsePresetInput('public', 'testnet')).toBe('testnet');
+  });
+
+  it('uses network when preset is empty', () => {
+    expect(parsePresetInput('testnet', '')).toBe('testnet');
+  });
+
+  it('returns empty string when both are empty', () => {
+    expect(parsePresetInput('', '')).toBe('');
+  });
+});
+
