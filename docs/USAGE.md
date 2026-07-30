@@ -1081,6 +1081,109 @@ Set `preflight_only: true` to run only the permission check and exit without cal
 
 ---
 
+## Label gate pattern
+
+Use a **label gate** to conditionally run TrustBridge validation based on issue labels. This pattern avoids unnecessary validation runs and controls noise — for example, gate bounty payouts behind a `bounty` label so not every issue assignment triggers wallet checks.
+
+### When to use
+
+- **Reduce noise**: Only validate when an issue has a specific label (e.g., `bounty`, `needs-wallet`).
+- **Control cost**: Skip Horizon queries when validation is not required.
+- **Gate workflows**: Different workflows with different validation rules based on labels.
+- **Explicit opt-in**: Require maintainers to add a label before wallet checks run.
+
+### Design & example workflows
+
+The TrustBridge repository provides:
+
+1. **Composite action** — `.github/actions/trustbridge-label-gate/action.yml` that wraps trustbridge-action with label checking.
+2. **Example workflows** — Ready-to-copy patterns in `docs/examples/`:
+   - [`trustbridge-label-gate.yml`](examples/trustbridge-label-gate.yml) — simple gate with minimal permissions.
+   - [`trustbridge-label-gate-verbose.yml`](examples/trustbridge-label-gate-verbose.yml) — gate with skip comment.
+   - [`trustbridge-label-gate-branching.yml`](examples/trustbridge-label-gate-branching.yml) — per-label rules.
+
+3. **Full design doc** — [`docs/LABEL_GATE_DESIGN.md`](LABEL_GATE_DESIGN.md) with edge cases, error handling, and label conventions.
+
+### Quick start
+
+Copy this into `.github/workflows/trustbridge-gate.yml` in your consumer repository:
+
+```yaml
+name: Verify Stellar wallet (with label gate)
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  trustbridge-gated:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      contents: read
+    steps:
+      - name: TrustBridge with label gate
+        id: gate
+        uses: Stellar-TrustBridge/trustbridge-action/.github/actions/trustbridge-label-gate@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          stellar_address_input: GYOURCONTRIBUTORADDRESSHERE
+          gate_labels: 'bounty,needs-wallet'  # open gate if any label is present
+          post_skip_comment: 'false'           # don't post when gate is closed
+          fail_on_missing: 'true'
+
+      - name: Continue only if validated and funded
+        if: steps.gate.outputs.gate_skipped != 'true' && steps.gate.outputs.account_funded == 'true'
+        run: echo "Ready for payout"
+```
+
+### Key behaviors
+
+| Scenario | Behavior |
+|----------|----------|
+| Gate label present | Run trustbridge-action with all inputs; post result comment. |
+| No gate label | Skip validation; optionally post a skip notice (set `post_skip_comment: true`). |
+| Multiple gate labels | Open the gate if **any** label is present. |
+| 403 on label check | Fall-open: run trustbridge-action anyway (over-validate rather than silently skip). |
+| Network error during label check | Fall-open: run trustbridge-action. |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `gate_skipped` | `'true'` if the gate was closed, `'false'` if the gate was open. |
+| `gate_label_found` | Name of the first gate label that was found, or empty if none. |
+| `account_funded`, `trustline_exists`, `xlm_balance` | Forwarded from trustbridge-action when the gate is open; empty when skipped. |
+
+### Permissions
+
+**Minimal** (gate only, no skip comment):
+```yaml
+permissions:
+  issues: read
+  contents: read  # optional; only if using trustbridge_config_path
+```
+
+**With skip comment posting:**
+```yaml
+permissions:
+  issues: read    # read labels
+  issues: write   # post skip comment
+  contents: read  # optional
+```
+
+### Recommended label names
+
+| Label | Use case | Color |
+|-------|----------|-------|
+| `bounty` | Bounty payout; wallet must be ready. | Gold (#FFD700) |
+| `needs-wallet` | Wallet verification required. | Blue (#0075CA) |
+| `grant` | Grant or donation payout. | Green (#28A745) |
+
+You can define any labels your program requires; these are examples.
+
+---
+
 ## Integrations and extension examples
 
 ### KYC gate (optional consumer logic)
