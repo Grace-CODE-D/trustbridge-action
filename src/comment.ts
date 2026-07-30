@@ -122,6 +122,29 @@ export function formatCommentBody(
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}`);
   }
 
+  // Ledger freshness / lag alert (Issue #107) — surfaced as a distinct banner
+  // so contributors clearly understand it is about Horizon data quality, not
+  // their wallet state.
+  if (result.ledgerFreshnessResult) {
+    const fr = result.ledgerFreshnessResult;
+    const icon =
+      fr.status === 'ok' ? '✅' : fr.status === 'stale' ? '⚠️' : 'ℹ️';
+    const lagDisplay =
+      fr.lagSeconds !== null ? `${fr.lagSeconds.toFixed(1)}s` : '_unknown_';
+    const ledgerDisplay =
+      fr.latestLedger !== null ? `#${fr.latestLedger}` : '_unknown_';
+    lines.push(
+      '',
+      `> ${icon} **Ledger freshness** — ${fr.message}`,
+      `> - Measured lag: \`${lagDisplay}\` · Latest ledger: \`${ledgerDisplay}\``,
+      fr.blocksValid
+        ? '> - ❌ This is treated as a **hard failure** (`ledger_freshness_fail_on_stale: true`).'
+        : fr.status === 'stale'
+          ? '> - ⚠️ This is an **informational warning** (`ledger_freshness_fail_on_stale: false`). Results may not reflect the current network state.'
+          : '',
+    );
+  }
+
   const deltaSection = formatDeltaMarkdown(config.delta);
   if (deltaSection) {
     lines.push('', deltaSection);
@@ -207,6 +230,15 @@ export function formatCommentBody(
     `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? strings.stickyCommentTrue : strings.stickyCommentFalse} |`,
     `| \`wait_until_funded\` | ${config.waitUntilFunded ? strings.waitUntilFundedTrue : strings.waitUntilFundedFalse} |`,
   );
+
+  // Ledger freshness config row
+  if (config.checkLedgerFreshness) {
+    lines.push(
+      `| \`check_ledger_freshness\` | \`true\` |`,
+      `| \`max_ledger_lag_seconds\` | \`${config.maxLedgerLagSeconds ?? 60}s\` |`,
+      `| \`ledger_freshness_fail_on_stale\` | \`${config.ledgerFreshnessFailOnStale ? 'true (hard fail)' : 'false (warn only)'}\` |`,
+    );
+  }
 
   if (assetBalanceCheckEnabled) {
     lines.push(
