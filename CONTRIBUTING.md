@@ -2,7 +2,7 @@
 
 Thank you for helping improve **trustbridge-action**! This guide covers local setup, coding standards, and the pull request process.
 
-Related docs: [README](README.md) · [Structure](docs/STRUCTURE.md) · [Architecture](docs/ARCHITECTURE.md) · [Breaking Changes](docs/BREAKING_CHANGES.md) · [License Report](docs/LICENSE_REPORT.md)
+Related docs: [README](README.md) · [Structure](docs/STRUCTURE.md) · [Architecture](docs/ARCHITECTURE.md) · [Breaking Changes](docs/BREAKING_CHANGES.md) · [Dependabot Policy](docs/DEPENDABOT.md) · [License Report](docs/LICENSE_REPORT.md)
 
 ---
 

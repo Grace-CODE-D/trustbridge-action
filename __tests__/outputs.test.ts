@@ -1,10 +1,8 @@
 import * as fs from 'fs';
-import * as path from 'path';
-import { ValidationResult } from '../src/checks';
-import { toActionOutputs, writeValidationJson } from '../src/outputs';
-import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { ValidationResult } from '../src/checks';
+import { toActionOutputs, setValidationOutputs, writeValidationJson } from '../src/outputs';
 
 const result: ValidationResult = {
   valid: true,
@@ -12,49 +10,72 @@ const result: ValidationResult = {
   trustlineExists: true,
   xlmBalance: '5.0000000',
   xlmReserveMet: true,
-  checks: [],
-  sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
+  checks: [
+    { passed: true, label: 'Account funded', detail: 'Funded' },
+    { passed: true, label: 'USDC trustline', detail: 'Trustline exists' },
+  ],
+  reasonCode: 'SUCCESS',
 };
 
 describe('toActionOutputs', () => {
-  it('serializes validation outputs for GitHub Actions', () => {
-    const outputs = toActionOutputs(result);
+  it('serializes legacy and new audit/timing outputs for GitHub Actions', () => {
+    const outputs = toActionOutputs(result, undefined, undefined, {
+      horizonUrl: 'https://horizon.stellar.org',
+      assetCode: 'USDC',
+      assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+      timings: {
+        input_parse_ms: 10,
+        horizon_fetch_ms: 100,
+        checks_ms: 5,
+        comment_post_ms: 20,
+        total_ms: 135,
+      },
+    });
+
     expect(outputs).toMatchObject({
       trustline_exists: 'true',
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: '',
       full_report_path: '',
+      ready: 'true',
+      horizon_url: 'https://horizon.stellar.org',
+      asset_code: 'USDC',
+      asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+      reason_code: 'SUCCESS',
+      timing_input_parse_ms: '10',
+      timing_horizon_fetch_ms: '100',
+      timing_checks_ms: '5',
+      timing_comment_post_ms: '20',
+      timing_total_ms: '135',
     });
-    expect(outputs).toHaveProperty('readiness_badge_markdown');
-    expect(outputs).toHaveProperty('readiness_badge_url');
-    expect(outputs).toHaveProperty('num_sponsoring');
-    expect(outputs).toHaveProperty('num_sponsored');
+
+    expect(JSON.parse(outputs.checks_json)).toEqual([
+      { label: 'Account funded', passed: true, detail: 'Funded' },
+      { label: 'USDC trustline', passed: true, detail: 'Trustline exists' },
+    ]);
+
+    expect(JSON.parse(outputs.timings_json)).toEqual({
+      input_parse_ms: 10,
+      horizon_fetch_ms: 100,
+      checks_ms: 5,
+      comment_post_ms: 20,
+      total_ms: 135,
+    });
   });
 
-  it('includes a comment URL when provided', () => {
-    const outputs = toActionOutputs(result, 'https://github.com/comment');
+  it('includes a comment URL and full_report_path when provided', () => {
+    const outputs = toActionOutputs(result, 'https://github.com/comment', '/workspace/trustbridge-report.md');
     expect(outputs).toMatchObject({
       trustline_exists: 'true',
       xlm_balance: '5.0000000',
       account_funded: 'true',
       comment_url: 'https://github.com/comment',
-      full_report_path: '',
+      full_report_path: '/workspace/trustbridge-report.md',
     });
-    expect(outputs).toHaveProperty('readiness_badge_markdown');
-    expect(outputs).toHaveProperty('readiness_badge_url');
-    expect(outputs).toHaveProperty('num_sponsoring');
-    expect(outputs).toHaveProperty('num_sponsored');
   });
 
-  it('generates pass badge for valid results', () => {
-    const outputs = toActionOutputs(result);
-    expect(outputs.readiness_badge_url).toContain('brightgreen');
-    expect(outputs.readiness_badge_url).toContain('Ready');
-    expect(outputs.readiness_badge_markdown).toContain('brightgreen');
-  });
-
-  it('generates fail badge for invalid results', () => {
+  it('serializes failure reason codes for failing results', () => {
     const failResult: ValidationResult = {
       valid: false,
       accountFunded: false,
@@ -62,47 +83,18 @@ describe('toActionOutputs', () => {
       xlmBalance: '0',
       xlmReserveMet: false,
       checks: [],
-      sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
+      reasonCode: 'ACCOUNT_NOT_FUNDED',
     };
     const outputs = toActionOutputs(failResult);
-    expect(outputs.readiness_badge_url).toContain('red');
-    expect(outputs.readiness_badge_url).toContain('Not%20Ready');
-    expect(outputs.readiness_badge_markdown).toContain('red');
+    expect(outputs.ready).toBe('false');
+    expect(outputs.reason_code).toBe('ACCOUNT_NOT_FUNDED');
   });
 
-  it('badge outputs contain no PII', () => {
+  it('outputs contain no secrets or PII tokens', () => {
     const outputs = toActionOutputs(result);
-    const combined = outputs.readiness_badge_markdown + outputs.readiness_badge_url;
-    expect(combined).not.toContain('5.0000000');
-    expect(combined).not.toContain('USDC');
-    expect(combined).not.toContain('github.com/account');
-  });
-
-  it('includes sponsor counts in outputs', () => {
-    const sponsoredResult: ValidationResult = {
-      valid: true,
-      accountFunded: true,
-      trustlineExists: true,
-      xlmBalance: '5.0',
-      xlmReserveMet: true,
-      checks: [],
-      sponsorshipInfo: { numSponsoring: 2, numSponsored: 1 },
-    };
-    const outputs = toActionOutputs(sponsoredResult);
-    expect(outputs.num_sponsoring).toBe('2');
-    expect(outputs.num_sponsored).toBe('1');
-  });
-
-  it('includes full_report_path when provided', () => {
-    expect(
-      toActionOutputs(result, 'https://github.com/comment', '/workspace/trustbridge-report.md'),
-    ).toEqual({
-      trustline_exists: 'true',
-      xlm_balance: '5.0000000',
-      account_funded: 'true',
-      comment_url: 'https://github.com/comment',
-      full_report_path: '/workspace/trustbridge-report.md',
-    });
+    const combined = JSON.stringify(outputs);
+    expect(combined).not.toContain('ghp_');
+    expect(combined).not.toContain('github_token');
   });
 
   it('leaves full_report_path empty when not provided', () => {

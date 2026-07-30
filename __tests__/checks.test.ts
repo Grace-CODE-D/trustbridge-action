@@ -1014,3 +1014,58 @@ describe('trustline limit validation (Issue #140)', () => {
     expect(result.remediation).toContain('Increase the USDC trustline limit');
   });
 });
+
+describe('FailureReasonCode mapping (Issue #67)', () => {
+  it('assigns SUCCESS when all checks pass', () => {
+    const result = runAccountChecks(makeAccount(), defaultConfig);
+    expect(result.reasonCode).toBe('SUCCESS');
+  });
+
+  it('assigns ACCOUNT_NOT_FUNDED for unfunded accounts', () => {
+    const result = unfundedAccountResult(TEST_ADDRESS, defaultConfig);
+    expect(result.reasonCode).toBe('ACCOUNT_NOT_FUNDED');
+  });
+
+  it('assigns TRUSTLINE_MISSING when trustline is absent', () => {
+    const account = makeAccount({ balances: [{ balance: '10.0', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' }] });
+    const result = runAccountChecks(account, defaultConfig);
+    expect(result.reasonCode).toBe('TRUSTLINE_MISSING');
+  });
+
+  it('assigns RESERVE_TOO_LOW when XLM balance is low', () => {
+    const account = makeAccount({
+      balances: [
+        { balance: '0.1', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+        { balance: '100.0', asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: USDC_ISSUER, buying_liabilities: '0', selling_liabilities: '0' },
+      ],
+    });
+    const result = runAccountChecks(account, defaultConfig);
+    expect(result.reasonCode).toBe('RESERVE_TOO_LOW');
+  });
+
+  it('assigns TRUSTLINE_LIMIT_TOO_LOW when trustline limit is below threshold', () => {
+    const account = makeAccount({
+      balances: [
+        { balance: '10.0', asset_type: 'native', buying_liabilities: '0', selling_liabilities: '0' },
+        { balance: '100.0', asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: USDC_ISSUER, limit: '50.0', buying_liabilities: '0', selling_liabilities: '0' },
+      ],
+    });
+    const result = runAccountChecks(account, { ...defaultConfig, minTrustlineLimit: 100 });
+    expect(result.reasonCode).toBe('TRUSTLINE_LIMIT_TOO_LOW');
+  });
+
+  it('assigns HORIZON_TIMEOUT when Horizon times out', () => {
+    const result = horizonFailureResult('Request timed out after 15000ms', defaultConfig);
+    expect(result.reasonCode).toBe('HORIZON_TIMEOUT');
+  });
+
+  it('assigns HORIZON_ERROR for generic Horizon failure', () => {
+    const result = horizonFailureResult('Internal server error', defaultConfig);
+    expect(result.reasonCode).toBe('HORIZON_ERROR');
+  });
+
+  it('assigns TLS_ERROR for TLS failure', () => {
+    const result = tlsFailureResult('Certificate verification failed', defaultConfig);
+    expect(result.reasonCode).toBe('TLS_ERROR');
+  });
+});

@@ -687,6 +687,7 @@ Full matrix: [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md).
 | [docs/STRUCTURE.md](docs/STRUCTURE.md) | File and directory reference |
 | [docs/ERROR_HANDLING.md](docs/ERROR_HANDLING.md) | Error cases and retry behavior |
 | [docs/BREAKING_CHANGES.md](docs/BREAKING_CHANGES.md) | Versioning policy — breaking vs safe changes, `@v` tag expectations, deprecation process |
+| [docs/DEPENDABOT.md](docs/DEPENDABOT.md) | Dependabot compatibility policy, `dist/` rebuilding, maintainer checklist |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, PR checklist, release process |
 | [mock/horizon/README.md](mock/horizon/README.md) | Mock Horizon server for offline local development |
 
