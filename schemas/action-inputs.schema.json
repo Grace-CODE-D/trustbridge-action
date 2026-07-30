@@ -1,160 +1,160 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/schemas/action-inputs.schema.json",
+  "$id": "https://raw.githubusercontent.com/Stellar-TrustBridge/trustbridge-action/main/schemas/action-inputs.schema.json",
   "title": "TrustBridge Action Inputs",
-  "description": "JSON Schema for trustbridge-action input configuration. Every property corresponds to an input declared in action.yml. Integrators can validate their workflow `with:` block against this schema in CI to catch drift before runtime failures occur on assignment day.\n\nSee docs/USAGE.md for a ready-to-use CI validation snippet.",
+  "description": "JSON Schema for trustbridge-action inputs. Mirrors action.yml. Use this schema to validate .trustbridge.yml config files or CI policy checks before runtime. See docs/SCHEMA.md for usage guidance.",
   "type": "object",
   "additionalProperties": false,
+  "required": ["github_token"],
   "properties": {
-    "max_retries": {
+    "github_token": {
       "type": "string",
-      "description": "Maximum number of retry attempts for Horizon API requests.",
-      "default": "3",
-      "pattern": "^[0-9]+$"
-    },
-    "retry_base_delay_ms": {
-      "type": "string",
-      "description": "Base delay in milliseconds for exponential backoff.",
-      "default": "1000",
-      "pattern": "^[0-9]+$"
-    },
-    "horizon_url": {
-      "type": "string",
-      "description": "Stellar Horizon API base URL.",
-      "default": "https://horizon.stellar.org",
-      "format": "uri"
-    },
-    "asset_code": {
-      "type": "string",
-      "description": "Asset code to check trustline for.",
-      "default": "USDC",
+      "description": "GitHub token used to post issue comments. Requires `issues: write` permission.",
       "minLength": 1,
-      "maxLength": 12
-    },
-    "asset_issuer": {
-      "type": "string",
-      "description": "Asset issuer Stellar address (G-address).",
-      "default": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-      "pattern": "^G[A-Z2-7]{55}$"
-    },
-    "min_xlm_reserve": {
-      "type": "string",
-      "description": "Minimum native XLM balance required (e.g. '1.5').",
-      "default": "1.5",
-      "pattern": "^[0-9]+(\\.[0-9]+)?$"
-    },
-    "min_trustline_limit": {
-      "type": "string",
-      "description": "Minimum trustline limit required for the configured asset. Leave empty to skip.",
-      "default": ""
+      "examples": ["${{ secrets.GITHUB_TOKEN }}"]
     },
     "stellar_address_input": {
       "type": "string",
-      "description": "Stellar account address (G-address) to validate.",
-      "default": ""
+      "description": "Stellar account address (G-address, 56 characters) to validate. Required unless assignee_address_map is set.",
+      "pattern": "^G[A-Z2-7]{55}$",
+      "examples": ["GABC...XYZ"]
     },
     "assignee_address_map": {
       "type": "string",
-      "description": "JSON object or file path mapping GitHub usernames to Stellar G-addresses.",
+      "description": "Inline JSON object or path to a JSON file mapping GitHub usernames to Stellar G-addresses.",
+      "default": ""
+    },
+    "horizon_url": {
+      "type": "string",
+      "description": "Stellar Horizon API base URL. Must be an HTTPS URL targeting a public Stellar network endpoint. Private/local IP addresses are blocked (SSRF guard).",
+      "format": "uri",
+      "pattern": "^https://",
+      "default": "https://horizon.stellar.org",
+      "examples": [
+        "https://horizon.stellar.org",
+        "https://horizon-testnet.stellar.org"
+      ]
+    },
+    "horizon_url_fallback": {
+      "type": "string",
+      "description": "Optional fallback Horizon API base URL. When the primary URL fails with a retryable error, TrustBridge retries against this URL.",
+      "format": "uri",
+      "pattern": "^(https://|$)",
+      "default": "",
+      "examples": ["https://horizon-testnet.stellar.org"]
+    },
+    "rpc_fallback_url": {
+      "type": "string",
+      "description": "Comma-separated secondary Horizon or RPC URLs to fail over to if the primary node fails.",
+      "default": ""
+    },
+    "asset_code": {
+      "type": "string",
+      "description": "Asset code for trustline verification (e.g. USDC, EURC).",
+      "minLength": 1,
+      "maxLength": 12,
+      "pattern": "^[A-Za-z0-9]{1,12}$",
+      "default": "USDC",
+      "examples": ["USDC", "EURC", "yXLM"]
+    },
+    "asset_issuer": {
+      "type": "string",
+      "description": "Issuer address for the asset. Must be a Stellar G-address (classic issuer) or C-address (Soroban contract). Strictly validated against StrKey policy.",
+      "pattern": "^[GC][A-Z2-7]{55}$",
+      "default": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      "examples": [
+        "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+      ]
+    },
+    "min_xlm_reserve": {
+      "type": "string",
+      "description": "Minimum native XLM balance required. Applied as a floor over the Stellar protocol minimum.",
+      "pattern": "^[0-9]+(\\.[0-9]+)?$",
+      "default": "1.5",
+      "examples": ["1.5", "2", "5.0"]
+    },
+    "min_trustline_limit": {
+      "type": "string",
+      "description": "Minimum trustline limit required for the configured asset. Leave empty to skip this check.",
+      "pattern": "^([0-9]+(\\.[0-9]+)?)?$",
       "default": ""
     },
     "fail_on_missing": {
       "type": "string",
-      "description": "Fail the workflow step when checks do not pass (true) or only warn (false).",
-      "default": "true",
-      "enum": ["true", "false"]
+      "description": "When true, fails the workflow step on check failures. When false, emits a warning only.",
+      "enum": ["true", "false"],
+      "default": "true"
     },
     "debug_mode": {
       "type": "string",
-      "description": "Enable extra action logs for troubleshooting.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Enable extra action logs and append an expert diagnostics block to the issue comment for troubleshooting.",
+      "enum": ["true", "false"],
+      "default": "false"
     },
     "horizon_timeout_ms": {
       "type": "string",
-      "description": "Horizon request timeout in milliseconds (1000-60000).",
-      "default": "15000",
-      "pattern": "^[0-9]+$"
+      "description": "Horizon request timeout in milliseconds (1000–60000).",
+      "pattern": "^[0-9]+$",
+      "default": "15000"
     },
     "sticky_comment": {
       "type": "string",
-      "description": "Update TrustBridge's previous comment instead of posting a new one each run.",
-      "default": "true",
-      "enum": ["true", "false"]
+      "description": "Update TrustBridge's previous issue comment instead of posting a new one each run.",
+      "enum": ["true", "false"],
+      "default": "true"
+    },
+    "onboarding_checklist": {
+      "type": "string",
+      "description": "Include an onboarding checklist in the issue comment.",
+      "enum": ["true", "false"],
+      "default": "true"
     },
     "wait_until_funded": {
       "type": "string",
-      "description": "Poll Horizon until the account becomes funded.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Poll Horizon until the account becomes funded instead of failing on the first 404.",
+      "enum": ["true", "false"],
+      "default": "false"
     },
     "wait_until_funded_timeout_ms": {
       "type": "string",
-      "description": "Maximum total polling time for the account to become funded, in ms.",
-      "default": "120000",
-      "pattern": "^[0-9]+$"
+      "description": "Maximum time to poll for funding in milliseconds (0–600000). Only used when wait_until_funded is true.",
+      "pattern": "^[0-9]+$",
+      "default": "120000"
     },
     "wait_until_funded_interval_ms": {
       "type": "string",
-      "description": "Delay between funded-account polling attempts, in ms.",
-      "default": "5000",
-      "pattern": "^[0-9]+$"
-    },
-    "horizon_url_fallback": {
-      "type": "string",
-      "description": "Optional fallback Horizon API base URL for cross-region resilience.",
-      "default": ""
+      "description": "Delay between funding polls in milliseconds (1000–60000). Only used when wait_until_funded is true.",
+      "pattern": "^[0-9]+$",
+      "default": "5000"
     },
     "horizon_cache_ttl_ms": {
       "type": "string",
-      "description": "Time-to-live for the in-memory Horizon account cache, in ms. 0 disables caching.",
-      "default": "60000",
-      "pattern": "^[0-9]+$"
-    },
-    "rpc_fallback_url": {
-      "type": "string",
-      "description": "Optional secondary/fallback Horizon or RPC URL if primary fails.",
-      "default": ""
-    },
-    "horizon_max_requests": {
-      "type": "string",
-      "description": "Global cap on Horizon requests per run (0 = unlimited).",
-      "default": "0",
-      "pattern": "^[0-9]+$"
-    },
-    "retry_max_delay_ms": {
-      "type": "string",
-      "description": "Maximum backoff delay in milliseconds for Horizon retries.",
-      "default": "30000",
-      "pattern": "^[0-9]+$"
+      "description": "TTL for the in-memory Horizon account cache in milliseconds. Set to 0 to disable. Max 3600000.",
+      "pattern": "^[0-9]+$",
+      "default": "60000"
     },
     "use_cache": {
       "type": "string",
-      "description": "Cache successful Horizon responses in job memory.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Cache successful Horizon account responses in job memory.",
+      "enum": ["true", "false"],
+      "default": "false"
     },
     "allow_cross_network_fallback": {
       "type": "string",
-      "description": "Allow fallback URL across different Stellar networks (testnet/mainnet).",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Allow the fallback URL to resolve to a different Stellar network than the primary. Off by default.",
+      "enum": ["true", "false"],
+      "default": "false"
     },
     "log_inputs": {
       "type": "string",
-      "description": "Emit a structured JSON log record of all resolved action inputs (redacted) at run start.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Emit a redacted JSON log record of all resolved action inputs at run start.",
+      "enum": ["true", "false"],
+      "default": "false"
     },
     "trustbridge_config_path": {
       "type": "string",
-      "description": "Path to a consumer trustbridge.yml config file supplying default input values.",
+      "description": "Path to a consumer trustbridge.yml config file. Leave empty to skip.",
       "default": ".trustbridge.yml"
-    },
-    "github_token": {
-      "type": "string",
-      "description": "GitHub token used to post issue comments. Requires issues:write permission.",
-      "minLength": 1
     },
     "assets_json": {
       "type": "string",
@@ -163,67 +163,111 @@
     },
     "sep0007_deep_links": {
       "type": "string",
-      "description": "Emit SEP-0007 wallet deep links (web+stellar:pay) in the comment.",
+      "description": "Emit SEP-0007 wallet deep links (web+stellar:pay) in the issue comment.",
+      "enum": ["true", "false"],
       "default": "false"
-    },
-    "auto_wallet_labels": {
-      "type": "string",
-      "description": "Automatically apply a wallet state label to the issue.",
-      "default": "false",
-      "enum": ["true", "false"]
     },
     "sep0007_origin_domain": {
       "type": "string",
-      "description": "Optional origin domain embedded in SEP-0007 URIs (SEP-0007 section 3.4).",
+      "description": "Optional origin domain embedded in SEP-0007 URIs for wallet validation (SEP-0007 §3.4).",
       "default": ""
+    },
+    "auto_wallet_labels": {
+      "type": "string",
+      "description": "Automatically apply a wallet state label to the issue after each check run.",
+      "enum": ["true", "false"],
+      "default": "false"
+    },
+    "max_retries": {
+      "type": "string",
+      "description": "Maximum number of retry attempts for Horizon API requests.",
+      "pattern": "^[0-9]+$",
+      "default": "3"
+    },
+    "retry_base_delay_ms": {
+      "type": "string",
+      "description": "Base delay in milliseconds for exponential backoff on Horizon retries.",
+      "pattern": "^[0-9]+$",
+      "default": "1000"
+    },
+    "retry_max_delay_ms": {
+      "type": "string",
+      "description": "Maximum backoff delay in milliseconds for Horizon retries.",
+      "pattern": "^[0-9]+$",
+      "default": "30000"
+    },
+    "horizon_max_requests": {
+      "type": "string",
+      "description": "Global cap on Horizon requests per run to prevent 429 stampedes. 0 for unlimited.",
+      "pattern": "^[0-9]+$",
+      "default": "0"
     },
     "snooze_window_minutes": {
       "type": "string",
-      "description": "Time window in minutes to suppress duplicate failure comments on the same issue.",
-      "default": "30",
-      "pattern": "^[0-9]+$"
+      "description": "Time window in minutes to suppress duplicate failure comments. 0 disables snoozing.",
+      "pattern": "^[0-9]+$",
+      "default": "30"
     },
     "force_comment": {
       "type": "string",
       "description": "Bypass snooze logic and force an immediate comment post.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "enum": ["true", "false"],
+      "default": "false"
     },
-    "home_domain_check_enabled": {
+    "webhook_url": {
       "type": "string",
-      "description": "Enable the optional SEP-0001 home domain alignment check.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Optional HTTPS URL to POST a signed webhook notification to after every validation run. Must be HTTPS. Disabled by default.",
+      "format": "uri",
+      "pattern": "^(https://|$)",
+      "default": "",
+      "examples": ["https://dashboard.example.com/trustbridge-webhook"]
     },
-    "expected_home_domain": {
+    "webhook_secret": {
       "type": "string",
-      "description": "The domain the issuer's on-chain home_domain must match (case-insensitive).",
-      "default": ""
+      "description": "Shared HMAC-SHA256 secret for signing webhook payloads. Included as X-TrustBridge-Signature header. Never logged. Only used when webhook_url is set.",
+      "default": "",
+      "examples": ["${{ secrets.TRUSTBRIDGE_WEBHOOK_SECRET }}"]
     },
-    "home_domain_check_mode": {
+    "webhook_timeout_ms": {
       "type": "string",
-      "description": "Whether a home-domain failure blocks the overall result: 'warn' or 'strict'.",
-      "default": "warn",
-      "enum": ["warn", "strict"]
+      "description": "Timeout in milliseconds for webhook delivery. On timeout the request is aborted and a warning is logged. Comment posting is unaffected.",
+      "pattern": "^[0-9]+$",
+      "default": "5000"
+    },
+    "network_passphrase": {
+      "type": "string",
+      "description": "Expected Stellar network passphrase for network identity verification.",
+      "default": "Public Global Stellar Network ; September 2015",
+      "examples": [
+        "Public Global Stellar Network ; September 2015",
+        "Test SDF Network ; September 2015"
+      ]
     },
     "check_ledger_freshness": {
       "type": "string",
-      "description": "Check Horizon ledger freshness before the account check.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Enable ledger freshness guard — warns or fails when Horizon is serving stale data.",
+      "enum": ["true", "false"],
+      "default": "false"
     },
     "max_ledger_lag_seconds": {
       "type": "string",
-      "description": "Maximum allowed lag in seconds between Horizon's latest ledger close time and now.",
-      "default": "60",
-      "pattern": "^[0-9]+$"
+      "description": "Maximum allowed lag in seconds between latest ledger close time and wall clock.",
+      "pattern": "^[0-9]+$",
+      "default": "60"
     },
     "ledger_freshness_fail_on_stale": {
       "type": "string",
-      "description": "When true, a stale ledger response fails the check instead of only warning.",
-      "default": "false",
-      "enum": ["true", "false"]
+      "description": "Hard-fail when Horizon is stale. Default is warn-only.",
+      "enum": ["true", "false"],
+      "default": "false"
+    },
+    "docs_base_url": {
+      "type": "string",
+      "description": "Optional base URL for FAQ/docs deep links embedded in failing check bullets. Must be HTTPS. Defaults to the repo's docs/FAQ.md. (Issue #104)",
+      "format": "uri",
+      "pattern": "^(https://|$)",
+      "default": "",
+      "examples": ["https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/FAQ.md"]
     }
-  },
-  "required": ["github_token", "sep0007_deep_links"]
+  }
 }

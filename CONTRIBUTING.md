@@ -298,7 +298,8 @@ Before cutting a release tag, ensure:
 3. **Build and verify dist/** — Run `npm run build` and commit the rebuilt `dist/`
 4. **dist/ matches src/** — After any code change, `dist/` must be up-to-date. CI enforces this via `git diff --exit-code -- dist`
 5. **Update action.yml if inputs/outputs changed** — Ensure new or changed inputs have descriptions and defaults
-6. **Update docs** — If behavior or inputs changed, update [docs/USAGE.md](docs/USAGE.md) and [README.md](README.md)
+6. **Update JSON Schema** — When adding or modifying inputs in `action.yml`, also update `schemas/action-inputs.schema.json` with the matching property (type, description, default, pattern/format for URLs and addresses). Run `npm test -- --testPathPattern schema` to verify no drift. See [docs/SCHEMA.md](docs/SCHEMA.md) for the full sync process.
+7. **Update docs** — If behavior or inputs changed, update [docs/USAGE.md](docs/USAGE.md) and [README.md](README.md)
 7. **Smoke test via SHA reference** — Clone a fresh copy of the repository and test the action by SHA to ensure the bundled dist/ works as a GitHub Action
 8. **Prepare SBOM** — If releasing with Issue #69 (SBOM attachment), generate the SBOM before tagging
 9. **Create GitHub Release** — Once the tag is pushed, create a Release page with a changelog (use `v1.0.0` format for tag names)
