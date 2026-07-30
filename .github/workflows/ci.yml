@@ -55,6 +55,10 @@ jobs:
       - name: Verify action bundle exists
         run: test -f dist/index.js
 
+      # Bundle size budget check — reports current size and fails if budget exceeded
+      - name: Check bundle size budget
+        run: npm test -- --testPathPattern bundle-size --no-coverage
+
       # Only check dist/ drift on the baseline node version that matches
       # action.yml 'runs.using: node20', to avoid false positives.
       - name: Verify dist/ matches src/
