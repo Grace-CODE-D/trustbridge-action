@@ -212,64 +212,32 @@ inputs:
       a fix attempt. Default false. (Issue #155)
     required: false
     default: 'false'
-  home_domain_check_enabled:
+  webhook_url:
     description: >-
-      Enable the optional SEP-0001 home domain alignment check. When true,
-      TrustBridge inspects the issuer account's on-chain `home_domain` field
-      returned by Horizon and records the result in metrics. Off by default
-      so existing USDC workflows are unaffected.
-    required: false
-    default: 'false'
-  expected_home_domain:
-    description: >-
-      The domain string the issuer's on-chain `home_domain` must match
-      (case-insensitive). Leave empty to only verify that *some* home domain
-      is set (non-empty). Only used when `home_domain_check_enabled` is true.
-      Example: "centre.io" for mainnet USDC.
+      Optional HTTPS URL to POST a signed webhook notification to after every
+      validation run. When empty (default) no webhook is sent and comment
+      posting is completely unaffected. The payload is signed with
+      HMAC-SHA256 when `webhook_secret` is also supplied. Disabled by default.
+      (Issue #101)
     required: false
     default: ''
-  home_domain_check_mode:
+  webhook_secret:
     description: >-
-      Controls whether a home-domain failure blocks the overall result.
-      "warn" (default) — adds an informational check row and emits metrics
-      but does NOT fail the action. "strict" — a missing or mismatched home
-      domain sets the check as failed and, when `fail_on_missing` is true,
-      fails the workflow step. Only used when `home_domain_check_enabled`
-      is true.
+      Shared secret used to sign the webhook payload with HMAC-SHA256. The
+      signature is included as the `X-TrustBridge-Signature` HTTP header in
+      the format `sha256=<hex-digest>`. Never logged or embedded in comments.
+      Leave empty to send unsigned webhooks (not recommended for production).
+      Only used when `webhook_url` is set. (Issue #101)
     required: false
-    default: 'warn'
-
-  # ---------------------------------------------------------------------------
-  # Ledger lag / freshness guard (Issue #107)
-  # ---------------------------------------------------------------------------
-  check_ledger_freshness:
+    default: ''
+  webhook_timeout_ms:
     description: >-
-      When true, TrustBridge fetches the Horizon root endpoint before the
-      account check and compares the latest ledger close time against the
-      current wall clock. A lag beyond `max_ledger_lag_seconds` triggers a
-      warning (or failure, see `ledger_freshness_fail_on_stale`). Off by
-      default so existing USDC workflows are completely unaffected.
+      Maximum time in milliseconds to wait for the webhook endpoint to
+      respond. When the timeout elapses the request is aborted and a warning
+      is logged — comment posting and validation results are unaffected.
+      Default 5000 (5 seconds). (Issue #101)
     required: false
-    default: 'false'
-  max_ledger_lag_seconds:
-    description: >-
-      Maximum allowed lag in seconds between Horizon's latest ledger close
-      time and the current wall clock before the freshness guard fires.
-      Defaults to 60 seconds (approximately 5–6 Stellar ledger close cycles
-      at ~5–6 s each). Only used when `check_ledger_freshness` is true.
-    required: false
-    default: '60'
-  ledger_freshness_fail_on_stale:
-    description: >-
-      When true, a stale ledger response (lag > max_ledger_lag_seconds) marks
-      the check as failed. Combined with `fail_on_missing: true` this will
-      fail the workflow step. When false (default), the stale result is
-      informational only — a warning row appears in the checks table and
-      metrics are emitted, but `valid` is unaffected. This lets maintainers
-      observe lag before enforcing it. Only used when
-      `check_ledger_freshness` is true.
-    required: false
-    default: 'false'
+    default: '5000'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

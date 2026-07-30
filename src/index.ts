@@ -31,8 +31,7 @@ import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics } from './metrics';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
-import { checkLedgerFreshness } from './freshness';
-import type { LedgerFreshnessCheckResult } from './checks';
+import { sendWebhookNotification } from './webhook';
 
 async function run(): Promise<void> {
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
@@ -125,6 +124,14 @@ async function run(): Promise<void> {
   });
   const forceComment = parseBooleanInput(core.getInput('force_comment'), false);
   const snoozeWindowMs = snoozeWindowMinutes * 60 * 1000;
+
+  // Signed dashboard webhook (Issue #101)
+  const webhookUrl = core.getInput('webhook_url') || '';
+  const webhookSecret = core.getInput('webhook_secret') || '';
+  const webhookTimeoutMs = parseNumberInput(core.getInput('webhook_timeout_ms'), 5000, {
+    min: 100,
+    max: 30000,
+  });
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -400,6 +407,8 @@ async function run(): Promise<void> {
     sep0007DeepLinks,
     sep0007OriginDomain,
     locale,
+    debugMode,
+    docsBaseUrl: core.getInput('docs_base_url') || undefined,
   });
 
   // Detect oversize and write the full report to a workspace file when needed.
@@ -428,14 +437,26 @@ async function run(): Promise<void> {
     if (commentUrl) {
       logger.info('Issue comment created', { component: 'index', commentUrl });
     }
-  } else {
-    logger.info(`Comment posting skipped (comment_mode=${commentMode})`, {
-      component: 'index',
-      commentMode,
-    });
+  } catch (commentError) {
+    const message = commentError instanceof Error ? commentError.message : String(commentError);
+    core.warning(`Failed to post issue comment (non-fatal): ${message}`);
   }
 
   setValidationOutputs(result, commentUrl, fullReportPath);
+
+  // Signed dashboard webhook notification (Issue #101)
+  // Fires after comment posting; failures are isolated and never block the run.
+  if (webhookUrl) {
+    const { owner, repo } = github.context.repo;
+    const issueNumber = github.context.payload.issue?.number ?? null;
+    await sendWebhookNotification(
+      result,
+      resolvedAddress,
+      { webhookUrl, webhookSecret, timeoutMs: webhookTimeoutMs },
+      `${owner}/${repo}`,
+      issueNumber,
+    );
+  }
 
   if (debugMode) {
     logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
