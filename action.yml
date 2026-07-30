@@ -238,6 +238,14 @@ inputs:
       Default 5000 (5 seconds). (Issue #101)
     required: false
     default: '5000'
+  docs_base_url:
+    description: >-
+      Optional base URL for FAQ/docs deep links embedded in failing check
+      bullets. Defaults to this repository's `docs/FAQ.md`. Override for
+      forks or mirrors that host their own documentation. Must be an HTTPS
+      URL; invalid values fall back to the default silently. (Issue #104)
+    required: false
+    default: ''
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
