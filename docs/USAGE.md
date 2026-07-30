@@ -130,21 +130,44 @@ with:
 
 ---
 
-## Testnet
+## Testnet campaign presets
 
-Point Horizon at Stellar testnet:
+Run dry Waves or onboard contributors on Stellar testnet using first-class campaign presets (`network: testnet` or `preset: testnet`):
 
 ```yaml
 with:
-  horizon_url: https://horizon-testnet.stellar.org
-  asset_code: USDC
-  asset_issuer: GTESTNETISSUER...
+  network: testnet
   stellar_address_input: GTESTNETADDRESS...
   github_token: ${{ secrets.GITHUB_TOKEN }}
-  fail_on_missing: false
 ```
 
-Use [Stellar Laboratory (testnet)](https://laboratory.stellar.org/#account-viewer?network=test) for test accounts.
+Using `network: testnet` automatically populates:
+- **Horizon URL:** `https://horizon-testnet.stellar.org`
+- **Asset Code:** `USDC`
+- **Asset Issuer:** `GBBD47IF6LWK2P7MDEVSCWR7DPUWV3NY3DTQEVFL4TWVC5GIOTASHEX2` (Circle Testnet USDC issuer)
+- **Minimum XLM Reserve:** `1.5`
+
+> **Network safety validation:**
+> TrustBridge validates network compatibility before fetching account data. Combining a testnet Horizon endpoint with a mainnet asset issuer (e.g. mainnet USDC `GA5ZSEJY...`) fails fast with an explicit error to prevent accidental configuration errors.
+
+---
+
+## Canary & secondary endpoint failover
+
+To protect Wave validation jobs against transient Horizon regional or provider outages, configure a secondary failover Horizon URL:
+
+```yaml
+with:
+  horizon_url: https://horizon.stellar.org
+  secondary_horizon_url: https://horizon-canary.stellar.org
+  stellar_address_input: ${{ steps.addr.outputs.value }}
+  github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+- **Failover behavior:** When the primary Horizon URL fails after exponential retries due to a retryable error (HTTP 5xx, 429 rate limits, or network timeout), TrustBridge transparently attempts the secondary Horizon URL before declaring failure.
+- **Definitive 404s skipped:** If Horizon returns a 404 (account missing / not funded), failover is skipped immediately because 404 is a non-retryable account state, not a transport outage.
+- **Cross-network guard:** Failover between different networks (e.g. mainnet to testnet) is disabled by default (`allow_cross_network_failover: false`) to avoid silent network context shifts.
+- **Observability:** Issue comments and debug logs reflect whether the primary or secondary Horizon base URL served the response.
 
 ---
 

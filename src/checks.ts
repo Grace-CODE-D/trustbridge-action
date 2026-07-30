@@ -181,148 +181,8 @@ export interface ValidationResult {
   trustlineLimit?: string; // Actual trustline limit for the asset (Issue #140)
   checks: CheckResultItem[];
   remediation?: string;
-  /** Populated when the reserve was computed from a real account (not the unfunded/error paths). */
-  reserveRequirement?: ReserveRequirement;
-  /**
-   * SEP-0001 home domain check result. Only populated when
-   * `config.homeDomainCheckEnabled` is true.
-   */
-  homeDomainCheck?: HomeDomainCheckResult;
-  /**
-   * Ledger freshness / lag check result. Only populated when
-   * `config.checkLedgerFreshness` is true.
-   */
-  ledgerFreshnessResult?: LedgerFreshnessCheckResult;
-}
-
-// ---------------------------------------------------------------------------
-// SEP-0001 home domain check types and helper
-// ---------------------------------------------------------------------------
-
-/**
- * Outcome of a single SEP-0001 home domain alignment check against an
- * issuer account returned by Horizon.
- *
- * Metric tags emitted:
- *  - `home_domain_valid`   when `outcome === "valid"`
- *  - `home_domain_missing` when `outcome === "missing"`
- *  - `home_domain_mismatch` when `outcome === "mismatch"`
- *  - `home_domain_skipped` when the check is disabled
- */
-export type HomeDomainOutcome = 'valid' | 'missing' | 'mismatch' | 'skipped';
-
-export interface HomeDomainCheckResult {
-  /** Classified outcome. */
-  outcome: HomeDomainOutcome;
-  /**
-   * The actual `home_domain` value on the issuer account, or `undefined`
-   * when Horizon did not expose it.
-   */
-  actualHomeDomain?: string;
-  /**
-   * The domain that was required (from `config.expectedHomeDomain`).
-   * Undefined means "any non-empty value is acceptable".
-   */
-  expectedHomeDomain?: string;
-  /**
-   * Human-readable summary safe to embed in a Markdown comment.
-   * All dynamic values are escaped before being set here.
-   */
-  detail: string;
-  /**
-   * When the check mode is `"strict"` and the outcome is not `"valid"`,
-   * this flag is true to indicate the failure should block `valid`.
-   */
-  blocksValid: boolean;
-}
-
-/**
- * Evaluate the issuer's SEP-0001 home domain alignment against the
- * fetched Horizon account data.
- *
- * This is a **pure, synchronous** function — it only inspects the
- * `home_domain` field already present on the `HorizonAccount` object.
- * Full SEP-0001 HTTP stellar.toml fetching and signature verification
- * are explicitly out of scope (see docs/SEP0001_HOME_DOMAIN.md).
- *
- * @param issuerAccount  The Horizon account for the asset issuer (not the
- *                       recipient wallet). May be `null` when Horizon did
- *                       not return the issuer account.
- * @param config         The current `CheckConfig` (reads
- *                       `expectedHomeDomain` and `homeDomainCheckMode`).
- * @returns              A `HomeDomainCheckResult` describing the outcome.
- */
-export function evaluateHomeDomain(
-  issuerAccount: HorizonAccount | null,
-  config: CheckConfig,
-): HomeDomainCheckResult {
-  const mode: HomeDomainCheckMode = config.homeDomainCheckMode ?? 'warn';
-  const expected = config.expectedHomeDomain?.trim().toLowerCase();
-
-  // No issuer account available — treat the same as missing.
-  if (!issuerAccount) {
-    return {
-      outcome: 'missing',
-      expectedHomeDomain: config.expectedHomeDomain,
-      detail: 'Issuer account data was not available from Horizon — home domain could not be verified.',
-      blocksValid: mode === 'strict',
-    };
-  }
-
-  const rawDomain = issuerAccount.home_domain?.trim() ?? '';
-
-  if (!rawDomain) {
-    const detail = expected
-      ? `Issuer account has no \`home_domain\` set on-chain (expected \`${escapeMarkdownInline(config.expectedHomeDomain!)}\`).`
-      : 'Issuer account has no `home_domain` set on-chain.';
-    return {
-      outcome: 'missing',
-      actualHomeDomain: undefined,
-      expectedHomeDomain: config.expectedHomeDomain,
-      detail,
-      blocksValid: mode === 'strict',
-    };
-  }
-
-  if (expected && rawDomain.toLowerCase() !== expected) {
-    return {
-      outcome: 'mismatch',
-      actualHomeDomain: rawDomain,
-      expectedHomeDomain: config.expectedHomeDomain,
-      detail: `Issuer \`home_domain\` is \`${escapeMarkdownInline(rawDomain)}\` but \`${escapeMarkdownInline(config.expectedHomeDomain!)}\` was expected.`,
-      blocksValid: mode === 'strict',
-    };
-  }
-
-  return {
-    outcome: 'valid',
-    actualHomeDomain: rawDomain,
-    expectedHomeDomain: config.expectedHomeDomain,
-    detail: `Issuer \`home_domain\` is \`${escapeMarkdownInline(rawDomain)}\` ✓`,
-    blocksValid: false,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Ledger freshness check result type (Issue #107)
-// ---------------------------------------------------------------------------
-
-/**
- * Thin wrapper around `FreshnessCheckResult` from `freshness.ts` that adds
- * the information needed by comment rendering and the checks table.
- *
- * - `status`          — 'ok' | 'stale' | 'unknown'
- * - `lagSeconds`      — measured lag, or null when unavailable
- * - `latestLedger`    — latest ledger sequence, or null
- * - `message`         — human-readable detail line (safe for Markdown comment)
- * - `blocksValid`     — true when `ledgerFreshnessFailOnStale=true` AND status='stale'
- */
-export interface LedgerFreshnessCheckResult {
-  status: 'ok' | 'stale' | 'unknown';
-  lagSeconds: number | null;
-  latestLedger: number | null;
-  message: string;
-  blocksValid: boolean;
+  horizonUrlUsed?: string;
+  presetApplied?: string;
 }
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
@@ -653,8 +513,7 @@ export function runAccountChecks(
     trustlineLimit,
     checks,
     remediation,
-    reserveRequirement,
-    homeDomainCheck,
+    horizonUrlUsed: account._servedByUrl || config.horizonUrl,
   };
 }
 

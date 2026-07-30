@@ -69,7 +69,7 @@ jobs:
           fail_on_missing: true
 ```
 
-See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, testnet, extracting addresses from issue templates).
+See [docs/USAGE.md](docs/USAGE.md) for advanced patterns (custom assets, [testnet campaign presets](docs/USAGE.md#testnet-campaign-presets), canary failover, extracting addresses from issue templates).
 
 Running TrustBridge across many repos in an org? See [docs/USAGE.md#workflow_call-reusable-workflow](docs/USAGE.md#workflow_call-reusable-workflow) for a copy-paste `workflow_call` reusable workflow example instead of duplicating this job in every repo.
 
@@ -83,6 +83,10 @@ Collecting wallets via a GitHub Issue Form instead of a hardcoded address? See [
 | -------- | ---------- | --------- | ------------- |
 | `stellar_address_input` | **Yes** | — | Stellar public key (G-address, 56 characters) to validate. Verified against the full StrKey policy (version byte + CRC-16/XMODEM checksum), not just the regex shape. |
 | `github_token` | **Yes** | — | Token with `issues: write` to post comments (`GITHUB_TOKEN` is typical) |
+| `network` | No | _(empty)_ | Stellar network preset (`"public"`, `"testnet"`). Automatically fills testnet Horizon & testnet USDC issuer. See [Testnet presets](docs/USAGE.md#testnet-campaign-presets). |
+| `preset` | No | _(empty)_ | Campaign preset identifier (`"testnet"`, `"public"`). Alias for `network`. |
+| `secondary_horizon_url` | No | _(empty)_ | Optional secondary or canary Horizon base URL for resilience failover. |
+| `allow_cross_network_failover` | No | `false` | Allow failover between different Stellar networks (e.g. mainnet to testnet). Default `false`. |
 | `horizon_url` | No | `https://horizon.stellar.org` | Horizon API base URL (use testnet URL for testing) |
 | `asset_code` | No | `USDC` | Asset code for trustline verification |
 | `asset_issuer` | No | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | Issuer address for the asset |

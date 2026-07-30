@@ -136,7 +136,6 @@ export interface ActionInputsLogRecord {
     horizonCacheTtlMs: number;
     useCache: boolean;
     logInputs: boolean;
-    allowCrossNetworkFallback?: boolean;
 }
 /**
  * Build a redacted copy of the resolved action inputs suitable for writing

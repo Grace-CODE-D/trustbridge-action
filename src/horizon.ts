@@ -47,26 +47,9 @@ export interface HorizonAccount {
   sequence: string;
   subentry_count: number;
   balances: HorizonBalance[];
-  /** Sponsorship fields (CAP-0033). Omitted by older Horizon snapshots — treat as 0 when absent. */
-  num_sponsoring?: number;
-  num_sponsored?: number;
-  /**
-   * SEP-0001: The domain that hosts the issuer's stellar.toml metadata file.
-   * Populated by Horizon when the issuer account has set a home_domain on-chain.
-   * May be absent on older Horizon snapshots or when the issuer has not configured it.
-   * Never use this value directly in a network request without SSRF-safe validation.
-   */
-  home_domain?: string;
-  /**
-   * Bitmask of account flags set by the issuer (AUTH_REQUIRED, AUTH_REVOCABLE, etc.).
-   * Omitted by older Horizon snapshots — treat as 0 when absent.
-   */
-  flags?: {
-    auth_required?: boolean;
-    auth_revocable?: boolean;
-    auth_immutable?: boolean;
-    auth_clawback_enabled?: boolean;
-  };
+  num_sponsoring: number;
+  num_sponsored: number;
+  _servedByUrl?: string;
 }
 
 export interface HorizonErrorResponse {
@@ -103,7 +86,9 @@ export interface FetchAccountOptions {
   timeoutMs?: number;
   maxRetries?: number;
   horizonUrlFallback?: string;
+  secondaryHorizonUrl?: string;
   fallbackUrls?: string[];
+  allowCrossNetworkFailover?: boolean;
   useCache?: boolean;
   cacheTtlMs?: number;
   cache?: SimpleCache;
@@ -610,7 +595,13 @@ export async function fetchAccount(
   
   const rateBudgetTracker = options.rateBudgetTracker ?? new RateBudgetTracker(horizonMaxRequests);
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
-  const fallbackCandidate = options.horizonUrlFallback || (options.fallbackUrls && options.fallbackUrls[0]);
+  const candidateFallbacks = [
+    options.secondaryHorizonUrl,
+    options.horizonUrlFallback,
+    ...(options.fallbackUrls ?? []),
+  ].filter((u): u is string => Boolean(u && u.trim()));
+
+  const fallbackCandidate = candidateFallbacks[0];
   const normalizedFallbackUrl = fallbackCandidate
     ? normalizeHorizonUrl(fallbackCandidate)
     : '';
@@ -690,6 +681,8 @@ export async function fetchAccount(
       retryMaxTotalWaitMs,
     );
 
+    result.account._servedByUrl = normalizedHorizonUrl;
+
     if (cachingEnabled) {
       cache.set(cacheKey, result.account, cacheTtlMs);
       const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -723,25 +716,16 @@ export async function fetchAccount(
     throw primaryError;
   }
 
-  // Network binding rule: a G-address is valid on every Stellar network, so
-  // a fallback URL that resolves to a different network than the primary
-  // could silently return funded/trustline/reserve data for the *wrong*
-  // ledger instead of failing loudly. Compare the inferred networks and
-  // refuse the fallback unless the caller explicitly opted in.
   const primaryNetwork = inferStellarNetwork(normalizedHorizonUrl);
   const fallbackNetwork = inferStellarNetwork(normalizedFallbackUrl);
-  const crossNetworkFallback = primaryNetwork !== fallbackNetwork;
-
-  if (crossNetworkFallback && !options.allowCrossNetworkFallback) {
-    logger.debug('Horizon RPC fallback skipped: primary and fallback resolve to different networks', safeHorizonContext({
+  if (primaryNetwork !== fallbackNetwork && !options.allowCrossNetworkFailover) {
+    logger.debug('Horizon RPC fallback prevented: cross-network mismatch (mainnet vs testnet)', safeHorizonContext({
       component: 'horizon',
       stellarAddress,
       horizonUrl,
       horizonUrlFallback: normalizedFallbackUrl,
       primaryNetwork,
       fallbackNetwork,
-      primaryStatusCode: primaryError?.statusCode,
-      primaryErrorMessage: primaryError ? redactString(primaryError.message) : undefined,
     }));
     throw primaryError;
   }
@@ -772,6 +756,8 @@ export async function fetchAccount(
       retryMaxTotalWaitMs,
     );
 
+    fallbackResult.account._servedByUrl = normalizedFallbackUrl;
+
     if (cachingEnabled) {
       cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
       const cacheStatsAfter = redactCacheStats(cache.getStats());
@@ -796,6 +782,7 @@ export async function fetchAccount(
       horizonUrlFallback: normalizedFallbackUrl,
       fallbackAttempts: fallbackResult.attempts,
       fallbackLatencyMs: fallbackResult.latencyMs,
+      servedByUrl: normalizedFallbackUrl,
     }));
 
     return fallbackResult.account;

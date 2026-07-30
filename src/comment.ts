@@ -124,28 +124,34 @@ export function formatCommentBody(
   result: ValidationResult,
   config: CommentConfig,
 ): string {
-  const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
+  const effectiveHorizonUrl = result.horizonUrlUsed || config.horizonUrl;
+  const stellarLabNetwork = inferStellarNetwork(effectiveHorizonUrl);
   const gate = buildValidationGate(result);
-  const strings = getStrings(config.locale ?? 'en');
-  const assetBalanceCheckEnabled = !!config.minAssetBalance;
 
-  // Generate snooze marker with current check status (Issue #155)
-  const snoozeMarker = formatSnoozeMarker(result.valid ? 'pass' : 'fail');
+  const horizonDisplay = result.horizonUrlUsed && result.horizonUrlUsed !== config.horizonUrl
+    ? `${inlineCode(result.horizonUrlUsed)} *(failover)*`
+    : inlineCode(config.horizonUrl);
 
-  const buildWithRemediation = (remediation: string | undefined): string => {
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
     snoozeMarker,
     '## TrustBridge — Stellar Account Check',
     '',
-    `${strings.checkedAccount} ${inlineCode(config.stellarAddress)}`,
-    `${strings.horizon} ${inlineCode(config.horizonUrl)}`,
-    `${strings.asset} **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
+    `Checked account: ${inlineCode(config.stellarAddress)}`,
+    `Horizon: ${horizonDisplay}`,
+    `Asset: **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
+  ];
+
+  if (result.presetApplied) {
+    lines.push(`Preset: ${inlineCode(result.presetApplied)}`);
+  }
+
+  lines.push(
     '',
     `### ${strings.resultsHeading}`,
     '',
-  ];
+  );
 
   for (const check of result.checks) {
     // Append a FAQ deep link for failing checks so contributors land on the

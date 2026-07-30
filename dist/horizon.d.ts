@@ -61,16 +61,6 @@ export interface FetchAccountOptions {
     cacheTtlMs?: number;
     cache?: SimpleCache;
     fetchFn?: FetchLike;
-    /**
-     * By default, a fallback URL that resolves to a *different* Stellar
-     * network than the primary `horizon_url` (public vs testnet, inferred
-     * from the URL) is never used — a G-address is valid on every network,
-     * so a cross-network fallback can silently return funded/trustline/
-     * reserve data for the wrong ledger instead of failing loudly. Set this
-     * to `true` to opt into cross-network fallback anyway (e.g. deliberate
-     * multi-network setups).
-     */
-    allowCrossNetworkFallback?: boolean;
 }
 export declare function normalizeHorizonUrl(baseUrl: string): string;
 export declare function isRetryableStatus(status: number): boolean;

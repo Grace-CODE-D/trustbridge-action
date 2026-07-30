@@ -196,56 +196,27 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  snooze_window_minutes:
+  network:
     description: >-
-      Time window (in minutes) to suppress duplicate validation failure comments
-      on the same issue. When a check fails and the last check also failed
-      within this window, the comment update is suppressed to reduce notification
-      noise. Outputs are always updated even when snoozed. Set to 0 to disable
-      snoozing (always post). Default 30 minutes. (Issue #155)
+      Stellar network or preset name (e.g. "public", "testnet"). When set to "testnet",
+      populates testnet Horizon URL, asset issuer, and reserve defaults.
     required: false
-    default: '30'
-  force_comment:
+    default: ''
+  preset:
     description: >-
-      Bypass snooze logic and force an immediate comment post, even if within
-      the snooze window. Useful for maintainers who want to re-alert after
-      a fix attempt. Default false. (Issue #155)
+      Campaign preset identifier (e.g. "testnet", "public"). Alias for network preset.
+    required: false
+    default: ''
+  secondary_horizon_url:
+    description: >-
+      Optional secondary or canary Horizon API base URL for resilience failover.
+    required: false
+    default: ''
+  allow_cross_network_failover:
+    description: >-
+      Allow failover between different Stellar networks (e.g. mainnet to testnet). Default false.
     required: false
     default: 'false'
-  webhook_url:
-    description: >-
-      Optional HTTPS URL to POST a signed webhook notification to after every
-      validation run. When empty (default) no webhook is sent and comment
-      posting is completely unaffected. The payload is signed with
-      HMAC-SHA256 when `webhook_secret` is also supplied. Disabled by default.
-      (Issue #101)
-    required: false
-    default: ''
-  webhook_secret:
-    description: >-
-      Shared secret used to sign the webhook payload with HMAC-SHA256. The
-      signature is included as the `X-TrustBridge-Signature` HTTP header in
-      the format `sha256=<hex-digest>`. Never logged or embedded in comments.
-      Leave empty to send unsigned webhooks (not recommended for production).
-      Only used when `webhook_url` is set. (Issue #101)
-    required: false
-    default: ''
-  webhook_timeout_ms:
-    description: >-
-      Maximum time in milliseconds to wait for the webhook endpoint to
-      respond. When the timeout elapses the request is aborted and a warning
-      is logged — comment posting and validation results are unaffected.
-      Default 5000 (5 seconds). (Issue #101)
-    required: false
-    default: '5000'
-  docs_base_url:
-    description: >-
-      Optional base URL for FAQ/docs deep links embedded in failing check
-      bullets. Defaults to this repository's `docs/FAQ.md`. Override for
-      forks or mirrors that host their own documentation. Must be an HTTPS
-      URL; invalid values fall back to the default silently. (Issue #104)
-    required: false
-    default: ''
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

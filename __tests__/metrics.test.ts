@@ -102,6 +102,21 @@ describe('MetricsCollector counters, timers, and export', () => {
     expect(metrics.getSummary().totalMetrics).toBe(0);
     expect(metrics.getCounter('runs')).toBe(0);
   });
+
+  it('records campaign preset metrics and counter', () => {
+    const metrics = new MetricsCollector();
+    metrics.recordPresetMetric('testnet', 'testnet');
+
+    const summary = metrics.getSummary();
+    expect(summary.totalMetrics).toBe(1);
+    expect(summary.metrics[0]).toMatchObject({
+      name: 'campaign_preset_applied',
+      value: 1,
+      unit: 'count',
+      tags: { preset: 'testnet', network: 'testnet' },
+    });
+    expect(metrics.getCounter('preset_testnet_applied')).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

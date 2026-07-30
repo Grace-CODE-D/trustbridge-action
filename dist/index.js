@@ -34951,6 +34951,69 @@ exports.defaultCache = new SimpleCache();
 
 /***/ }),
 
+/***/ 7377:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Simple in-memory cache for Horizon API responses.
+ * Useful for reducing redundant calls within a single GitHub Actions job.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultCache = exports.SimpleCache = void 0;
+class SimpleCache {
+    constructor() {
+        this.store = new Map();
+    }
+    /**
+     * Get a cached value if it exists and hasn't expired.
+     */
+    get(key) {
+        const entry = this.store.get(key);
+        if (!entry) {
+            return null;
+        }
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
+        }
+        return entry.data;
+    }
+    /**
+     * Set a value in the cache with an expiration time.
+     * @param key Cache key
+     * @param data Data to cache
+     * @param ttlMs Time to live in milliseconds (default: 60 seconds)
+     */
+    set(key, data, ttlMs = 60000) {
+        this.store.set(key, {
+            data,
+            expiresAt: Date.now() + ttlMs,
+        });
+    }
+    /**
+     * Clear all cached entries.
+     */
+    clear() {
+        this.store.clear();
+    }
+    /**
+     * Get cache statistics for debugging.
+     */
+    getStats() {
+        return {
+            size: this.store.size,
+            entries: Array.from(this.store.keys()),
+        };
+    }
+}
+exports.SimpleCache = SimpleCache;
+exports.defaultCache = new SimpleCache();
+
+
+/***/ }),
+
 /***/ 2122:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -35644,9 +35707,7 @@ function formatCommentBody(result, config) {
     }
     lines.push('', '### Validation gate', '', gate.ready
         ? '- Ready to proceed: all checks passed.'
-        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, result.reserveRequirement
-        ? `- **Minimum required:** \`${result.reserveRequirement.required} XLM\` (protocol minimum \`${result.reserveRequirement.protocolMinimum} XLM\` from ${result.reserveRequirement.subentryCount} subentries/sponsorship, configured floor \`${result.reserveRequirement.configuredFloor} XLM\`)`
-        : `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
+        : `- Blocked by: ${gate.failedLabels.join(', ')}`, `- Passed checks: ${gate.passedChecks}/${gate.totalChecks}`, `- Failed checks: ${gate.failedChecks}`, '', '### Balances', '', `- **XLM balance:** ${result.xlmBalance === 'unknown' ? '_unknown_' : `\`${result.xlmBalance} XLM\``}`, `- **Minimum required:** \`${config.minXlmReserve} XLM\``, '', '### Setup cost estimate', '', `- Stellar minimum account balance: **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM**`, `- Base reserve per trustline (ledger entry): **${checks_1.STELLAR_BASE_RESERVE_XLM} XLM**`, `- Typical minimum to fund account + one trustline: **~${(0, checks_1.estimateTrustlineSetupCost)()} XLM**`, '', '### Add a trustline', '', `- [View account on Stellar Laboratory](${(0, links_1.buildAccountViewerLink)(config.stellarAddress, stellarLabNetwork)})`, `- [Open Transaction Builder (Change Trust)](${(0, links_1.buildChangeTrustLink)(stellarLabNetwork)})`, `- [LOBSTR wallet](${(0, links_1.buildLobstrLink)()}) — add asset **${config.assetCode}** from issuer \`${config.assetIssuer}\``);
     // SEP-0007 wallet deep links (Issue #44)
     if (config.sep0007DeepLinks) {
         const payLink = (0, links_1.buildSep0007PayLink)({
@@ -36409,7 +36470,6 @@ exports.getTrustlineLimit = getTrustlineLimit;
 exports.parseHorizonBalance = parseHorizonBalance;
 const cache_1 = __nccwpck_require__(7377);
 const logger_1 = __nccwpck_require__(6999);
-const links_1 = __nccwpck_require__(3346);
 class HorizonError extends Error {
     constructor(message, statusCode, retryable = false) {
         super(message);
@@ -36796,36 +36856,12 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     if (!normalizedFallbackUrl) {
         throw primaryError;
     }
-    // Network binding rule: a G-address is valid on every Stellar network, so
-    // a fallback URL that resolves to a different network than the primary
-    // could silently return funded/trustline/reserve data for the *wrong*
-    // ledger instead of failing loudly. Compare the inferred networks and
-    // refuse the fallback unless the caller explicitly opted in.
-    const primaryNetwork = (0, links_1.inferStellarNetwork)(normalizedHorizonUrl);
-    const fallbackNetwork = (0, links_1.inferStellarNetwork)(normalizedFallbackUrl);
-    const crossNetworkFallback = primaryNetwork !== fallbackNetwork;
-    if (crossNetworkFallback && !options.allowCrossNetworkFallback) {
-        logger_1.logger.debug('Horizon RPC fallback skipped: primary and fallback resolve to different networks', safeHorizonContext({
-            component: 'horizon',
-            stellarAddress,
-            horizonUrl,
-            horizonUrlFallback: normalizedFallbackUrl,
-            primaryNetwork,
-            fallbackNetwork,
-            primaryStatusCode: primaryError?.statusCode,
-            primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
-        }));
-        throw primaryError;
-    }
     logger_1.logger.debug('Horizon RPC fallback: primary exhausted, switching to fallback URL', safeHorizonContext({
         component: 'horizon',
         stellarAddress,
         horizonUrl,
         horizonUrlFallback: normalizedFallbackUrl,
         cacheKey: cachingEnabled ? cacheKey : undefined,
-        primaryNetwork,
-        fallbackNetwork,
-        crossNetworkFallback,
         primaryStatusCode: primaryError?.statusCode,
         primaryRetryable: primaryError?.retryable,
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
@@ -37337,7 +37373,6 @@ async function run() {
         max: 3600000,
     });
     const useCache = (0, inputs_1.parseBooleanInput)(core.getInput('use_cache'), false);
-    const allowCrossNetworkFallback = (0, inputs_1.parseBooleanInput)(core.getInput('allow_cross_network_fallback'), false);
     const logInputs = (0, inputs_1.parseBooleanInput)(core.getInput('log_inputs'), false);
     const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
     const githubToken = core.getInput('github_token', { required: true });
@@ -37363,7 +37398,6 @@ async function run() {
         waitUntilFundedIntervalMs,
         rpcFallbackUrl: rpcFallbackUrlRaw,
         useCache,
-        allowCrossNetworkFallback,
         sep0007DeepLinks,
     });
     if (logInputs) {
@@ -37384,7 +37418,6 @@ async function run() {
             waitUntilFundedIntervalMs,
             horizonCacheTtlMs,
             useCache,
-            allowCrossNetworkFallback,
             logInputs,
         });
     }
@@ -37442,7 +37475,6 @@ async function run() {
         fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
         useCache,
-        allowCrossNetworkFallback,
     };
     try {
         const account = waitUntilFunded
@@ -38209,7 +38241,6 @@ function buildInputsLogRecord(inputs) {
         horizonCacheTtlMs: inputs.horizonCacheTtlMs,
         useCache: inputs.useCache,
         logInputs: inputs.logInputs,
-        allowCrossNetworkFallback: inputs.allowCrossNetworkFallback ?? false,
     };
 }
 /**
