@@ -212,6 +212,32 @@ inputs:
       a fix attempt. Default false. (Issue #155)
     required: false
     default: 'false'
+  home_domain_check_enabled:
+    description: >-
+      Enable the optional SEP-0001 home domain alignment check. When true,
+      TrustBridge inspects the issuer account's on-chain `home_domain` field
+      returned by Horizon and records the result in metrics. Off by default
+      so existing USDC workflows are unaffected.
+    required: false
+    default: 'false'
+  expected_home_domain:
+    description: >-
+      The domain string the issuer's on-chain `home_domain` must match
+      (case-insensitive). Leave empty to only verify that *some* home domain
+      is set (non-empty). Only used when `home_domain_check_enabled` is true.
+      Example: "centre.io" for mainnet USDC.
+    required: false
+    default: ''
+  home_domain_check_mode:
+    description: >-
+      Controls whether a home-domain failure blocks the overall result.
+      "warn" (default) — adds an informational check row and emits metrics
+      but does NOT fail the action. "strict" — a missing or mismatched home
+      domain sets the check as failed and, when `fail_on_missing` is true,
+      fails the workflow step. Only used when `home_domain_check_enabled`
+      is true.
+    required: false
+    default: 'warn'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

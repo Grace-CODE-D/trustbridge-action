@@ -50,6 +50,23 @@ export interface HorizonAccount {
   /** Sponsorship fields (CAP-0033). Omitted by older Horizon snapshots — treat as 0 when absent. */
   num_sponsoring?: number;
   num_sponsored?: number;
+  /**
+   * SEP-0001: The domain that hosts the issuer's stellar.toml metadata file.
+   * Populated by Horizon when the issuer account has set a home_domain on-chain.
+   * May be absent on older Horizon snapshots or when the issuer has not configured it.
+   * Never use this value directly in a network request without SSRF-safe validation.
+   */
+  home_domain?: string;
+  /**
+   * Bitmask of account flags set by the issuer (AUTH_REQUIRED, AUTH_REVOCABLE, etc.).
+   * Omitted by older Horizon snapshots — treat as 0 when absent.
+   */
+  flags?: {
+    auth_required?: boolean;
+    auth_revocable?: boolean;
+    auth_immutable?: boolean;
+    auth_clawback_enabled?: boolean;
+  };
 }
 
 export interface HorizonErrorResponse {

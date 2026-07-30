@@ -13,6 +13,7 @@ import {
   validateStellarAddress,
   buildValidationGate,
   ValidationResult,
+  HomeDomainCheckMode,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
@@ -165,6 +166,13 @@ async function run(): Promise<void> {
   const minTrustlineLimitRaw = core.getInput('min_trustline_limit') || '';
   const minTrustlineLimit = minTrustlineLimitRaw ? parseNumberInput(minTrustlineLimitRaw, 0, { min: 0 }) : undefined;
 
+  // SEP-0001 home domain check inputs (optional, off by default)
+  const homeDomainCheckEnabled = parseBooleanInput(core.getInput('home_domain_check_enabled'), false);
+  const expectedHomeDomain = core.getInput('expected_home_domain').trim() || undefined;
+  const homeDomainCheckModeRaw = core.getInput('home_domain_check_mode').trim().toLowerCase();
+  const homeDomainCheckMode: HomeDomainCheckMode =
+    homeDomainCheckModeRaw === 'strict' ? 'strict' : 'warn';
+
   if (logInputs) {
     emitInputsLogRecord({
       horizonUrl,
@@ -213,6 +221,9 @@ async function run(): Promise<void> {
     minXlmReserve,
     minTrustlineLimit,
     horizonUrl,
+    homeDomainCheckEnabled,
+    expectedHomeDomain,
+    homeDomainCheckMode,
   };
 
   core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);

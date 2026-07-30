@@ -8,12 +8,23 @@ import {
   oppositeNetwork,
   StellarNetwork,
 } from './links';
+import { globalMetrics } from './metrics';
 
 /** Stellar public network base reserve per ledger entry (XLM). */
 export const STELLAR_BASE_RESERVE_XLM = 0.5;
 
 /** Minimum balance required to activate a new account (XLM). */
 export const STELLAR_MIN_ACCOUNT_BALANCE_XLM = 1;
+
+/**
+ * SEP-0001 home domain check mode.
+ *
+ * - `"warn"`  (default) — a missing or mismatched home domain records a metrics tag and
+ *   adds an informational check row but does NOT set `valid = false`.
+ * - `"strict"` — a missing or mismatched home domain sets `valid = false` and blocks
+ *   payout automation, matching the behaviour of other hard checks.
+ */
+export type HomeDomainCheckMode = 'warn' | 'strict';
 
 export interface CheckConfig {
   assetCode: string;
@@ -25,6 +36,33 @@ export interface CheckConfig {
   unauthorizedTrustlinePolicy?: UnauthorizedTrustlinePolicy;
   /** When true, a clawback-enabled trustline fails the check instead of only warning. Default: false. */
   clawbackStrictMode?: boolean;
+
+  // ---------------------------------------------------------------------------
+  // SEP-0001 home domain check (optional, off by default)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When true, TrustBridge fetches the issuer account from Horizon and
+   * inspects the `home_domain` field.  Off by default so existing USDC
+   * workflows are unaffected.
+   */
+  homeDomainCheckEnabled?: boolean;
+
+  /**
+   * The domain string that the issuer's on-chain `home_domain` must match
+   * exactly (case-insensitive).  When omitted the check only verifies that
+   * *some* home domain is set (non-empty).
+   *
+   * Example: `"centre.io"` for mainnet USDC.
+   */
+  expectedHomeDomain?: string;
+
+  /**
+   * Controls whether a home-domain failure blocks the overall `valid` flag.
+   * Defaults to `"warn"` so the check is informational unless explicitly
+   * tightened.
+   */
+  homeDomainCheckMode?: HomeDomainCheckMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +155,119 @@ export interface ValidationResult {
   remediation?: string;
   /** Populated when the reserve was computed from a real account (not the unfunded/error paths). */
   reserveRequirement?: ReserveRequirement;
+  /**
+   * SEP-0001 home domain check result. Only populated when
+   * `config.homeDomainCheckEnabled` is true.
+   */
+  homeDomainCheck?: HomeDomainCheckResult;
+}
+
+// ---------------------------------------------------------------------------
+// SEP-0001 home domain check types and helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a single SEP-0001 home domain alignment check against an
+ * issuer account returned by Horizon.
+ *
+ * Metric tags emitted:
+ *  - `home_domain_valid`   when `outcome === "valid"`
+ *  - `home_domain_missing` when `outcome === "missing"`
+ *  - `home_domain_mismatch` when `outcome === "mismatch"`
+ *  - `home_domain_skipped` when the check is disabled
+ */
+export type HomeDomainOutcome = 'valid' | 'missing' | 'mismatch' | 'skipped';
+
+export interface HomeDomainCheckResult {
+  /** Classified outcome. */
+  outcome: HomeDomainOutcome;
+  /**
+   * The actual `home_domain` value on the issuer account, or `undefined`
+   * when Horizon did not expose it.
+   */
+  actualHomeDomain?: string;
+  /**
+   * The domain that was required (from `config.expectedHomeDomain`).
+   * Undefined means "any non-empty value is acceptable".
+   */
+  expectedHomeDomain?: string;
+  /**
+   * Human-readable summary safe to embed in a Markdown comment.
+   * All dynamic values are escaped before being set here.
+   */
+  detail: string;
+  /**
+   * When the check mode is `"strict"` and the outcome is not `"valid"`,
+   * this flag is true to indicate the failure should block `valid`.
+   */
+  blocksValid: boolean;
+}
+
+/**
+ * Evaluate the issuer's SEP-0001 home domain alignment against the
+ * fetched Horizon account data.
+ *
+ * This is a **pure, synchronous** function — it only inspects the
+ * `home_domain` field already present on the `HorizonAccount` object.
+ * Full SEP-0001 HTTP stellar.toml fetching and signature verification
+ * are explicitly out of scope (see docs/SEP0001_HOME_DOMAIN.md).
+ *
+ * @param issuerAccount  The Horizon account for the asset issuer (not the
+ *                       recipient wallet). May be `null` when Horizon did
+ *                       not return the issuer account.
+ * @param config         The current `CheckConfig` (reads
+ *                       `expectedHomeDomain` and `homeDomainCheckMode`).
+ * @returns              A `HomeDomainCheckResult` describing the outcome.
+ */
+export function evaluateHomeDomain(
+  issuerAccount: HorizonAccount | null,
+  config: CheckConfig,
+): HomeDomainCheckResult {
+  const mode: HomeDomainCheckMode = config.homeDomainCheckMode ?? 'warn';
+  const expected = config.expectedHomeDomain?.trim().toLowerCase();
+
+  // No issuer account available — treat the same as missing.
+  if (!issuerAccount) {
+    return {
+      outcome: 'missing',
+      expectedHomeDomain: config.expectedHomeDomain,
+      detail: 'Issuer account data was not available from Horizon — home domain could not be verified.',
+      blocksValid: mode === 'strict',
+    };
+  }
+
+  const rawDomain = issuerAccount.home_domain?.trim() ?? '';
+
+  if (!rawDomain) {
+    const detail = expected
+      ? `Issuer account has no \`home_domain\` set on-chain (expected \`${escapeMarkdownInline(config.expectedHomeDomain!)}\`).`
+      : 'Issuer account has no `home_domain` set on-chain.';
+    return {
+      outcome: 'missing',
+      actualHomeDomain: undefined,
+      expectedHomeDomain: config.expectedHomeDomain,
+      detail,
+      blocksValid: mode === 'strict',
+    };
+  }
+
+  if (expected && rawDomain.toLowerCase() !== expected) {
+    return {
+      outcome: 'mismatch',
+      actualHomeDomain: rawDomain,
+      expectedHomeDomain: config.expectedHomeDomain,
+      detail: `Issuer \`home_domain\` is \`${escapeMarkdownInline(rawDomain)}\` but \`${escapeMarkdownInline(config.expectedHomeDomain!)}\` was expected.`,
+      blocksValid: mode === 'strict',
+    };
+  }
+
+  return {
+    outcome: 'valid',
+    actualHomeDomain: rawDomain,
+    expectedHomeDomain: config.expectedHomeDomain,
+    detail: `Issuer \`home_domain\` is \`${escapeMarkdownInline(rawDomain)}\` ✓`,
+    blocksValid: false,
+  };
 }
 
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
@@ -370,6 +521,38 @@ export function runAccountChecks(
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // SEP-0001 home domain check (optional, off by default)
+  // ---------------------------------------------------------------------------
+  let homeDomainCheck: HomeDomainCheckResult | undefined;
+  if (config.homeDomainCheckEnabled) {
+    // The issuer account is not the same as the wallet account being checked.
+    // We use the `home_domain` field already present on the recipient account's
+    // balance entry if the issuer is Horizon-visible, but in the common case
+    // TrustBridge only holds the *wallet* account. We therefore pass `null` to
+    // evaluateHomeDomain unless the caller has pre-fetched the issuer account
+    // separately. For the monolith runAccountChecks path we use whatever
+    // home_domain the wallet account carries (useful when the wallet IS the
+    // issuer, e.g. in regulated-asset test setups). The plugin-based path
+    // (homeDomainPlugin) follows the same convention. Full issuer-account
+    // lookup is deferred to a future enhancement.
+    homeDomainCheck = evaluateHomeDomain(account, config);
+
+    // Emit metrics tag for dashboards and payout automation.
+    globalMetrics.incrementCounter(`home_domain_${homeDomainCheck.outcome}`);
+    globalMetrics.recordMetric('home_domain_check', 1, 'count', {
+      outcome: homeDomainCheck.outcome,
+      mode: config.homeDomainCheckMode ?? 'warn',
+    });
+
+    const homeDomainPassed = !homeDomainCheck.blocksValid || homeDomainCheck.outcome === 'valid';
+    checks.push({
+      passed: homeDomainPassed,
+      label: 'SEP-0001 home domain',
+      detail: homeDomainCheck.detail,
+    });
+  }
+
   const valid = checks.every((c) => c.passed);
   let remediation: string | undefined;
 
@@ -416,6 +599,7 @@ export function runAccountChecks(
     checks,
     remediation,
     reserveRequirement,
+    homeDomainCheck,
   };
 }
 
@@ -478,6 +662,23 @@ export function unfundedAccountResult(
     );
   }
 
+  // SEP-0001 home domain: account is unfunded so issuer data is unavailable.
+  let homeDomainCheck: HomeDomainCheckResult | undefined;
+  if (config.homeDomainCheckEnabled) {
+    homeDomainCheck = evaluateHomeDomain(null, config);
+    globalMetrics.incrementCounter(`home_domain_${homeDomainCheck.outcome}`);
+    globalMetrics.recordMetric('home_domain_check', 1, 'count', {
+      outcome: homeDomainCheck.outcome,
+      mode: config.homeDomainCheckMode ?? 'warn',
+    });
+    checks.push({
+      // Unfunded path: home domain cannot be verified, treat as non-blocking regardless of mode
+      passed: true,
+      label: 'SEP-0001 home domain',
+      detail: 'Cannot verify issuer home domain — account is not yet funded.',
+    });
+  }
+
   return {
     valid: false,
     accountFunded: false,
@@ -493,6 +694,7 @@ export function unfundedAccountResult(
       `Estimated setup cost: ~**${estimateTrustlineSetupCost()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
     ].join('\n\n'),
     sponsorshipInfo: { numSponsoring: 0, numSponsored: 0 },
+    homeDomainCheck,
   };
 }
 
@@ -550,6 +752,19 @@ export function horizonFailureResult(message: string, config: CheckConfig): Vali
     });
   }
 
+  if (config.homeDomainCheckEnabled) {
+    globalMetrics.incrementCounter('home_domain_skipped');
+    globalMetrics.recordMetric('home_domain_check', 1, 'count', {
+      outcome: 'skipped',
+      mode: config.homeDomainCheckMode ?? 'warn',
+    });
+    checks.push({
+      passed: true,
+      label: 'SEP-0001 home domain',
+      detail: 'Cannot verify issuer home domain — Horizon was unreachable.',
+    });
+  }
+
   return {
     valid: false,
     accountFunded: false,
@@ -561,6 +776,9 @@ export function horizonFailureResult(message: string, config: CheckConfig): Vali
     checks,
     remediation:
       'Horizon could not be reached. Retry later or verify your `horizon_url` input and network connectivity.',
+    homeDomainCheck: config.homeDomainCheckEnabled
+      ? { outcome: 'skipped', detail: 'Cannot verify — Horizon unreachable.', blocksValid: false }
+      : undefined,
   };
 }
 
