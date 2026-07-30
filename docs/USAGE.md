@@ -161,6 +161,149 @@ with:
 
 The step succeeds with `core.warning()`; the issue comment still shows ❌ for failed checks.
 
+---
+
+## fail_on_missing patterns: Contributor vs. Maintainer gates (Issue #142)
+
+TrustBridge provides two modes to match the workflow's trust model:
+
+| Mode | `fail_on_missing` | When to use | Behavior on failure |
+|------|-------------------|-------------|-------------------|
+| **Hard-fail (maintainer gate)** | `true` (default) | Maintainer audit job or bounty payout (high trust, all checks must pass) | Workflow fails; requires manual intervention to proceed |
+| **Warn-only (contributor-friendly)** | `false` | Contributor assignment workflow (low friction, guidance over blocking) | Workflow continues; contributor gets warning comment with remediation steps |
+
+### Contributor-friendly assignment workflow
+
+When assigning issues to contributors, use `fail_on_missing: false` to avoid blocking the assignment if the wallet isn't yet ready:
+
+```yaml
+name: Assign and check wallet (non-blocking)
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  check-wallet:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Extract address
+        id: addr
+        run: echo "value=GYOURCONTRIBUTORADDRESSHERE" >> "$GITHUB_OUTPUT"
+
+      - name: TrustBridge check
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.addr.outputs.value }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_missing: false   # don't fail; contributor can set up wallet afterward
+```
+
+**Result:**
+- ✓ Issue assignment succeeds regardless of wallet status.
+- ✓ Comment posted with clear remediation steps (fund account, add trustline, etc.).
+- ✓ Contributor has a roadmap but isn't blocked.
+
+### Maintainer-only payout audit workflow
+
+For sensitive operations (bounty payouts, grants), use `fail_on_missing: true` to gate on strict wallet readiness:
+
+```yaml
+name: Bounty payout audit (maintainer gate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stellar_address:
+        description: Contributor's Stellar address
+        required: true
+
+jobs:
+  verify-and-payout:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: TrustBridge check
+        uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ github.event.inputs.stellar_address }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_missing: true    # hard-fail if wallet not ready
+          min_xlm_reserve: '10'    # bounty threshold
+          sticky_comment: true
+
+      - name: Initiate payout
+        run: |
+          # Only runs if TrustBridge checks passed
+          echo "Initiating payout to ${{ github.event.inputs.stellar_address }}"
+          # your payout script here
+```
+
+**Result:**
+- ✓ Workflow hard-fails if wallet is unfunded, missing trustline, or low on reserve.
+- ✓ Prevents accidental mis-sends or stuck funds.
+- ✓ Maintainer gets clear error message and comment explaining why.
+
+### Bounty workflow with label gate + hard-fail
+
+Combine the [label gate pattern](LABEL_GATE_DESIGN.md) with `fail_on_missing: true` to validate only when a `bounty` label is explicitly set:
+
+```yaml
+name: Verify Stellar wallet (label gate + hard-fail)
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  trustbridge-gated:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      issues: write
+      contents: read
+    steps:
+      - name: TrustBridge with label gate
+        id: gate
+        uses: Stellar-TrustBridge/trustbridge-action/.github/actions/trustbridge-label-gate@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          stellar_address_input: GYOURCONTRIBUTORADDRESSHERE
+          gate_labels: 'bounty'            # only validate if "bounty" label is present
+          post_skip_comment: 'true'        # let contributor know why validation skipped
+          fail_on_missing: 'true'          # hard-fail when gate is open
+
+      - name: Process bounty
+        if: steps.gate.outputs.gate_skipped != 'true' && steps.gate.outputs.account_funded == 'true'
+        run: echo "✓ Ready for payout"
+
+      - name: Alert on gate skip
+        if: steps.gate.outputs.gate_skipped == 'true'
+        run: echo "ℹ️  Add the 'bounty' label to trigger wallet validation"
+```
+
+**Result:**
+- ✓ Assignment without `bounty` label: validation skipped, skip notice posted.
+- ✓ Assignment with `bounty` label: validation runs, workflow hard-fails if wallet not ready.
+- ✓ Different workflows can have different gates and thresholds (see [`trustbridge-label-gate-branching.yml`](examples/trustbridge-label-gate-branching.yml) for per-label rules).
+
+### Key behavioral guarantees (test-documented)
+
+| Scenario | `fail_on_missing=true` | `fail_on_missing=false` |
+|----------|----------------------|------------------------|
+| **All checks pass** | ✓ Step succeeds | ✓ Step succeeds |
+| **Checks fail** | ✗ `core.setFailed()` — step fails, workflow fails | ⚠️ `core.warning()` — step succeeds, workflow continues |
+| **Default** | Yes (safe by default) | — |
+
+These guarantees are verified by comprehensive test matrix in [`__tests__/fail_on_missing.benchmark.test.ts`](../__tests__/fail_on_missing.benchmark.test.ts).
+
+---
+
 ## Debug mode and timeout
 
 ```yaml
