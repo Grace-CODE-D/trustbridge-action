@@ -1,8 +1,9 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`formatCommentBody snapshot — workflow_dispatch context (Wave #29) funded account comment matches snapshot 1`] = `
-"<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
-<!-- trustbridge-action:schema-version:1.0.0 -->
+"<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->
+<!-- trustbridge-action:schema-version:1.1.0 -->
+<!-- trustbridge-action:snooze:status=pass,timestamp=1000000000000 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -14,6 +15,14 @@ Asset: **USDC** · Issuer: \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K
 - ✅ **Account funded** — Account \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\` is active on the Stellar network.
 - ✅ **USDC trustline** — Trustline for **USDC** (\`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN\`) is configured.
 - ✅ **XLM reserve** — Balance **\`10.0000000\` XLM** meets the minimum of **1.5 XLM**.
+
+### Onboarding checklist
+
+_Complete these steps in order. Boxes update automatically from live Horizon checks._
+
+- [x] **Fund account** — Activate the account with XLM. ([FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md#account-is-reported-unfunded))
+- [x] **Add USDC trustline** — Configure the asset trustline. ([FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md#trustline-is-missing))
+- [x] **Verify XLM balance** — Meet the **1.5 XLM** reserve. ([FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md#xlm-reserve-too-low))
 
 ### Validation gate
 
@@ -45,6 +54,7 @@ Asset: **USDC** · Issuer: \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K
 | \`fail_on_missing\` | \`true\` — step fails on missing checks |
 | \`sticky_comment\` | \`true\` — upserts prior comment |
 | \`wait_until_funded\` | \`false\` (default) |
+| \`onboarding_checklist\` | \`true\` |
 
 ### Action outputs reference
 
@@ -62,8 +72,9 @@ _Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbrid
 `;
 
 exports[`formatCommentBody snapshot — workflow_dispatch context (Wave #29) unfunded account comment matches snapshot 1`] = `
-"<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->
-<!-- trustbridge-action:schema-version:1.0.0 -->
+"<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->
+<!-- trustbridge-action:schema-version:1.1.0 -->
+<!-- trustbridge-action:snooze:status=fail,timestamp=1000000000000 -->
 ## TrustBridge — Stellar Account Check
 
 Checked account: \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\`
@@ -72,9 +83,17 @@ Asset: **USDC** · Issuer: \`GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K
 
 ### Results
 
-- ❌ **Account funded** — Account \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\` was **not found** on Horizon — it may not be funded or activated yet.
-- ❌ **USDC trustline** — Cannot verify trustline until the account exists.
-- ❌ **XLM reserve** — Cannot verify XLM balance. Fund the account with at least **1.5 XLM**.
+- ❌ **Account funded** — Account \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\` was **not found** on Horizon — it may not be funded or activated yet. [→ FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/FAQ.md#account-not-funded)
+- ❌ **USDC trustline** — Cannot verify trustline until the account exists. [→ FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/FAQ.md#trustline-missing)
+- ❌ **XLM reserve** — Cannot verify XLM balance. Fund the account with at least **1.5 XLM**. [→ FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/FAQ.md#xlm-reserve-too-low)
+
+### Onboarding checklist
+
+_Complete these steps in order. Boxes update automatically from live Horizon checks._
+
+- [ ] **Fund account** — Activate the account with XLM. ([FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md#account-is-reported-unfunded))
+- [ ] **Add USDC trustline** — Configure the asset trustline. ([FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md#trustline-is-missing))
+- [ ] **Verify XLM balance** — Meet the **1.5 XLM** reserve. ([FAQ](https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/TROUBLESHOOTING.md#xlm-reserve-too-low))
 
 ### Validation gate
 
@@ -110,6 +129,7 @@ Activate \`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\` by sending
 | \`fail_on_missing\` | \`true\` — step fails on missing checks |
 | \`sticky_comment\` | \`true\` — upserts prior comment |
 | \`wait_until_funded\` | \`false\` (default) |
+| \`onboarding_checklist\` | \`true\` |
 
 ### Action outputs reference
 

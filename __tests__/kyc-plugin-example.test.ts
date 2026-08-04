@@ -344,7 +344,7 @@ describe('optional behaviour — KYC plugin absent', () => {
     const result = runPlugins(makeCtx(makeAccount()), registry);
 
     expect(result.valid).toBe(true);
-    expect(result.checks).toHaveLength(3);
+    expect(result.checks).toHaveLength(4);
     expect(result.checks.map(c => c.label)).not.toContain('KYC verified');
   });
 
@@ -355,9 +355,10 @@ describe('optional behaviour — KYC plugin absent', () => {
 
     const result = runPlugins(makeCtx(makeAccount()), registry);
 
-    expect(result.checks).toHaveLength(4);
-    expect(result.checks[3].label).toBe('KYC verified');
-    expect(result.checks[3].passed).toBe(true);
+    expect(result.checks).toHaveLength(5);
+    expect(result.checks.map(c => c.label)).toContain('KYC verified');
+    const kyc = result.checks.find(c => c.label === 'KYC verified');
+    expect(kyc?.passed).toBe(true);
   });
 
   it('KYC failure blocks the overall result even when core checks pass', () => {

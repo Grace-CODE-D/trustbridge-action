@@ -265,7 +265,7 @@ describe('Wave #42 — fail_on_missing=true (hard-fail maintainer gate)', () => 
       const result = runAccountChecks(account, DEFAULT_CHECK_CONFIG);
 
       expect(result.valid).toBe(false);
-      expect(result.failedCheckLabels.length).toBeGreaterThanOrEqual(2);
+      expect(result.failedCheckLabels!.length).toBeGreaterThanOrEqual(2);
 
       const failOnMissing = true;
       const summary = formatFailureSummary(result);
@@ -413,7 +413,7 @@ describe('Wave #42 — fail_on_missing=false (warn-only contributor mode)', () =
       const result = runAccountChecks(account, DEFAULT_CHECK_CONFIG);
 
       expect(result.valid).toBe(false);
-      expect(result.failedCheckLabels.length).toBeGreaterThanOrEqual(2);
+      expect(result.failedCheckLabels!.length).toBeGreaterThanOrEqual(2);
 
       const failOnMissing = false;
       const summary = formatFailureSummary(result);
@@ -493,8 +493,13 @@ describe('Wave #42 — fail_on_missing edge cases', () => {
     // Scenario 2: fail_on_missing=false (same result)
     {
       jest.clearAllMocks();
-      if (!result.valid && false) {
-        core.warning('warned');
+      const failOnMissing = false;
+      if (!result.valid) {
+        if (failOnMissing) {
+          core.setFailed('failed');
+        } else {
+          core.warning('warned');
+        }
       }
       expect(core.warning).toHaveBeenCalled();
       expect(core.setFailed).not.toHaveBeenCalled();

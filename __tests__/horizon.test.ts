@@ -188,9 +188,9 @@ describe('isCreditBalance', () => {
 });
 
 describe('parseHorizonBalance', () => {
-  it('returns valid bigints or 0n', () => {
-    expect(parseHorizonBalance('1.5000000')).toBe(15000000n);
-    expect(parseHorizonBalance('bad')).toBe(0n);
+  it('returns valid numbers or 0', () => {
+    expect(parseHorizonBalance('1.5000000')).toBe(1.5);
+    expect(parseHorizonBalance('bad')).toBe(0);
   });
 });
 
@@ -1145,31 +1145,19 @@ describe('AbortSignal cancellation', () => {
       ).rejects.toThrow(RateBudgetExhaustedError);
     });
 
-    it('caps retry delay at retryMaxDelayMs', async () => {
+    it('rejects when Retry-After exceeds retryMaxDelayMs', async () => {
       const mock = makeMockFetch(async () => {
         return makeMockResponse(429, {}, { headers: { 'retry-after': '100' } });
       });
-      
-      const { calls, restore } = captureDebugCalls();
-      loggerModule.logger.setDebugMode(true);
 
-      try {
-        await expect(
-          fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
-            fetchFn: mock,
-            maxRetries: 1,
-            retryMaxDelayMs: 2000,
-            cacheTtlMs: 0,
-          })
-        ).rejects.toThrow(HorizonError);
-
-        const retryLog = calls.find(c => c.message === 'Horizon retry scheduled');
-        expect(retryLog).toBeDefined();
-        const ctx = requireContext(retryLog);
-        expect(ctx.retryAfterMs).toBe(2000);
-      } finally {
-        restore();
-      }
+      await expect(
+        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          fetchFn: mock,
+          maxRetries: 1,
+          retryMaxDelayMs: 2000,
+          cacheTtlMs: 0,
+        }),
+      ).rejects.toThrow(HorizonRateLimitError);
     });
   });
 });

@@ -15,6 +15,8 @@ import {
   computeProtocolMinReserve,
   buildValidationGate,
   horizonFailureResult,
+  tlsFailureResult,
+  buildAssetBalanceRequirement,
   STELLAR_BASE_RESERVE_XLM,
   STELLAR_MIN_ACCOUNT_BALANCE_XLM,
 } from '../src/checks';
@@ -156,16 +158,16 @@ describe('estimateTrustlineSetupCost', () => {
 
 describe('formatXlmDeficit', () => {
   it('formats missing reserve without going negative', () => {
-    expect(formatXlmDeficit(15000000n, 10000000n)).toBe('0.5000000');
-    expect(formatXlmDeficit(15000000n, 20000000n)).toBe('0.0000000');
+    expect(formatXlmDeficit(1.5, 1.0)).toBe('0.5000000');
+    expect(formatXlmDeficit(1.5, 2.0)).toBe('0.0000000');
   });
 });
 
 describe('formatAssetDeficit', () => {
   it('formats missing asset balance without going negative', () => {
-    expect(formatAssetDeficit(1000000000n, 500000000n)).toBe('50.0000000');
-    expect(formatAssetDeficit(1000000000n, 1500000000n)).toBe('0.0000000');
-    expect(formatAssetDeficit(0n, 0n)).toBe('0.0000000');
+    expect(formatAssetDeficit(100, 50)).toBe('50.0000000');
+    expect(formatAssetDeficit(100, 150)).toBe('0.0000000');
+    expect(formatAssetDeficit(0, 0)).toBe('0.0000000');
   });
 });
 

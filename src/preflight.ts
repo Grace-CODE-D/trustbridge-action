@@ -81,11 +81,17 @@ export async function runIssuesPreflight(
   token: string,
   options: PreflightOptions = {},
 ): Promise<PreflightResult> {
+  const requireIssueContext = options.requireIssueContext === true;
   const context = github.context;
   const issueNumber = context.payload.issue?.number as number | undefined;
 
   // ── 1. Issue context check ────────────────────────────────────────────────
   if (!issueNumber) {
+    if (requireIssueContext) {
+      throw new Error(
+        'issues:write preflight requires an issue context (issues event) but none was found.',
+      );
+    }
     return {
       skip: true,
       message:

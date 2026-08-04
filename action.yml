@@ -158,7 +158,15 @@ inputs:
     required: false
     default: '.trustbridge.yml'
   github_token:
-    description: 'GitHub token used to post issue comments'
+    description: >-
+      GitHub token used to post issue comments. Requires `issues: write`
+      permission on the repository. `GITHUB_TOKEN` with `permissions:
+      issues: write` is sufficient for issue-triggered runs on the default
+      branch and on non-fork pull requests. For fork pull requests, org-level
+      token restrictions, or GitHub Enterprise Server, you may need a
+      fine-grained PAT or a GitHub App token with the Issues (read and write)
+      permission. Omit or leave empty when running in a context where comment
+      posting is not required (outputs are still set).
     required: true
   assets_json:
     description: >-
@@ -173,15 +181,10 @@ inputs:
     default: ''
   sep0007_deep_links:
     description: >-
-      GitHub token used to post issue comments. Requires `issues: write`
-      permission on the repository. `GITHUB_TOKEN` with `permissions:
-      issues: write` is sufficient for issue-triggered runs on the default
-      branch and on non-fork pull requests. For fork pull requests, org-level
-      token restrictions, or GitHub Enterprise Server, you may need a
-      fine-grained PAT or a GitHub App token with the Issues (read and write)
-      permission. Omit or leave empty when running in a context where comment
-      posting is not required (outputs are still set).
-    required: true
+      When true, embed SEP-0007 wallet deep links in the issue comment for
+      funding and trustline setup. Default false.
+    required: false
+    default: 'false'
   auto_wallet_labels:
     description: >-
       Automatically apply a wallet state label to the issue
@@ -196,27 +199,121 @@ inputs:
       (SEP-0007 §3.4). Leave empty to omit the field.
     required: false
     default: ''
-  network:
+  snooze_window_minutes:
     description: >-
-      Stellar network or preset name (e.g. "public", "testnet"). When set to "testnet",
-      populates testnet Horizon URL, asset issuer, and reserve defaults.
+      Time window (in minutes) to suppress duplicate validation failure comments
+      on the same issue. When a check fails and the last check also failed
+      within this window, the comment update is suppressed to reduce notification
+      noise. Outputs are always updated even when snoozed. Set to 0 to disable
+      snoozing (always post). Default 30 minutes. (Issue #155)
     required: false
-    default: ''
-  preset:
+    default: '30'
+  force_comment:
     description: >-
-      Campaign preset identifier (e.g. "testnet", "public"). Alias for network preset.
-    required: false
-    default: ''
-  secondary_horizon_url:
-    description: >-
-      Optional secondary or canary Horizon API base URL for resilience failover.
-    required: false
-    default: ''
-  allow_cross_network_failover:
-    description: >-
-      Allow failover between different Stellar networks (e.g. mainnet to testnet). Default false.
+      Bypass snooze logic and force an immediate comment post, even if within
+      the snooze window. Useful for maintainers who want to re-alert after
+      a fix attempt. Default false. (Issue #155)
     required: false
     default: 'false'
+  webhook_url:
+    description: >-
+      Optional HTTPS URL to POST a signed webhook notification to after every
+      validation run. When empty (default) no webhook is sent and comment
+      posting is completely unaffected. The payload is signed with
+      HMAC-SHA256 when `webhook_secret` is also supplied. Disabled by default.
+      (Issue #101)
+    required: false
+    default: ''
+  webhook_secret:
+    description: >-
+      Shared secret used to sign the webhook payload with HMAC-SHA256. The
+      signature is included as the `X-TrustBridge-Signature` HTTP header in
+      the format `sha256=<hex-digest>`. Never logged or embedded in comments.
+      Leave empty to send unsigned webhooks (not recommended for production).
+      Only used when `webhook_url` is set. (Issue #101)
+    required: false
+    default: ''
+  webhook_timeout_ms:
+    description: >-
+      Maximum time in milliseconds to wait for the webhook endpoint to
+      respond. When the timeout elapses the request is aborted and a warning
+      is logged — comment posting and validation results are unaffected.
+      Default 5000 (5 seconds). (Issue #101)
+    required: false
+    default: '5000'
+  docs_base_url:
+    description: >-
+      Optional base URL for FAQ/docs deep links embedded in failing check
+      bullets. Defaults to this repository's `docs/FAQ.md`. Override for
+      forks or mirrors that host their own documentation. Must be an HTTPS
+      URL; invalid values fall back to the default silently. (Issue #104)
+    required: false
+    default: ''
+
+  comment_mode:
+    description: >-
+      Controls whether TrustBridge posts an issue comment: "post" (default)
+      writes/updates the sticky comment, "dry-run" builds the comment but does
+      not call the GitHub API, and "off" skips comment generation entirely.
+      Outputs are always set regardless of mode.
+    required: false
+    default: 'post'
+  dashboard_webhook_url:
+    description: >-
+      Optional dashboard webhook URL (alias / Wave #38 harness input). When set,
+      TrustBridge POSTs a signed notification after every validation run.
+      Prefer webhook_url for production; this input remains for dry-run smoke
+      tests and backwards-compatible workflows.
+    required: false
+    default: ''
+  onboarding_checklist:
+    description: >-
+      Include an onboarding checklist task list in the issue comment whose
+      checkboxes reflect live ValidationResult state. Default true.
+    required: false
+    default: 'true'
+  check_ledger_freshness:
+    description: >-
+      When true, query Horizon root for ledger lag before account checks and
+      surface a freshness banner in the comment. Default false.
+    required: false
+    default: 'false'
+  max_ledger_lag_seconds:
+    description: >-
+      Maximum acceptable Horizon ledger lag in seconds when check_ledger_freshness
+      is enabled. Default 60.
+    required: false
+    default: '60'
+  ledger_freshness_fail_on_stale:
+    description: >-
+      When true and ledger freshness is stale, treat the run as invalid.
+      Default false (warn only).
+    required: false
+    default: 'false'
+  network_passphrase:
+    description: >-
+      Optional Stellar network passphrase override used for diagnostics and
+      SEP-0007 deep links. Leave empty to infer from horizon_url.
+    required: false
+    default: ''
+  home_domain_check_enabled:
+    description: >-
+      Enable SEP-0001 home_domain alignment check against the asset issuer
+      account. Default false.
+    required: false
+    default: 'false'
+  expected_home_domain:
+    description: >-
+      Expected issuer home_domain value when home_domain_check_enabled is true.
+      Leave empty to accept any non-empty on-chain home_domain.
+    required: false
+    default: ''
+  home_domain_check_mode:
+    description: >-
+      How to treat home_domain mismatches: "warn" (default) or "strict"
+      (blocks valid).
+    required: false
+    default: 'warn'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

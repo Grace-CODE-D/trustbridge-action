@@ -1,6 +1,10 @@
 import { defaultCache, SimpleCache } from './cache';
-import { logger, redactHorizonUrl, redactString, LogContext } from './logger';
+import { logger, redactHorizonUrl, redactStellarAddress, redactString, LogContext } from './logger';
 import { inferStellarNetwork } from './links';
+import { globalMetrics } from './metrics';
+import { RateBudgetTracker } from './resilience';
+import { validateHorizonUrl } from './validation';
+
 export interface HorizonBalanceNative {
   balance: string;
   asset_type: 'native';
@@ -16,6 +20,18 @@ export interface HorizonBalanceCredit {
   buying_liabilities: string;
   selling_liabilities: string;
   limit?: string; // Maximum balance this trustline can hold (Issue #140)
+  /**
+   * Present only when the issuer has AUTHORIZATION_REQUIRED set. Absent
+   * means the issuer does not require per-account authorization.
+   */
+  is_authorized?: boolean;
+  is_authorized_to_maintain_liabilities?: boolean;
+  /**
+   * Per-trustline clawback flag (Horizon protocol 17+). Reflects the
+   * issuer's AUTH_CLAWBACK_ENABLED setting unless overridden on this
+   * specific trustline.
+   */
+  is_clawback_enabled?: boolean;
 }
 
 export interface HorizonBalanceLiquidityPoolShares {
@@ -47,9 +63,28 @@ export interface HorizonAccount {
   sequence: string;
   subentry_count: number;
   balances: HorizonBalance[];
-  num_sponsoring: number;
-  num_sponsored: number;
+  /** Sponsorship fields (CAP-0033). Omitted by older Horizon snapshots — treat as 0 when absent. */
+  num_sponsoring?: number;
+  num_sponsored?: number;
+  /** Horizon base URL that actually served this account snapshot (primary or failover). */
   _servedByUrl?: string;
+  /**
+   * SEP-0001: The domain that hosts the issuer's stellar.toml metadata file.
+   * Populated by Horizon when the issuer account has set a home_domain on-chain.
+   * May be absent on older Horizon snapshots or when the issuer has not configured it.
+   * Never use this value directly in a network request without SSRF-safe validation.
+   */
+  home_domain?: string;
+  /**
+   * Bitmask of account flags set by the issuer (AUTH_REQUIRED, AUTH_REVOCABLE, etc.).
+   * Omitted by older Horizon snapshots — treat as 0 when absent.
+   */
+  flags?: {
+    auth_required?: boolean;
+    auth_revocable?: boolean;
+    auth_immutable?: boolean;
+    auth_clawback_enabled?: boolean;
+  };
 }
 
 export interface HorizonErrorResponse {
@@ -77,7 +112,51 @@ export class HorizonRateLimitError extends HorizonError {
   }
 }
 
-type FetchLike = (
+export class HorizonTlsError extends HorizonError {
+  constructor(
+    message: string,
+    public readonly originalCode?: string,
+  ) {
+    super(message, 0, false);
+    this.name = 'HorizonTlsError';
+  }
+}
+
+/**
+ * Node/OpenSSL error codes that indicate a TLS handshake or certificate
+ * verification failure, as opposed to a generic connection/network error.
+ */
+const TLS_ERROR_CODES = new Set<string>([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'CERT_REVOKED',
+  'CERT_UNTRUSTED',
+  'CERT_CHAIN_TOO_LONG',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_GET_CRL',
+  'HOSTNAME_MISMATCH',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+  'ERR_TLS_HANDSHAKE_TIMEOUT',
+]);
+
+function tlsErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code && TLS_ERROR_CODES.has(code)) return code;
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    const causeCode = (cause as NodeJS.ErrnoException).code;
+    if (causeCode && TLS_ERROR_CODES.has(causeCode)) return causeCode;
+  }
+  return undefined;
+}
+
+export type FetchLike = (
   url: string | import('node-fetch').Request,
   init?: import('node-fetch').RequestInit,
 ) => Promise<import('node-fetch').Response>;
@@ -86,13 +165,21 @@ export interface FetchAccountOptions {
   timeoutMs?: number;
   maxRetries?: number;
   horizonUrlFallback?: string;
-  secondaryHorizonUrl?: string;
   fallbackUrls?: string[];
-  allowCrossNetworkFailover?: boolean;
   useCache?: boolean;
   cacheTtlMs?: number;
   cache?: SimpleCache;
   fetchFn?: FetchLike;
+  /**
+   * Optional AbortSignal from a parent controller (e.g. job cancellation).
+   * When the signal fires, in-flight and pending requests are aborted
+   * immediately; no misleading "account not funded" result is produced.
+   */
+  signal?: AbortSignal;
+  horizonMaxRequests?: number;
+  retryMaxDelayMs?: number;
+  retryMaxTotalWaitMs?: number;
+  rateBudgetTracker?: RateBudgetTracker;
   /**
    * By default, a fallback URL that resolves to a *different* Stellar
    * network than the primary `horizon_url` (public vs testnet, inferred
@@ -103,6 +190,13 @@ export interface FetchAccountOptions {
    * multi-network setups).
    */
   allowCrossNetworkFallback?: boolean;
+  /**
+   * Alias for `allowCrossNetworkFallback` kept for older call sites / tests.
+   * Prefer `allowCrossNetworkFallback`.
+   */
+  allowCrossNetworkFailover?: boolean;
+  /** Optional secondary Horizon URL used for same-network failover. */
+  secondaryHorizonUrl?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -116,9 +210,15 @@ export function normalizeHorizonUrl(baseUrl: string): string {
   if (!trimmed) {
     return '';
   }
+  // Horizon endpoints may use http on private/testnet mirrors; still enforce
+  // credential + traversal guards via validateHorizonUrl.
   const validation = validateHorizonUrl(trimmed, 'horizon_url', { allowHttp: true });
   if (!validation.valid) {
     throw new HorizonError(`Invalid horizon_url: ${validation.errors.join('; ')}`, 400, false);
+  }
+  // Re-check raw traversal after allowing http, since URL() would otherwise normalize it.
+  if (/(?:^|\/)(?:\.\.|%2e%2e)(?:\/|$)/i.test(trimmed) || /\/\.\//.test(trimmed)) {
+    throw new HorizonError('Invalid horizon_url: path traversal segments are not allowed', 400, false);
   }
   const parsed = new URL(trimmed);
   const cleanPath = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '');
@@ -287,6 +387,8 @@ async function fetchAccountOnce(
   endpointKind: 'primary' | 'fallback',
   retryMaxDelayMs: number,
   retryMaxTotalWaitMs: number,
+  parentSignal?: AbortSignal,
+  rateBudgetTracker?: RateBudgetTracker,
 ): Promise<FetchOnceResult> {
   const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
   const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
@@ -591,16 +693,16 @@ export async function fetchAccount(
   const retryMaxTotalWaitMs = options.retryMaxTotalWaitMs ?? DEFAULT_RETRY_MAX_TOTAL_WAIT_MS;
   const cache = options.cache ?? defaultCache;
   const horizonMaxRequests = options.horizonMaxRequests ?? 0;
-  const retryMaxDelayMs = options.retryMaxDelayMs ?? 30000;
-  
   const rateBudgetTracker = options.rateBudgetTracker ?? new RateBudgetTracker(horizonMaxRequests);
+  const signal = options.signal;
+  const allowCrossNetwork =
+    options.allowCrossNetworkFallback === true || options.allowCrossNetworkFailover === true;
   const normalizedHorizonUrl = normalizeHorizonUrl(horizonUrl);
   const candidateFallbacks = [
     options.secondaryHorizonUrl,
     options.horizonUrlFallback,
     ...(options.fallbackUrls ?? []),
   ].filter((u): u is string => Boolean(u && u.trim()));
-
   const fallbackCandidate = candidateFallbacks[0];
   const normalizedFallbackUrl = fallbackCandidate
     ? normalizeHorizonUrl(fallbackCandidate)
@@ -679,6 +781,8 @@ export async function fetchAccount(
       'primary',
       retryMaxDelayMs,
       retryMaxTotalWaitMs,
+      signal,
+      rateBudgetTracker,
     );
 
     result.account._servedByUrl = normalizedHorizonUrl;
@@ -716,16 +820,25 @@ export async function fetchAccount(
     throw primaryError;
   }
 
+  // Network binding rule: a G-address is valid on every Stellar network, so
+  // a fallback URL that resolves to a different network than the primary
+  // could silently return funded/trustline/reserve data for the *wrong*
+  // ledger instead of failing loudly. Compare the inferred networks and
+  // refuse the fallback unless the caller explicitly opted in.
   const primaryNetwork = inferStellarNetwork(normalizedHorizonUrl);
   const fallbackNetwork = inferStellarNetwork(normalizedFallbackUrl);
-  if (primaryNetwork !== fallbackNetwork && !options.allowCrossNetworkFailover) {
-    logger.debug('Horizon RPC fallback prevented: cross-network mismatch (mainnet vs testnet)', safeHorizonContext({
+  const crossNetworkFallback = primaryNetwork !== fallbackNetwork;
+
+  if (crossNetworkFallback && !allowCrossNetwork) {
+    logger.debug('Horizon RPC fallback skipped: primary and fallback resolve to different networks', safeHorizonContext({
       component: 'horizon',
       stellarAddress,
       horizonUrl,
       horizonUrlFallback: normalizedFallbackUrl,
       primaryNetwork,
       fallbackNetwork,
+      primaryStatusCode: primaryError?.statusCode,
+      primaryErrorMessage: primaryError ? redactString(primaryError.message) : undefined,
     }));
     throw primaryError;
   }
@@ -754,6 +867,8 @@ export async function fetchAccount(
       'fallback',
       retryMaxDelayMs,
       retryMaxTotalWaitMs,
+      signal,
+      rateBudgetTracker,
     );
 
     fallbackResult.account._servedByUrl = normalizedFallbackUrl;
@@ -782,7 +897,6 @@ export async function fetchAccount(
       horizonUrlFallback: normalizedFallbackUrl,
       fallbackAttempts: fallbackResult.attempts,
       fallbackLatencyMs: fallbackResult.latencyMs,
-      servedByUrl: normalizedFallbackUrl,
     }));
 
     return fallbackResult.account;
@@ -911,6 +1025,46 @@ export function hasTrustline(
 }
 
 /**
+ * Locate the credit trustline balance entry for a specific asset so callers
+ * can inspect per-trustline flags such as `is_authorized` and
+ * `is_clawback_enabled`.
+ */
+export function findTrustlineBalance(
+  account: HorizonAccount,
+  assetCode: string,
+  assetIssuer: string,
+): HorizonBalanceCredit | undefined {
+  return account.balances.find(
+    (balance): balance is HorizonBalanceCredit =>
+      isCreditBalance(balance) &&
+      balance.asset_code === assetCode &&
+      balance.asset_issuer === assetIssuer,
+  );
+}
+
+/**
+ * A trustline is considered authorized unless the issuer has explicitly
+ * marked it unauthorized (`is_authorized === false`). Horizon omits this
+ * field entirely when the issuer's AUTHORIZATION_REQUIRED flag is not set,
+ * so "field absent" must be treated as authorized, not as unknown.
+ */
+export function isTrustlineAuthorized(balance: HorizonBalanceCredit): boolean {
+  return balance.is_authorized !== false;
+}
+
+/**
+ * Get the balance string for a specific credit asset trustline, or `'0'`
+ * when the trustline is absent.
+ */
+export function getAssetBalance(
+  account: HorizonAccount,
+  assetCode: string,
+  assetIssuer: string,
+): string {
+  return findTrustlineBalance(account, assetCode, assetIssuer)?.balance ?? '0';
+}
+
+/**
  * Get the trustline limit for a specific asset, if it exists.
  * Returns the limit as a string (as provided by Horizon) or '0' if not found.
  */
@@ -919,18 +1073,28 @@ export function getTrustlineLimit(
   assetCode: string,
   assetIssuer: string,
 ): string {
-  const balance = account.balances.find(
-    (b) =>
-      isCreditBalance(b) &&
-      b.asset_code === assetCode &&
-      b.asset_issuer === assetIssuer,
-  );
-  return balance && isCreditBalance(balance) && balance.limit ? balance.limit : '0';
+  const balance = findTrustlineBalance(account, assetCode, assetIssuer);
+  return balance?.limit ? balance.limit : '0';
 }
 
 export function parseHorizonBalance(balance: string): number {
   const parsed = Number(balance);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Format a stroop amount (1 XLM = 10^7 stroops) as a fixed 7-decimal XLM string.
+ */
+export function formatStroops(stroops: bigint): string {
+  const isNegative = stroops < 0n;
+  const absStroops = isNegative ? -stroops : stroops;
+
+  const str = absStroops.toString().padStart(8, '0');
+  const intPart = str.slice(0, -7);
+  const fracPart = str.slice(-7);
+
+  const cleanFrac = fracPart.replace(/0+$/, '');
+  return `${isNegative ? '-' : ''}${intPart}.${cleanFrac.padEnd(7, '0')}`;
 }
 
 export interface HorizonFetchOptions {
@@ -1089,4 +1253,56 @@ export async function applyWalletLabels(
     const message = err instanceof Error ? err.message : String(err);
     return { applied: targetLabel, removed, error: message };
   }
+}
+
+
+/**
+ * Fetch the Stellar network passphrase from a Horizon root endpoint.
+ */
+export async function fetchNetworkPassphrase(
+  horizonUrl: string,
+  options: FetchAccountOptions = {},
+): Promise<string> {
+  const fetchImpl = options.fetchFn ?? (await import('node-fetch')).default;
+  const timeoutMs = options.timeoutMs || 15000;
+  const maxRetries = options.maxRetries ?? 3;
+
+  let attempt = 0;
+  const normalizedUrl = horizonUrl.replace(/\/$/, '');
+
+  while (attempt <= maxRetries) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetchImpl(normalizedUrl, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal as unknown as import('node-fetch').RequestInit['signal'],
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = (await response.json()) as { network_passphrase?: string };
+        if (data.network_passphrase) {
+          return data.network_passphrase;
+        }
+        throw new Error('network_passphrase not found in Horizon root response');
+      }
+
+      if (response.status !== 429 && response.status < 500) {
+        throw new Error(`Horizon returned ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (attempt >= maxRetries) {
+        throw error;
+      }
+    }
+
+    attempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+  }
+
+  throw new Error(`Unable to fetch network passphrase from ${normalizedUrl}`);
 }

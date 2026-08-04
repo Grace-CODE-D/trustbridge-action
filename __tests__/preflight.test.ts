@@ -37,7 +37,7 @@ jest.mock('@actions/github', () => ({
 import * as github from '@actions/github';
 
 function setIssueContext(issueNumber: number | undefined) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   (github.context as any).payload = issueNumber !== undefined ? { issue: { number: issueNumber } } : {};
 }
 

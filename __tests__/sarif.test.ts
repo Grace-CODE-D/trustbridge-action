@@ -322,7 +322,7 @@ describe('SARIF output generation', () => {
     });
 
     it('rejects wrong SARIF version', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       const sarif: any = buildSarifOutput(
         mockValidationResult,
         'USDC',
@@ -334,7 +334,7 @@ describe('SARIF output generation', () => {
     });
 
     it('rejects missing runs array', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       const sarif: any = buildSarifOutput(
         mockValidationResult,
         'USDC',
@@ -346,7 +346,7 @@ describe('SARIF output generation', () => {
     });
 
     it('rejects missing tool.driver', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       const sarif: any = buildSarifOutput(
         mockValidationResult,
         'USDC',
@@ -358,7 +358,7 @@ describe('SARIF output generation', () => {
     });
 
     it('rejects missing results array', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       const sarif: any = buildSarifOutput(
         mockValidationResult,
         'USDC',

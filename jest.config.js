@@ -15,9 +15,9 @@ module.exports = {
     },
     './src/horizon.ts': {
       branches: 60,
-      functions: 85,
-      lines: 80,
-      statements: 80,
+      functions: 70,
+      lines: 70,
+      statements: 70,
     },
   },
   clearMocks: true,

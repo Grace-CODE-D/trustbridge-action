@@ -1,17 +1,41 @@
 import { ValidationResult } from './checks';
-import { ValidationArtifact, ValidationDelta } from './delta';
+import { ValidationDelta, ValidationArtifact } from './delta';
+export interface ActionTimings {
+    input_parse_ms?: number;
+    horizon_fetch_ms?: number;
+    checks_ms?: number;
+    comment_post_ms?: number;
+    total_ms?: number;
+}
+export interface ActionOutputExtras {
+    horizonUrl?: string;
+    assetCode?: string;
+    assetIssuer?: string;
+    timings?: ActionTimings;
+}
 export interface ActionOutputs {
     trustline_exists: string;
     xlm_balance: string;
     account_funded: string;
     comment_url: string;
-    readiness_badge_markdown: string;
-    readiness_badge_url: string;
+    full_report_path: string;
+    ready: string;
+    reason_code: string;
+    horizon_url: string;
+    asset_code: string;
+    asset_issuer: string;
+    checks_json: string;
+    timings_json: string;
+    timing_input_parse_ms: string;
+    timing_horizon_fetch_ms: string;
+    timing_checks_ms: string;
+    timing_comment_post_ms: string;
+    timing_total_ms: string;
     num_sponsoring: string;
     num_sponsored: string;
 }
-export declare function toActionOutputs(result: ValidationResult, commentUrl?: string): ActionOutputs;
-export declare function setValidationOutputs(result: ValidationResult, commentUrl?: string): void;
+export declare function toActionOutputs(result: ValidationResult, commentUrl?: string, fullReportPath?: string, extras?: ActionOutputExtras): ActionOutputs;
+export declare function setValidationOutputs(result: ValidationResult, commentUrl?: string, fullReportPath?: string, extras?: ActionOutputExtras): void;
 export interface WriteValidationJsonOptions {
     result: ValidationResult;
     stellarAddress: string;

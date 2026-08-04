@@ -554,3 +554,19 @@ export const globalMetrics = new MetricsCollector();
 
 /** Global Octokit metrics instance — wired into `postIssueComment` and label operations. */
 export const globalOctokitMetrics = new OctokitMetrics();
+
+
+/**
+ * Normalize a Horizon URL down to a host label safe for metric tags.
+ */
+export function normalizeMetricHost(url: string): string {
+  if (!url || typeof url !== 'string') {
+    return 'unknown_host';
+  }
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.hostname || 'unknown_host';
+  } catch {
+    return 'unknown_host';
+  }
+}

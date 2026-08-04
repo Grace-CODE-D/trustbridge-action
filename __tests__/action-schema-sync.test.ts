@@ -67,6 +67,9 @@ function parseActionYmlInputs(yamlText: string): Map<string, { required: boolean
 
     // A new top-level section (no indent) ends the inputs block
     if (inInputsSection && /^[a-zA-Z_]/.test(line) && !/^\s/.test(line)) {
+      if (currentInputName !== null) {
+        inputs.set(currentInputName, { required: currentRequired });
+      }
       inInputsSection = false;
       currentInputName = null;
       continue;

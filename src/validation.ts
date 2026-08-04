@@ -468,8 +468,51 @@ export function validateSsrfSafeUrl(
  * @param url       The candidate Horizon or RPC URL.
  * @param fieldName Human-readable field label used in error messages.
  */
-export function validateHorizonUrl(url: string, fieldName = 'horizon_url'): ValidationResult {
-  return validateSsrfSafeUrl(url, fieldName, { allowHttp: true });
+export function validateHorizonUrl(
+  url: string,
+  fieldName = 'horizon_url',
+  options: { allowHttp?: boolean } = {},
+): ValidationResult {
+  // Allow http by default (testnet / private mirrors); pass allowHttp:false for https-only.
+  const allowHttp = options.allowHttp !== false;
+  const trimmed = url.trim();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!trimmed) {
+    return { valid: false, errors: [`${fieldName} cannot be empty`], warnings };
+  }
+
+  // Reject path traversal / dot-segments on the raw string before URL() normalizes them away.
+  if (/(?:^|\/)(?:\.\.|%2e%2e)(?:\/|$)/i.test(trimmed) || /\/\.\//.test(trimmed)) {
+    errors.push(`${fieldName} must not contain path traversal segments ("..") or invalid path dots`);
+  }
+
+  const ssrf = validateSsrfSafeUrl(url, fieldName, { allowHttp });
+  const urlCheck = validateUrl(url, fieldName, {
+    protocols: allowHttp ? ['http', 'https'] : ['https'],
+  });
+
+  for (const e of [...urlCheck.errors, ...ssrf.errors]) {
+    if (!errors.includes(e)) errors.push(e);
+  }
+  for (const w of [...urlCheck.warnings, ...ssrf.warnings]) {
+    if (!warnings.includes(w)) warnings.push(w);
+  }
+
+  const normalizedErrors = errors.map((e) => {
+    if (e.toLowerCase().includes('protocol')) return e;
+    if (e.includes('must use one of these protocols') || e.includes('must use http or https') || e.includes('must use https')) {
+      return e.includes('protocol') ? e : e.replace(/must use/, 'must use protocol');
+    }
+    return e;
+  });
+
+  return {
+    valid: normalizedErrors.length === 0,
+    errors: normalizedErrors,
+    warnings,
+  };
 }
 
 /**

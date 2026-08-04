@@ -41,7 +41,8 @@ describe('Issue #95 - Horizon URL Path Traversal Guard & Metrics Normalization',
       expect(result2.valid).toBe(false);
       expect(result2.errors[0]).toContain('protocol');
 
-      const result3 = validateHorizonUrl('http://horizon.stellar.org');
+      // http is allowed by default for testnet/private mirrors; require https explicitly.
+      const result3 = validateHorizonUrl('http://horizon.stellar.org', 'horizon_url', { allowHttp: false });
       expect(result3.valid).toBe(false);
       expect(result3.errors[0]).toContain('https');
     });

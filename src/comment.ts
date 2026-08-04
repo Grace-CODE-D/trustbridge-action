@@ -3,7 +3,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as github from '@actions/github';
 import {
-  AssetTrustlineResult,
   CheckConfig,
   STELLAR_BASE_RESERVE_XLM,
   STELLAR_MIN_ACCOUNT_BALANCE_XLM,
@@ -89,11 +88,6 @@ export interface CommentConfig extends CheckConfig {
    * section is appended to the comment showing newly-passed/failed checks.
    */
   delta?: ValidationDelta | null;
-  /**
-   * Minimum asset balance required (e.g. '10' for 10 USDC). When set,
-   * the configuration summary includes a min_asset_balance row.
-   */
-  minAssetBalance?: string;
 }
 
 export const TRUSTBRIDGE_FOOTER = '_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_';
@@ -124,34 +118,28 @@ export function formatCommentBody(
   result: ValidationResult,
   config: CommentConfig,
 ): string {
-  const effectiveHorizonUrl = result.horizonUrlUsed || config.horizonUrl;
-  const stellarLabNetwork = inferStellarNetwork(effectiveHorizonUrl);
+  const stellarLabNetwork = inferStellarNetwork(config.horizonUrl);
   const gate = buildValidationGate(result);
+  const strings = getStrings(config.locale ?? 'en');
+  const assetBalanceCheckEnabled = !!config.minAssetBalance;
 
-  const horizonDisplay = result.horizonUrlUsed && result.horizonUrlUsed !== config.horizonUrl
-    ? `${inlineCode(result.horizonUrlUsed)} *(failover)*`
-    : inlineCode(config.horizonUrl);
+  // Generate snooze marker with current check status (Issue #155)
+  const snoozeMarker = formatSnoozeMarker(result.valid ? 'pass' : 'fail');
 
+  const buildWithRemediation = (remediation: string | undefined): string => {
   const lines: string[] = [
     STICKY_COMMENT_MARKER,
     `<!-- trustbridge-action:schema-version:${COMMENT_SCHEMA_VERSION} -->`,
     snoozeMarker,
     '## TrustBridge — Stellar Account Check',
     '',
-    `Checked account: ${inlineCode(config.stellarAddress)}`,
-    `Horizon: ${horizonDisplay}`,
-    `Asset: **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
-  ];
-
-  if (result.presetApplied) {
-    lines.push(`Preset: ${inlineCode(result.presetApplied)}`);
-  }
-
-  lines.push(
+    `${strings.checkedAccount} ${inlineCode(config.stellarAddress)}`,
+    `${strings.horizon} ${inlineCode(config.horizonUrl)}`,
+    `${strings.asset} **${config.assetCode}** · Issuer: ${inlineCode(config.assetIssuer)}`,
     '',
     `### ${strings.resultsHeading}`,
     '',
-  );
+  ];
 
   for (const check of result.checks) {
     // Append a FAQ deep link for failing checks so contributors land on the
@@ -165,6 +153,17 @@ export function formatCommentBody(
       }
     }
     lines.push(`- ${statusIcon(check.passed)} **${check.label}** — ${check.detail}${faqSuffix}`);
+  }
+
+  // Onboarding checklist (Issue #154) — default on unless explicitly disabled.
+  if (config.onboardingChecklist !== false) {
+    lines.push(
+      '',
+      buildOnboardingChecklist(result, {
+        assetCode: config.assetCode,
+        minXlmReserve: config.minXlmReserve,
+      }),
+    );
   }
 
   // Ledger freshness / lag alert (Issue #107) — surfaced as a distinct banner
@@ -274,6 +273,7 @@ export function formatCommentBody(
     `| \`fail_on_missing\` | ${config.failOnMissing === undefined ? '_default (true)_' : config.failOnMissing ? strings.failOnMissingTrue : strings.failOnMissingFalse} |`,
     `| \`sticky_comment\` | ${config.stickyComment === undefined ? '_default (true)_' : config.stickyComment ? strings.stickyCommentTrue : strings.stickyCommentFalse} |`,
     `| \`wait_until_funded\` | ${config.waitUntilFunded ? strings.waitUntilFundedTrue : strings.waitUntilFundedFalse} |`,
+    `| \`onboarding_checklist\` | \`${config.onboardingChecklist === false ? 'false' : 'true'}\` |`,
   );
 
   // Ledger freshness config row
@@ -527,6 +527,11 @@ export interface UpsertCommentOptions {
    * comment post (unless forceComment is true). Always update outputs.
    */
   snoozeWindowMs?: number;
+  /**
+   * Explicit issue number override (e.g. from workflow_dispatch input).
+   * When omitted, falls back to `github.context.payload.issue.number`.
+   */
+  issueNumber?: number;
 }
 
 type Octokit = ReturnType<typeof github.getOctokit>;

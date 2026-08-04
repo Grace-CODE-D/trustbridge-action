@@ -1,13 +1,16 @@
 import * as github from '@actions/github';
 import { CheckConfig, ValidationResult } from './checks';
 import { MetricsCollector } from './metrics';
+import { DiagnosticsConfig } from './diagnostics';
+import { Locale } from './i18n';
+import { ValidationDelta } from './delta';
 /**
  * Semantic schema version embedded in every TrustBridge issue comment.
  * Bump when the comment body structure (sections, markers, remediation
  * shape, etc.) changes in a way that downstream consumers or future
  * versions of this action need to detect.
  */
-export declare const COMMENT_SCHEMA_VERSION = "1.0.0";
+export declare const COMMENT_SCHEMA_VERSION = "1.1.0";
 export interface CommentConfig extends CheckConfig {
     stellarAddress: string;
     horizonUrl: string;
@@ -16,16 +19,53 @@ export interface CommentConfig extends CheckConfig {
     waitUntilFundedTimeoutMs?: number;
     waitUntilFundedIntervalMs?: number;
     stickyComment?: boolean;
+    /**
+     * When true (default), append an onboarding checklist task list whose
+     * checkboxes reflect live ValidationResult state (fund → trustline →
+     * verify balance). Set false to omit the block.
+     */
+    onboardingChecklist?: boolean;
     /** Emit SEP-0007 wallet deep links (web+stellar:pay) in the comment. */
     sep0007DeepLinks?: boolean;
     /** Optional origin domain for SEP-0007 URIs (§3.4). */
     sep0007OriginDomain?: string;
+    /**
+     * When true, the comment reveals the full `horizon_url` host (still
+     * address-redacted). When false/omitted, only the URL scheme is shown —
+     * a private Horizon mirror's hostname can itself be sensitive
+     * infrastructure information and should not be posted to a (potentially
+     * public) issue by default.
+     */
+    debugMode?: boolean;
     /**
      * When provided, a hardened metrics JSON block is appended to the comment
      * as a fenced code block. Callers should pass a fresh `MetricsCollector`
      * snapshot so the comment reflects the run that generated it.
      */
     metricsSnapshot?: MetricsCollector;
+    /**
+     * Locale for comment strings (e.g., 'en', 'es', 'pt').
+     * Falls back to English if unset or invalid.
+     */
+    locale?: Locale;
+    /**
+     * When provided and `debugMode` is true, appends an expert diagnostics
+     * collapsible block with Horizon request details and normalized inputs.
+     * Never includes secrets. (Issue #102)
+     */
+    diagnosticsConfig?: DiagnosticsConfig;
+    /**
+     * Optional base URL for FAQ/docs deep links. When set, failing check
+     * bullets link to anchor-level FAQ entries in docs/FAQ.md.
+     * Defaults to the repo's docs/FAQ.md. Invalid values fall back to the
+     * default silently so comment posting is never blocked. (Issue #104)
+     */
+    docsBaseUrl?: string;
+    /**
+     * Delta vs previous validation run (Issue #148). When present, a delta
+     * section is appended to the comment showing newly-passed/failed checks.
+     */
+    delta?: ValidationDelta | null;
 }
 export declare const TRUSTBRIDGE_FOOTER = "_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_";
 /**
@@ -40,7 +80,8 @@ export declare const STICKY_COMMENT_MARKER_LEGACY = "<!-- trustbridge-action:sti
  * prior comment and decide whether to update it in place or post a new
  * one.
  */
-export declare const STICKY_COMMENT_MARKER = "<!-- trustbridge-action:sticky-comment:schema-v1.0.0 -->";
+export declare const STICKY_COMMENT_MARKER = "<!-- trustbridge-action:sticky-comment:schema-v1.1.0 -->";
+export declare const MAX_COMMENT_LENGTH = 64000;
 export declare function formatCommentBody(result: ValidationResult, config: CommentConfig): string;
 /**
  * Build a hardened metrics JSON string safe for embedding in a GitHub issue
@@ -60,6 +101,48 @@ export declare function formatCommentBody(result: ValidationResult, config: Comm
  */
 export declare const MAX_METRICS_JSON_BYTES = 4096;
 export declare function buildHardenedMetricsJson(metrics: MetricsCollector): string;
+/**
+ * GitHub's documented maximum body size for issue comments is 65,536
+ * characters. We keep a small safety margin so the truncation notice and
+ * surrounding HTML markers always fit within the limit.
+ */
+export declare const COMMENT_SIZE_LIMIT_BYTES = 65536;
+/**
+ * Number of bytes reserved for the truncation notice appended to the
+ * shortened comment. Sized to comfortably hold the notice text plus the
+ * footer.
+ */
+export declare const COMMENT_TRUNCATION_NOTICE_BYTES = 512;
+/**
+ * Build a truncated comment body that fits within `COMMENT_SIZE_LIMIT_BYTES`.
+ *
+ * The full body is cut at a safe byte offset, a truncation notice is
+ * appended, and the TrustBridge footer is preserved so the sticky-comment
+ * marker remains present.  The cut always happens on a line boundary so the
+ * resulting markdown is clean.
+ *
+ * @param fullBody  The full comment body produced by `formatCommentBody`.
+ * @param reportPath  Workspace-relative path where the full report was written.
+ * @returns A comment body that fits within the GitHub size limit.
+ *
+ * @internal Exported for testing.
+ */
+export declare function buildTruncatedCommentBody(fullBody: string, reportPath: string): string;
+/**
+ * Write the full comment body to a workspace file so it can be uploaded as
+ * a GitHub Actions artifact by a subsequent `actions/upload-artifact` step.
+ *
+ * Directories are created recursively if they don't exist.  Any write
+ * failure is surfaced as a warning (not an error) so the action can still
+ * post the truncated comment.
+ *
+ * @param fullBody  Full comment body to persist.
+ * @param outputPath  Absolute or workspace-relative path for the output file.
+ * @returns The resolved absolute path on success, `undefined` on failure.
+ *
+ * @internal Exported for testing.
+ */
+export declare function writeFullReport(fullBody: string, outputPath: string): string | undefined;
 export interface UpsertCommentOptions {
     /**
      * When true (default), find and update TrustBridge's previous comment on
@@ -79,6 +162,11 @@ export interface UpsertCommentOptions {
      * comment post (unless forceComment is true). Always update outputs.
      */
     snoozeWindowMs?: number;
+    /**
+     * Explicit issue number override (e.g. from workflow_dispatch input).
+     * When omitted, falls back to `github.context.payload.issue.number`.
+     */
+    issueNumber?: number;
 }
 type Octokit = ReturnType<typeof github.getOctokit>;
 /**

@@ -190,3 +190,32 @@ jobs:
           echo "✓ TrustBridge testnet integration test passed"
           echo "  Account funded: ${{ steps.trustbridge.outputs.account_funded }}"
           echo "  XLM balance: ${{ steps.trustbridge.outputs.xlm_balance }}"
+
+  dry-run-smoke:
+    runs-on: ubuntu-latest
+    name: dry-run-smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Dry-run action (comment_mode)
+        id: trustbridge
+        uses: ./
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          stellar_address_input: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+          fail_on_missing: false
+          comment_mode: 'dry-run'
+          dashboard_webhook_url: ''
+      - name: Assert dry-run left comment_url empty
+        run: |
+          echo "comment_url=${{ steps.trustbridge.outputs.comment_url }}"
+          test -z "${{ steps.trustbridge.outputs.comment_url }}"

@@ -9,9 +9,14 @@
  * Wave #36: Horizon HTTP mock matrix — deterministic per-scenario mock
  * factories (timeout, rate-limit, outage, success) for use in unit tests and
  * local dev without a live Horizon endpoint.
+ *
+ * Also exposes a local CLI check command that exercises the full resilience
+ * pipeline against a live or stubbed Horizon endpoint (with optional secondary
+ * Horizon failover).
  */
 
 import * as core from '@actions/core';
+import { inferStellarNetwork } from './links';
 
 // ---------------------------------------------------------------------------
 // Rate Budget Tracker
@@ -58,8 +63,6 @@ export class RateBudgetTracker {
 // CLI check command types
 // ---------------------------------------------------------------------------
 
-import { inferStellarNetwork } from './links';
-
 /**
  * Options accepted by the local CLI check command.
  */
@@ -99,14 +102,6 @@ export interface CliCheckResult {
   /** True if the response was served by the secondary endpoint after primary failover. */
   failedOver?: boolean;
 }
-
-/**
- * Circuit-breaker state machine.
- * CLOSED  = normal operation
- * OPEN    = requests are rejected immediately
- * HALF    = one probe request is allowed to test recovery
- */
-export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF';
 
 // ---------------------------------------------------------------------------
 // RetryPolicy and defaults
@@ -525,17 +520,7 @@ export class CircuitOpenError extends Error {
  *  - `warning` — degraded but recovering (rate-limited, fallback in use)
  *  - `error`   — irrecoverable or circuit open
  */
-export async function runCliCheck(
-  options: CliCheckOptions,
-  fetchFn: FetchFn = (url, init) => fetch(url, init) as Promise<{ status: number }>,
-): Promise<CliCheckResult> {
-  const horizonUrl = options.horizonUrl ?? 'https://horizon.stellar.org';
-  const secondaryUrl = options.secondaryHorizonUrl || (options.fallbackUrls && options.fallbackUrls[0]);
-  const policy: RetryPolicy = {
-    ...DEFAULT_RETRY_POLICY,
-    timeoutMs: options.timeoutMs ?? DEFAULT_RETRY_POLICY.timeoutMs,
-    ...options.retryPolicy,
-  };
+export type CheckRunAnnotationLevel = 'notice' | 'warning' | 'error';
 
 export interface CheckRunAnnotation {
   level: CheckRunAnnotationLevel;
@@ -543,11 +528,27 @@ export interface CheckRunAnnotation {
   message: string;
 }
 
-  const startMs = Date.now();
-  let retries = 0;
-  let statusCode: number | undefined;
-  let horizonUrlUsed = horizonUrl;
-  let failedOver = false;
+/**
+ * Post a resilience event as a GitHub Check Run annotation.
+ *
+ * Wraps `core.notice` / `core.warning` / `core.error` with a consistent
+ * `[TrustBridge Resilience]` prefix so operators can filter the Actions log
+ * for resilience events at a glance.
+ */
+export function emitCheckRunAnnotation(annotation: CheckRunAnnotation): void {
+  const formatted = `[TrustBridge Resilience] ${annotation.title}: ${annotation.message}`;
+  switch (annotation.level) {
+    case 'notice':
+      core.notice(formatted);
+      break;
+    case 'warning':
+      core.warning(formatted);
+      break;
+    case 'error':
+      core.error(formatted);
+      break;
+  }
+}
 
 /**
  * Convenience wrapper: emit a retry-scheduled annotation.
@@ -605,6 +606,137 @@ export function annotateCircuitOpen(consecutiveFailures: number): void {
 }
 
 // ---------------------------------------------------------------------------
+
+/** Minimal fetch-like type accepted by runCliCheck for testability. */
+export type FetchFn = (url: string, init?: { signal?: AbortSignal }) => Promise<{ status: number }>;
+
+/**
+ * Run a local CLI check against a Horizon endpoint.
+ *
+ * The check exercises the full resilience pipeline: timeout (via AbortSignal),
+ * exponential backoff retries, and optional circuit-breaker integration. It
+ * is intentionally side-effect-free (no GitHub Actions core calls) so it can
+ * be used in local development, CI smoke tests, or scripting without a
+ * GitHub context.
+ *
+ * @param options  CLI check options (address, horizon URL, timeout, policy).
+ * @param fetchFn  Optional fetch override for unit tests (default: global fetch).
+ * @returns        A {@link CliCheckResult} with reachability, timing, and retry info.
+ *
+ * @example
+ * ```ts
+ * const result = await runCliCheck({
+ *   address: 'GABC...XYZ',
+ *   horizonUrl: 'https://horizon-testnet.stellar.org',
+ *   timeoutMs: 5000,
+ * });
+ * console.log(result.message);
+ * ```
+ */
+export async function runCliCheck(
+  options: CliCheckOptions,
+  fetchFn: FetchFn = (url, init) => fetch(url, init) as Promise<{ status: number }>,
+): Promise<CliCheckResult> {
+  const horizonUrl = options.horizonUrl ?? 'https://horizon.stellar.org';
+  const secondaryUrl = options.secondaryHorizonUrl || (options.fallbackUrls && options.fallbackUrls[0]);
+  const policy: RetryPolicy = {
+    ...DEFAULT_RETRY_POLICY,
+    timeoutMs: options.timeoutMs ?? DEFAULT_RETRY_POLICY.timeoutMs,
+    ...options.retryPolicy,
+  };
+
+  const accountUrl = `${horizonUrl.replace(/\/$/, '')}/accounts/${options.address}`;
+
+  const startMs = Date.now();
+  let retries = 0;
+  let statusCode: number | undefined;
+  let horizonUrlUsed = horizonUrl;
+  let failedOver = false;
+
+  try {
+    await retryWithBackoff(
+      async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
+
+        try {
+          const response = await fetchFn(accountUrl, { signal: controller.signal });
+          statusCode = response.status;
+
+          // Only retry on server-side transient errors.
+          if (response.status === 429 || (response.status >= 500 && response.status !== 503)) {
+            throw new Error(`Transient HTTP ${response.status} — retrying`);
+          }
+          // 404 = not found, not a transient error.
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      policy,
+      (_error, attempt) => {
+        retries = attempt + 1;
+        return true;
+      },
+    );
+  } catch {
+    // Exhausted retries or non-retryable error — fall through to result.
+  }
+
+  // If primary failed on transient error (not 404), fail over to secondary URL
+  if (statusCode !== 200 && statusCode !== 404 && secondaryUrl) {
+    const primaryNet = inferStellarNetwork(horizonUrl);
+    const secondaryNet = inferStellarNetwork(secondaryUrl);
+    if (primaryNet === secondaryNet || options.allowCrossNetworkFailover) {
+      const secondaryAccountUrl = `${secondaryUrl.replace(/\/$/, '')}/accounts/${options.address}`;
+      let secondaryRetries = 0;
+      try {
+        await retryWithBackoff(
+          async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
+            try {
+              const response = await fetchFn(secondaryAccountUrl, { signal: controller.signal });
+              statusCode = response.status;
+              if (response.status === 429 || (response.status >= 500 && response.status !== 503)) {
+                throw new Error(`Transient HTTP ${response.status} on secondary — retrying`);
+              }
+            } finally {
+              clearTimeout(timer);
+            }
+          },
+          policy,
+          (_error, attempt) => {
+            secondaryRetries = attempt + 1;
+            return true;
+          },
+        );
+        if (statusCode === 200 || statusCode === 404) {
+          failedOver = true;
+          horizonUrlUsed = secondaryUrl;
+          retries += secondaryRetries;
+        }
+      } catch {
+        retries += secondaryRetries;
+      }
+    }
+  }
+
+  const durationMs = Date.now() - startMs;
+  const reachable = statusCode === 200;
+
+  const message = reachable
+    ? failedOver
+      ? `Account ${options.address} is reachable on secondary Horizon ${horizonUrlUsed} (${durationMs}ms after primary failover).`
+      : `Account ${options.address} is reachable on Horizon (${durationMs}ms, ${retries} retries).`
+    : statusCode === 404
+      ? `Account ${options.address} was not found on Horizon (404) — not yet funded.`
+      : statusCode !== undefined
+        ? `Horizon returned HTTP ${statusCode} for ${options.address} (${durationMs}ms, ${retries} retries).`
+        : `Could not reach Horizon at ${horizonUrl} (${durationMs}ms, ${retries} retries).`;
+
+  return { reachable, statusCode, durationMs, message, retries, horizonUrlUsed, failedOver };
+}
+
 // HttpMockMatrix  (Wave #36 — Horizon HTTP mock matrix)
 // ---------------------------------------------------------------------------
 
@@ -766,57 +898,143 @@ export class HttpMockMatrix {
     }
   }
 
-  // If primary failed on transient error (not 404), fail over to secondary URL
-  if (statusCode !== 200 && statusCode !== 404 && secondaryUrl) {
-    const primaryNet = inferStellarNetwork(horizonUrl);
-    const secondaryNet = inferStellarNetwork(secondaryUrl);
-    if (primaryNet === secondaryNet || options.allowCrossNetworkFailover) {
-      const secondaryAccountUrl = `${secondaryUrl.replace(/\/$/, '')}/accounts/${options.address}`;
-      let secondaryRetries = 0;
-      try {
-        await retryWithBackoff(
-          async () => {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
-            try {
-              const response = await fetchFn(secondaryAccountUrl, { signal: controller.signal });
-              statusCode = response.status;
-              if (response.status === 429 || (response.status >= 500 && response.status !== 503)) {
-                throw new Error(`Transient HTTP ${response.status} on secondary — retrying`);
-              }
-            } finally {
-              clearTimeout(timer);
-            }
-          },
-          policy,
-          (_error, attempt) => {
-            secondaryRetries = attempt + 1;
-            return true;
-          },
-        );
-        if (statusCode === 200 || statusCode === 404) {
-          failedOver = true;
-          horizonUrlUsed = secondaryUrl;
-          retries += secondaryRetries;
-        }
-      } catch {
-        retries += secondaryRetries;
+  /**
+   * Build a multi-scenario fetch function that serves different scenarios
+   * for primary vs. fallback Horizon URLs. Useful for testing RPC fallback
+   * paths without duplicating setup code.
+   *
+   * @param primaryScenario  Scenario served when the URL starts with `primaryUrl`.
+   * @param fallbackScenario Scenario served for all other URLs.
+   * @param primaryUrl       Prefix used to detect primary vs. fallback calls.
+   *                         Default: `'https://horizon.stellar.org'`.
+   */
+  static buildFallbackMatrix(
+    primaryScenario: HorizonScenario,
+    fallbackScenario: HorizonScenario,
+    primaryUrl: string = 'https://horizon.stellar.org',
+    options: MockMatrixOptions = {},
+  ): MockFetchFn {
+    const primaryFetch = HttpMockMatrix.build(primaryScenario, options);
+    const fallbackFetch = HttpMockMatrix.build(fallbackScenario, options);
+
+    return (url, init) => {
+      if (url.startsWith(primaryUrl)) {
+        return primaryFetch(url, init);
       }
-    }
+      return fallbackFetch(url, init);
+    };
   }
 
-  const durationMs = Date.now() - startMs;
-  const reachable = statusCode === 200;
+  // ---- private factories ----
 
-  const message = reachable
-    ? failedOver
-      ? `Account ${options.address} is reachable on secondary Horizon ${horizonUrlUsed} (${durationMs}ms after primary failover).`
-      : `Account ${options.address} is reachable on Horizon (${durationMs}ms, ${retries} retries).`
-    : statusCode === 404
-      ? `Account ${options.address} was not found on Horizon (404) — not yet funded.`
-      : statusCode !== undefined
-        ? `Horizon returned HTTP ${statusCode} for ${options.address} (${durationMs}ms, ${retries} retries).`
-        : `Could not reach Horizon at ${horizonUrl} (${durationMs}ms, ${retries} retries).`;
+  private static _makeHeaders(
+    headers: Record<string, string> = {},
+  ): { get(name: string): string | null } {
+    const lowered: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      lowered[k.toLowerCase()] = v;
+    }
+    return { get: (name: string) => lowered[name.toLowerCase()] ?? null };
+  }
 
-  return { reachable, statusCode, durationMs, message, retries, horizonUrlUsed, failedOver };
+  private static _defaultAccount(
+    options: MockMatrixOptions,
+  ): Record<string, unknown> {
+    return (
+      options.accountPayload ?? {
+        id: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
+        account_id: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
+        sequence: '1',
+        subentry_count: 1,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [
+          {
+            balance: '10.0000000',
+            asset_type: 'native',
+            buying_liabilities: '0.0000000',
+            selling_liabilities: '0.0000000',
+          },
+        ],
+      }
+    );
+  }
+
+  private static _successFetch(options: MockMatrixOptions): MockFetchFn {
+    const payload = HttpMockMatrix._defaultAccount(options);
+    return async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: HttpMockMatrix._makeHeaders(),
+      json: async () => payload,
+    });
+  }
+
+  private static _staticResponseFetch(
+    status: number,
+    statusText: string,
+    body: Record<string, unknown>,
+    headers: Record<string, string> = {},
+  ): MockFetchFn {
+    return async () => ({
+      ok: false,
+      status,
+      statusText,
+      headers: HttpMockMatrix._makeHeaders(headers),
+      json: async () => body,
+    });
+  }
+
+  private static _timeoutFetch(timeoutAfterMs: number): MockFetchFn {
+    return (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+
+        const abort = () => {
+          const err = new Error('The operation was aborted');
+          (err as NodeJS.ErrnoException).name = 'AbortError';
+          reject(err);
+        };
+
+        if (signal) {
+          if (signal.aborted) {
+            abort();
+            return;
+          }
+          signal.addEventListener('abort', abort);
+        }
+
+        if (timeoutAfterMs > 0) {
+          setTimeout(() => {
+            if (signal && !signal.aborted) {
+              abort();
+            }
+          }, timeoutAfterMs);
+        }
+        // If timeoutAfterMs === 0 the mock just hangs until the AbortSignal fires.
+      });
+  }
+
+  private static _networkErrorFetch(): MockFetchFn {
+    return async () => {
+      throw new Error('fetch failed: ECONNREFUSED');
+    };
+  }
+
+  private static _flakyFetch(options: MockMatrixOptions): MockFetchFn {
+    const failCount = options.flakyFailCount ?? 2;
+    const errorScenario = options.flakyErrorScenario ?? 'rate_limit';
+    const errorFetch = HttpMockMatrix.build(errorScenario, options);
+    const successFetch = HttpMockMatrix._successFetch(options);
+
+    let calls = 0;
+    return (url, init) => {
+      calls += 1;
+      if (calls <= failCount) {
+        return errorFetch(url, init);
+      }
+      return successFetch(url, init);
+    };
+  }
 }

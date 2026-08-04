@@ -139,6 +139,7 @@ export async function checkLedgerFreshness(
       error: message,
     });
     globalMetrics.recordMetric('freshness_check_failed', 1, 'count');
+    globalMetrics.incrementCounter('freshness_check_failed');
     return {
       fresh: true, // fail-open: unknown is not treated as stale
       lagSeconds: null,

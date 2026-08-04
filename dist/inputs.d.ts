@@ -25,3 +25,30 @@ export declare function parseAssigneeAddressMap(raw: string, options?: ParseAssi
  * Throws an actionable error when the login is missing or not in the map.
  */
 export declare function resolveAddressFromAssigneeMap(map: AssigneeAddressMap, assigneeLogin: string | undefined | null): string;
+export type UnauthorizedTrustlinePolicy = 'fail' | 'warn' | 'ignore';
+/**
+ * Parses the `unauthorized_trustline_policy` input, which controls how a
+ * trustline that exists but is not yet authorized by the issuer
+ * (AUTHORIZATION_REQUIRED) is treated:
+ *   - "fail"   — the trustline check does not pass; readiness outputs
+ *                reflect the stricter meaning.
+ *   - "warn"   — the trustline check still passes, but a warning is added
+ *                to the comment. This is the safe default: it surfaces the
+ *                risk without breaking existing green workflows.
+ *   - "ignore" — no additional check or warning (pre-#72 behavior).
+ */
+export declare function parseUnauthorizedTrustlinePolicy(value: string): UnauthorizedTrustlinePolicy;
+/**
+ * Mapping of TRUSTBRIDGE_* environment variable names to action input names.
+ * Explicit `with:` values always win; env is only used when with: is empty.
+ */
+export declare const TRUSTBRIDGE_ENV_MAP: Record<string, string>;
+/**
+ * Resolve an action input with TRUSTBRIDGE_* env fallback.
+ */
+export declare function resolveInput(inputName: string, withValue: string, env?: Record<string, string | undefined>): string;
+/**
+ * Resolve campaign preset name from network/preset inputs.
+ * Empty string means "no preset".
+ */
+export declare function parsePresetInput(networkInput?: string, presetInput?: string): string;

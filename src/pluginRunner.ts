@@ -98,8 +98,20 @@ export function runPlugins(
     trustlineExists,
     xlmBalance,
     xlmReserveMet,
+    assetBalance: 'unknown',
+    assetBalanceMet: false,
     checks,
     remediation,
+    failedCheckLabels: checks.filter((c) => !c.passed).map((c) => {
+      const label = c.label.toLowerCase();
+      if (label.includes('horizon')) return 'horizon_available';
+      if (label.includes('account funded') || label.includes('account-funded')) return 'account_funded';
+      if (label.includes('trustline')) return 'trustline';
+      if (label.includes('xlm') || label.includes('reserve')) return 'xlm_reserve';
+      if (label.includes('kyc')) return 'kyc';
+      if (label.includes('home domain')) return 'home_domain';
+      return label.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    }),
   };
 }
 

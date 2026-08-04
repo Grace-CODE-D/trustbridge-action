@@ -4,99 +4,129 @@ import {
   CheckConfig,
   detectNetworkMismatch,
   horizonFailureResult,
-  parseMinAssetBalance,
   parseMinXlmReserve,
   runAccountChecks,
-  runMultiAssetChecks,
-  AssetTrustlineResult,
   unfundedAccountResult,
   validateStellarAddress,
-  buildValidationGate,
-  ValidationResult,
   HomeDomainCheckMode,
+  LedgerFreshnessCheckResult,
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
-import { formatCommentBody, postIssueComment } from './comment';
+import { checkLedgerFreshness } from './freshness';
+import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
+import { normalizeAssetConfig, parseAssetsJson } from './assets';
 import {
-  getCampaignPreset,
-  MAINNET_USDC_ISSUER,
-  normalizeAssetConfig,
-  validateNetworkAssetCompatibility,
-} from './assets';
-import { getErrorMessage, parseBooleanInput, parseNumberInput, parsePresetInput } from './inputs';
+  getErrorMessage,
+  parseAssigneeAddressMap,
+  parseBooleanInput,
+  parseNumberInput,
+  resolveAddressFromAssigneeMap,
+} from './inputs';
 import { formatFailureSummary } from './summary';
 import { setValidationOutputs, writeValidationJson } from './outputs';
+import {
+  computeValidationDelta,
+  loadPreviousValidationArtifact,
+} from './delta';
 import { logger, emitInputsLogRecord } from './logger';
-import { globalMetrics } from './metrics';
+import { globalMetrics, writeJobSummary } from './metrics';
+import { RateBudgetTracker } from './resilience';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
+import { runIssuesPreflight } from './preflight';
 
-async function run(): Promise<void> {
-  const rawNetwork = core.getInput('network') || '';
-  const rawPreset = core.getInput('preset') || '';
-  const presetKey = parsePresetInput(rawNetwork, rawPreset);
-  const presetObj = getCampaignPreset(presetKey);
+/**
+ * Resolve the GitHub assignee login from the current Actions event payload.
+ * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
+ */
+function resolveAssigneeLoginFromContext(): string | undefined {
+  const payload = github.context.payload as {
+    assignee?: { login?: string };
+    issue?: { assignees?: Array<{ login?: string }> };
+  };
 
-  let horizonUrl = core.getInput('horizon_url');
-  let assetCode = core.getInput('asset_code');
-  let assetIssuer = core.getInput('asset_issuer');
-  let minXlmReserveRaw = core.getInput('min_xlm_reserve');
-
-  if (presetObj) {
-    if (!horizonUrl) horizonUrl = presetObj.horizonUrl;
-    if (!assetCode) assetCode = presetObj.assetCode;
-    if (!assetIssuer) assetIssuer = presetObj.assetIssuer;
-    if (!minXlmReserveRaw) minXlmReserveRaw = presetObj.minXlmReserve;
-    globalMetrics.recordPresetMetric(presetObj.id, presetObj.network);
-    logger.info('Applied network campaign preset', {
-      component: 'preset',
-      preset: presetObj.id,
-      network: presetObj.network,
-      horizonUrl,
-      assetCode,
-      assetIssuer,
-    });
-  } else {
-    if (!horizonUrl) horizonUrl = 'https://horizon.stellar.org';
-    if (!assetCode) assetCode = 'USDC';
-    if (!assetIssuer) assetIssuer = MAINNET_USDC_ISSUER;
-    if (!minXlmReserveRaw) minXlmReserveRaw = '1.5';
+  const fromEvent = payload.assignee?.login?.trim();
+  if (fromEvent) {
+    return fromEvent;
   }
 
-  // Fail-fast validation for incompatible network & asset settings (e.g. mainnet issuer on testnet Horizon)
-  validateNetworkAssetCompatibility(horizonUrl, assetCode, assetIssuer, presetKey || undefined);
+  const assignees = payload.issue?.assignees;
+  if (Array.isArray(assignees)) {
+    for (const entry of assignees) {
+      const login = entry?.login?.trim();
+      if (login) {
+        return login;
+      }
+    }
+  }
 
-  const stellarAddress = core.getInput('stellar_address_input').trim();
+  return undefined;
+}
+
+/**
+ * Resolve the Stellar G-address to validate: either from assignee_address_map
+ * (GitHub username → address roster) or from stellar_address_input.
+ */
+function resolveStellarAddressInput(
+  stellarAddressInput: string,
+  assigneeAddressMapRaw: string,
+): string {
+  const mapRaw = assigneeAddressMapRaw.trim();
+  if (mapRaw) {
+    const map = parseAssigneeAddressMap(mapRaw, {
+      workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
+    });
+    const assigneeLogin = resolveAssigneeLoginFromContext();
+    return resolveAddressFromAssigneeMap(map, assigneeLogin);
+  }
+
+  const direct = stellarAddressInput.trim();
+  if (direct) {
+    return direct;
+  }
+
+  throw new Error(
+    'Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
+      '(JSON / file path mapping GitHub usernames to G-addresses).',
+  );
+}
+
+async function run(): Promise<void> {
+  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
+  const assetCode = core.getInput('asset_code') || 'USDC';
+  const assetIssuer =
+    core.getInput('asset_issuer') ||
+    'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+  const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+  const stellarAddressInput = core.getInput('stellar_address_input');
+  const assigneeAddressMapRaw = core.getInput('assignee_address_map');
+  const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
   const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
     min: 1000,
     max: 60000,
   });
-  const stickyComment = parseBooleanInput(getInput('sticky_comment'), true);
-  const waitUntilFunded = parseBooleanInput(getInput('wait_until_funded'), false);
+  const stickyComment = parseBooleanInput(core.getInput('sticky_comment'), true);
+  const waitUntilFunded = parseBooleanInput(core.getInput('wait_until_funded'), false);
   const waitUntilFundedTimeoutMs = parseNumberInput(
-    getInput('wait_until_funded_timeout_ms'),
+    core.getInput('wait_until_funded_timeout_ms'),
     120000,
     { min: 0, max: 600000 },
   );
   const waitUntilFundedIntervalMs = parseNumberInput(
-    getInput('wait_until_funded_interval_ms'),
+    core.getInput('wait_until_funded_interval_ms'),
     5000,
     { min: 1000, max: 60000 },
   );
-  const secondaryHorizonUrl = core.getInput('secondary_horizon_url') || '';
-  const allowCrossNetworkFailover = parseBooleanInput(core.getInput('allow_cross_network_failover'), false);
-  const horizonUrlFallback = core.getInput('horizon_url_fallback') || secondaryHorizonUrl || '';
+  const horizonUrlFallback = core.getInput('horizon_url_fallback') || '';
   const rpcFallbackUrlRaw = core.getInput('rpc_fallback_url') || '';
   const fallbackUrls = rpcFallbackUrlRaw
     ? rpcFallbackUrlRaw.split(',').map((u) => u.trim()).filter(Boolean)
-    : secondaryHorizonUrl
-      ? [secondaryHorizonUrl]
-      : horizonUrlFallback
-        ? [horizonUrlFallback]
-        : [];
+    : horizonUrlFallback
+      ? [horizonUrlFallback]
+      : [];
   const horizonCacheTtlMs = parseNumberInput(core.getInput('horizon_cache_ttl_ms'), 60000, {
     min: 0,
     max: 3_600_000,
@@ -107,17 +137,16 @@ async function run(): Promise<void> {
     false,
   );
   const logInputs = parseBooleanInput(core.getInput('log_inputs'), false);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const trustbridgeConfigPath = core.getInput('trustbridge_config_path') || '.trustbridge.yml';
   const githubToken = core.getInput('github_token', { required: true });
   const autoWalletLabels = parseBooleanInput(core.getInput('auto_wallet_labels'), false);
 
   // SEP-0007 wallet deep links (Issue #44)
-  const sep0007DeepLinks = parseBooleanInput(getInput('sep0007_deep_links'), false);
-  const sep0007OriginDomain = getInput('sep0007_origin_domain') || '';
+  const sep0007DeepLinks = parseBooleanInput(core.getInput('sep0007_deep_links'), false);
+  const sep0007OriginDomain = core.getInput('sep0007_origin_domain') || '';
 
   // #145 — issues:write preflight
-  const preflightOnly = parseBooleanInput(getInput('preflight_only'), false);
+  const preflightOnly = parseBooleanInput(core.getInput('preflight_only'), false);
 
   // Multi-asset trustline validation (Issue #4)
   const assetsJsonRaw = core.getInput('assets_json') || '';
@@ -176,6 +205,26 @@ async function run(): Promise<void> {
     );
   }
 
+
+  // Effective values (config-file overrides can wire in later; default to action inputs)
+  const effectiveHorizonUrl = horizonUrl;
+  const effectiveHorizonUrlFallback = horizonUrlFallback;
+  const effectiveAssetCode = assetCode;
+  const effectiveAssetIssuer = assetIssuer;
+  const effectiveMinXlmReserveRaw = minXlmReserveRaw;
+  const effectiveRpcFallbackUrl = rpcFallbackUrlRaw;
+  const effectiveFailOnMissing = failOnMissing;
+  const resolvedAddress = stellarAddress;
+  const jobController = new AbortController();
+  const horizonMaxRequests = parseNumberInput(core.getInput('horizon_max_requests') || '100', 100, {
+    min: 1,
+    max: 10000,
+  });
+  const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms') || '30000', 30000, {
+    min: 0,
+    max: 600_000,
+  });
+
   logger.setDebugMode(debugMode);
   logger.debug('Action inputs loaded', {
     component: 'index',
@@ -203,6 +252,21 @@ async function run(): Promise<void> {
   const minXlmReserve = parseMinXlmReserve(minXlmReserveRaw);
   const minTrustlineLimitRaw = core.getInput('min_trustline_limit') || '';
   const minTrustlineLimit = minTrustlineLimitRaw ? parseNumberInput(minTrustlineLimitRaw, 0, { min: 0 }) : undefined;
+
+  // Optional multi-asset JSON — validate early so bad input fails fast.
+  if (assetsJsonRaw.trim()) {
+    parseAssetsJson(assetsJsonRaw);
+  }
+
+  // #145 — issues:write preflight (optional early exit)
+  const preflight = await runIssuesPreflight(githubToken);
+  if (preflight.skip) {
+    core.info(preflight.message);
+  }
+  if (preflightOnly) {
+    core.info('preflight_only=true — exiting after issues:write preflight.');
+    return;
+  }
 
   // SEP-0001 home domain check inputs (optional, off by default)
   const homeDomainCheckEnabled = parseBooleanInput(core.getInput('home_domain_check_enabled'), false);
@@ -235,6 +299,8 @@ async function run(): Promise<void> {
       waitUntilFundedIntervalMs,
       horizonCacheTtlMs,
       useCache,
+      horizonMaxRequests,
+      retryMaxDelayMs,
       allowCrossNetworkFallback,
       logInputs,
     });
@@ -261,7 +327,7 @@ async function run(): Promise<void> {
 
   const checkConfig: CheckConfig = {
     ...normalizedAsset,
-    minXlmReserve,
+    minXlmReserve: Number(minXlmReserve),
     minTrustlineLimit,
     horizonUrl,
     homeDomainCheckEnabled,
@@ -335,12 +401,12 @@ async function run(): Promise<void> {
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
-    secondaryHorizonUrl: secondaryHorizonUrl || undefined,
     fallbackUrls,
-    allowCrossNetworkFailover,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
     useCache,
     allowCrossNetworkFallback,
+    rateBudgetTracker,
+    horizonMaxRequests,
   };
 
   try {
@@ -364,26 +430,33 @@ async function run(): Promise<void> {
         )
       : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
     result = runAccountChecks(account, checkConfig);
-    if (presetObj) {
-      result.presetApplied = presetObj.id;
-    }
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
-      result = unfundedAccountResult(stellarAddress, checkConfig);
-      if (presetObj) result.presetApplied = presetObj.id;
+      // #144: attempt cross-network detection before building the result so
+      // the comment surfaces a clear mismatch error when the address is active
+      // on the opposite network. Fire-and-forget with a short timeout so a
+      // slow alt-network Horizon never blocks the primary run.
+      const mismatchHint = await detectNetworkMismatch(horizonUrl, stellarAddress).catch(
+        () => undefined,
+      );
+      if (mismatchHint) {
+        core.warning(
+          `Cross-network mismatch detected: address is active on ${mismatchHint.activeOnNetwork} ` +
+          `but horizon_url points at ${mismatchHint.configuredNetwork}.`,
+        );
+      }
+      result = unfundedAccountResult(stellarAddress, checkConfig, mismatchHint);
     } else if (error instanceof HorizonError) {
       core.error(error.message);
       globalMetrics.incrementCounter('errors');
       globalMetrics.recordMetric('horizon_error', error.statusCode, 'http_status');
       result = horizonFailureResult(error.message, checkConfig);
-      if (presetObj) result.presetApplied = presetObj.id;
     } else {
       const message = getErrorMessage(error);
       core.error(message);
       globalMetrics.incrementCounter('errors');
       result = horizonFailureResult(message, checkConfig);
-      if (presetObj) result.presetApplied = presetObj.id;
     }
   } finally {
     // Ensure the controller is not leaked if the function returns early.
@@ -405,6 +478,29 @@ async function run(): Promise<void> {
   }
 
   setValidationOutputs(result);
+
+  if (writeValidationJsonEnabled) {
+    writeValidationJson({
+      result,
+      stellarAddress: resolvedAddress,
+      assetCode: effectiveAssetCode,
+      assetIssuer: effectiveAssetIssuer,
+      horizonUrl: effectiveHorizonUrl,
+      outputPath: validationJsonPath,
+      privacyMode,
+    });
+    core.info(`Wrote validation JSON artifact to ${validationJsonPath}`);
+  }
+
+  // Reserved inputs kept for forward-compatible workflows / labels / Soroban.
+  logger.debug('Optional feature flags', {
+    component: 'index',
+    autoWalletLabels,
+    sorobanRpcUrl: sorobanRpcUrl || undefined,
+    contractId: contractId || undefined,
+    githubUsername: githubUsername || undefined,
+    trustbridgeConfigPath,
+  });
 
   const previousArtifact = loadPreviousValidationArtifact(previousValidationPath);
   const delta = computeValidationDelta(previousArtifact, result);
@@ -453,7 +549,7 @@ async function run(): Promise<void> {
 
   let commentUrl: string | undefined;
   try {
-    commentUrl = await postIssueComment(githubToken, commentBody, { 
+    commentUrl = await postIssueComment(githubToken, effectiveCommentBody, { 
       sticky: stickyComment,
       forceComment,
       snoozeWindowMs,
@@ -514,6 +610,8 @@ async function run(): Promise<void> {
 }
 
 // Skip auto-run under Jest so performance / integration tests can import `run`.
+export { run };
+
 if (process.env.JEST_WORKER_ID === undefined) {
   run().catch((error) => {
     core.setFailed(getErrorMessage(error));

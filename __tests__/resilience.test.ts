@@ -7,6 +7,8 @@
 
 import * as core from '@actions/core';
 import {
+  runCliCheck,
+  FetchFn,
   calculateBackoffDelay,
   addJitter,
   sleep,
@@ -599,6 +601,11 @@ import { fetchAccount, FetchAccountOptions } from '../src/horizon';
 const PRIMARY = 'https://horizon.stellar.org';
 const FALLBACK = 'https://horizon-alt.stellar.org';
 const TEST_ADDR = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+const baseOptions = {
+  address: TEST_ADDR,
+  horizonUrl: PRIMARY,
+  timeoutMs: 5000,
+};
 
 describe('HttpMockMatrix integration with fetchAccount', () => {
   it('success scenario returns a valid HorizonAccount', async () => {
@@ -651,9 +658,7 @@ describe('HttpMockMatrix integration with fetchAccount', () => {
   });
 
   it('fails over to secondary Horizon endpoint when primary returns 503', async () => {
-    let callIndex = 0;
     const fetch: FetchFn = async (url) => {
-      callIndex++;
       if (url.includes('horizon.stellar.org')) {
         return { status: 503 };
       }

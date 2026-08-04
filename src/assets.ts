@@ -190,3 +190,17 @@ export function dedupeAssets(assets: AssetConfigInput[]): AssetConfigInput[] {
     return true;
   });
 }
+
+export interface AssetClawbackStatus {
+  clawbackEnabled: boolean;
+}
+
+/**
+ * Read the per-trustline clawback flag from a Horizon credit balance entry.
+ * Absent / undefined is treated as clawback disabled.
+ */
+export function getAssetClawbackStatus(
+  balance: HorizonBalanceCredit | undefined,
+): AssetClawbackStatus {
+  return { clawbackEnabled: balance?.is_clawback_enabled === true };
+}

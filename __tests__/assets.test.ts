@@ -6,6 +6,8 @@ import {
   normalizeAssetConfig,
   TESTNET_USDC_ISSUER,
   validateNetworkAssetCompatibility,
+  parseAssetsJson,
+  dedupeAssets,
 } from '../src/assets';
 
 describe('asset config helpers', () => {
@@ -89,13 +91,15 @@ describe('parseAssetsJson', () => {
   });
 
   it('normalizes asset codes to uppercase', () => {
-    const result = parseAssetsJson('[{"code":" eurc ","issuer":"GCQTGZQQ5G4PTM2RNQRAXRJJEL5CQ5Z2OY5SUJRE763CPEKE6EJUMCU"}]');
+    const result = parseAssetsJson(
+      '[{"code":" eurc ","issuer":"GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"}]',
+    );
     expect(result[0].assetCode).toBe('EURC');
   });
 
   it('parses multiple assets', () => {
     const result = parseAssetsJson(
-      '[{"code":"USDC","issuer":"GAAA"},{"code":"EURC","issuer":"GBBB"}]',
+      '[{"code":"USDC","issuer":"GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"},{"code":"EURC","issuer":"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"}]',
     );
     expect(result).toHaveLength(2);
     expect(result[0].assetCode).toBe('USDC');

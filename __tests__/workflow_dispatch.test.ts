@@ -137,7 +137,7 @@ describe('extractStellarAddressFromText (Wave #28)', () => {
   });
 
   it('extracts first address when multiple are present', () => {
-    const second = 'G' + 'B'.repeat(55);
+    const second = 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H';
     const body = `Primary: ${FUNDED_ADDRESS}\nBackup: ${second}`;
     const result = extractStellarAddressFromText(body);
     expect(result.address).toBe(FUNDED_ADDRESS);
@@ -454,6 +454,15 @@ describe('Horizon failure modes during workflow_dispatch run (Wave #29)', () => 
 // ---------------------------------------------------------------------------
 
 describe('formatCommentBody snapshot — workflow_dispatch context (Wave #29)', () => {
+
+  beforeAll(() => {
+    jest.spyOn(Date, 'now').mockReturnValue(1_000_000_000_000);
+  });
+  afterAll(() => {
+    jest.restoreAllMocks();
+  });
+
+
   const baseConfig = {
     assetCode: 'USDC',
     assetIssuer: USDC_ISSUER,
@@ -558,7 +567,7 @@ describe('address extraction + workflow_dispatch integration (Wave #28 + #29)', 
   });
 
   it('handles issue body with multiple addresses — takes the first', () => {
-    const second = 'G' + 'C'.repeat(55);
+    const second = 'GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H';
     const issueBody = `Primary: ${FUNDED_ADDRESS}\nAlternate: ${second}`;
     const extraction = extractStellarAddressFromText(issueBody);
     expect(extraction.address).toBe(FUNDED_ADDRESS);

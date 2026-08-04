@@ -287,8 +287,6 @@ export function formatBatchSummaryMarkdown(
   // should use the JSON artifact for per-address detail and pass results
   // directly. This summary markdown uses the failures list.
 
-  const failSet = new Map(summary.failures.map((f) => [f.address, f.reason]));
-
   // Build rows from failures only (passed rows omitted for brevity)
   for (const { address, reason } of summary.failures) {
     const short = address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;

@@ -1,14 +1,104 @@
 import { HorizonAccount } from './horizon';
+import { StellarNetwork } from './links';
+import { UnauthorizedTrustlinePolicy } from './inputs';
 /** Stellar public network base reserve per ledger entry (XLM). */
 export declare const STELLAR_BASE_RESERVE_XLM = 0.5;
 /** Minimum balance required to activate a new account (XLM). */
 export declare const STELLAR_MIN_ACCOUNT_BALANCE_XLM = 1;
+/**
+ * SEP-0001 home domain check mode.
+ *
+ * - `"warn"`  (default) — a missing or mismatched home domain records a metrics tag and
+ *   adds an informational check row but does NOT set `valid = false`.
+ * - `"strict"` — a missing or mismatched home domain sets `valid = false` and blocks
+ *   payout automation, matching the behaviour of other hard checks.
+ */
+export type HomeDomainCheckMode = 'warn' | 'strict';
 export interface CheckConfig {
     assetCode: string;
     assetIssuer: string;
     minXlmReserve: number;
+    minTrustlineLimit?: number;
+    /** Optional minimum balance for the configured asset (Issue #112). */
+    minAssetBalance?: string | number;
     horizonUrl?: string;
+    /** How to treat a trustline that exists but is not yet authorized by the issuer. Default: "warn". */
+    unauthorizedTrustlinePolicy?: UnauthorizedTrustlinePolicy;
+    /** When true, a clawback-enabled trustline fails the check instead of only warning. Default: false. */
+    clawbackStrictMode?: boolean;
+    /**
+     * When true, TrustBridge fetches the issuer account from Horizon and
+     * inspects the `home_domain` field.  Off by default so existing USDC
+     * workflows are unaffected.
+     */
+    homeDomainCheckEnabled?: boolean;
+    /**
+     * The domain string that the issuer's on-chain `home_domain` must match
+     * exactly (case-insensitive).  When omitted the check only verifies that
+     * *some* home domain is set (non-empty).
+     *
+     * Example: `"centre.io"` for mainnet USDC.
+     */
+    expectedHomeDomain?: string;
+    /**
+     * Controls whether a home-domain failure blocks the overall `valid` flag.
+     * Defaults to `"warn"` so the check is informational unless explicitly
+     * tightened.
+     */
+    homeDomainCheckMode?: HomeDomainCheckMode;
+    /**
+     * When true, TrustBridge fetches the Horizon root endpoint before the
+     * account check and compares `history_latest_ledger_closed_at` against
+     * the current wall-clock time.  Off by default so existing workflows are
+     * unaffected.
+     */
+    checkLedgerFreshness?: boolean;
+    /**
+     * Maximum allowed lag in seconds between the latest ledger close time and
+     * the current wall clock before the freshness guard fires.
+     * Defaults to 60 s (≈ 5–6 Stellar ledger close cycles).
+     */
+    maxLedgerLagSeconds?: number;
+    /**
+     * When `true` a stale ledger response sets `valid = false` and (when
+     * `fail_on_missing` is also true) fails the workflow step.
+     * When `false` (default / "warn") the result is informational only —
+     * a warning row is added to the checks table and metrics are emitted but
+     * the overall `valid` flag is unaffected.
+     */
+    ledgerFreshnessFailOnStale?: boolean;
 }
+/**
+ * Hint passed in from the caller when a 404 is received to indicate that the
+ * same address was found active on a **different** network (e.g. the address
+ * exists on testnet but the workflow is pointed at mainnet Horizon, or vice
+ * versa).
+ *
+ * When present, unfunded/not-found error messages are augmented with a clear
+ * cross-network remediation so contributors understand they need to either
+ * fund on the correct network or switch `horizon_url`.
+ */
+export interface NetworkMismatchHint {
+    /** Network the configured Horizon URL resolves to. */
+    configuredNetwork: StellarNetwork;
+    /** Network on which the address *was* found active. */
+    activeOnNetwork: StellarNetwork;
+}
+/**
+ * Detect whether a Stellar address that returned 404 on the primary Horizon
+ * URL is actually active on the opposite network.
+ *
+ * Returns a `NetworkMismatchHint` when a mismatch is confirmed, or
+ * `undefined` when there is no evidence of a mismatch (either no cross-check
+ * was performed or the address is genuinely unfunded everywhere).
+ *
+ * @param configuredHorizonUrl  The `horizon_url` input value.
+ * @param stellarAddress        The 56-char G-address that returned 404.
+ * @param fetchFn               Optional injected fetch (for testing).
+ */
+export declare function detectNetworkMismatch(configuredHorizonUrl: string, stellarAddress: string, fetchFn?: (url: string, init?: RequestInit) => Promise<{
+    status: number;
+}>): Promise<NetworkMismatchHint | undefined>;
 export interface CheckResultItem {
     passed: boolean;
     label: string;
@@ -24,13 +114,106 @@ export interface ValidationResult {
     valid: boolean;
     accountFunded: boolean;
     trustlineExists: boolean;
+    /** Authorization state of the matched trustline, or undefined if not applicable (no trustline, or issuer field absent). */
+    trustlineAuthorized?: boolean;
+    /** Whether the matched trustline has clawback enabled, or undefined if not applicable. */
+    clawbackEnabled?: boolean;
     xlmBalance: string;
     xlmReserveMet: boolean;
+    /** Current balance of the configured asset (or `'0'` / `'unknown'` on error paths). */
+    assetBalance?: string;
+    /** True when `minAssetBalance` is unset/zero, or the asset balance meets the floor. */
+    assetBalanceMet?: boolean;
     trustlineLimit?: string;
     checks: CheckResultItem[];
     remediation?: string;
+    /** Machine-readable failure reason for gating / metrics. */
+    reasonCode?: string;
+    /** Precomputed failed check labels (stable snake_case codes). */
+    failedCheckLabels?: string[];
+    /** CAP-0033 sponsorship counts from the Horizon account snapshot. */
+    sponsorshipInfo?: SponsorshipInfo;
     /** Populated when the reserve was computed from a real account (not the unfunded/error paths). */
     reserveRequirement?: ReserveRequirement;
+    /**
+     * SEP-0001 home domain check result. Only populated when
+     * `config.homeDomainCheckEnabled` is true.
+     */
+    homeDomainCheck?: HomeDomainCheckResult;
+    /**
+     * Ledger freshness / lag check result. Only populated when
+     * `config.checkLedgerFreshness` is true.
+     */
+    ledgerFreshnessResult?: LedgerFreshnessCheckResult;
+}
+/**
+ * Outcome of a single SEP-0001 home domain alignment check against an
+ * issuer account returned by Horizon.
+ *
+ * Metric tags emitted:
+ *  - `home_domain_valid`   when `outcome === "valid"`
+ *  - `home_domain_missing` when `outcome === "missing"`
+ *  - `home_domain_mismatch` when `outcome === "mismatch"`
+ *  - `home_domain_skipped` when the check is disabled
+ */
+export type HomeDomainOutcome = 'valid' | 'missing' | 'mismatch' | 'skipped';
+export interface HomeDomainCheckResult {
+    /** Classified outcome. */
+    outcome: HomeDomainOutcome;
+    /**
+     * The actual `home_domain` value on the issuer account, or `undefined`
+     * when Horizon did not expose it.
+     */
+    actualHomeDomain?: string;
+    /**
+     * The domain that was required (from `config.expectedHomeDomain`).
+     * Undefined means "any non-empty value is acceptable".
+     */
+    expectedHomeDomain?: string;
+    /**
+     * Human-readable summary safe to embed in a Markdown comment.
+     * All dynamic values are escaped before being set here.
+     */
+    detail: string;
+    /**
+     * When the check mode is `"strict"` and the outcome is not `"valid"`,
+     * this flag is true to indicate the failure should block `valid`.
+     */
+    blocksValid: boolean;
+}
+/**
+ * Evaluate the issuer's SEP-0001 home domain alignment against the
+ * fetched Horizon account data.
+ *
+ * This is a **pure, synchronous** function — it only inspects the
+ * `home_domain` field already present on the `HorizonAccount` object.
+ * Full SEP-0001 HTTP stellar.toml fetching and signature verification
+ * are explicitly out of scope (see docs/SEP0001_HOME_DOMAIN.md).
+ *
+ * @param issuerAccount  The Horizon account for the asset issuer (not the
+ *                       recipient wallet). May be `null` when Horizon did
+ *                       not return the issuer account.
+ * @param config         The current `CheckConfig` (reads
+ *                       `expectedHomeDomain` and `homeDomainCheckMode`).
+ * @returns              A `HomeDomainCheckResult` describing the outcome.
+ */
+export declare function evaluateHomeDomain(issuerAccount: HorizonAccount | null, config: CheckConfig): HomeDomainCheckResult;
+/**
+ * Thin wrapper around `FreshnessCheckResult` from `freshness.ts` that adds
+ * the information needed by comment rendering and the checks table.
+ *
+ * - `status`          — 'ok' | 'stale' | 'unknown'
+ * - `lagSeconds`      — measured lag, or null when unavailable
+ * - `latestLedger`    — latest ledger sequence, or null
+ * - `message`         — human-readable detail line (safe for Markdown comment)
+ * - `blocksValid`     — true when `ledgerFreshnessFailOnStale=true` AND status='stale'
+ */
+export interface LedgerFreshnessCheckResult {
+    status: 'ok' | 'stale' | 'unknown';
+    lagSeconds: number | null;
+    latestLedger: number | null;
+    message: string;
+    blocksValid: boolean;
 }
 export declare function normalizeStellarAddress(address: string): string;
 /**
@@ -62,15 +245,26 @@ export interface AddressExtractionResult {
  */
 export declare function extractStellarAddressFromText(text: string | undefined | null): AddressExtractionResult;
 export declare function validateStellarAddress(address: string): void;
-export declare function parseMinXlmReserve(value: string): number;
+export declare function parseMinXlmReserve(value: string): string;
+export declare function parseMinAssetBalance(value: string): string | undefined;
 export declare function parseTrustlineLimit(value: string): number;
 export declare function estimateTrustlineSetupCost(): number;
-export declare function formatXlmDeficit(required: bigint, actual: bigint): string;
-export declare function formatAssetDeficit(required: bigint, actual: bigint): string;
+export declare function formatXlmDeficit(required: number, actual: number): string;
+export declare function formatAssetDeficit(required: number, actual: number): string;
 export declare function runAccountChecks(account: HorizonAccount, config: CheckConfig): ValidationResult;
-export declare function unfundedAccountResult(stellarAddress: string, config: CheckConfig): ValidationResult;
+export declare function unfundedAccountResult(stellarAddress: string, config: CheckConfig, mismatchHint?: NetworkMismatchHint): ValidationResult;
 export declare function getFailedCheckLabels(result: ValidationResult): string[];
 export declare function horizonFailureResult(message: string, config: CheckConfig): ValidationResult;
+/**
+ * Builds a result for a TLS/certificate verification failure connecting to
+ * the configured Horizon endpoint (see `HorizonTlsError`). Kept distinct
+ * from `horizonFailureResult` so the comment clearly attributes the
+ * failure to the endpoint's transport/certificate configuration rather
+ * than to the account or trustline being checked — this matters most for
+ * private/enterprise Horizon mirrors, where a bad or expired certificate
+ * is easy to misdiagnose as "the account isn't set up right."
+ */
+export declare function tlsFailureResult(message: string, config: CheckConfig): ValidationResult;
 /** Subset of `HorizonAccount` needed to compute the protocol-accurate minimum balance. */
 export interface SponsorAwareAccountFields {
     subentry_count: number;
@@ -106,6 +300,23 @@ export declare function computeProtocolMinReserve(account: SponsorAwareAccountFi
  * the bare protocol minimum.
  */
 export declare function buildReserveRequirement(configuredFloor: number, actual: number, account?: SponsorAwareAccountFields): ReserveRequirement;
+/** Per-asset trustline check result for multi-asset validation. */
+export interface AssetTrustlineResult {
+    assetCode: string;
+    assetIssuer: string;
+    trustlineExists: boolean;
+}
+/**
+ * Run trustline checks for multiple assets against an already-fetched account.
+ * Returns per-asset results and an aggregate `allTrustlinesExist` flag.
+ */
+export declare function runMultiAssetChecks(account: HorizonAccount, assets: Array<{
+    assetCode: string;
+    assetIssuer: string;
+}>): {
+    results: AssetTrustlineResult[];
+    allTrustlinesExist: boolean;
+};
 export interface ValidationGate {
     ready: boolean;
     totalChecks: number;
@@ -250,3 +461,10 @@ export interface ValidationReport {
     timestamp: string;
 }
 export declare function generateValidationReport(account: HorizonAccount, config: CheckConfig, additionalAssets?: MultiAssetConfig[]): ValidationReport;
+export interface AssetBalanceRequirement {
+    required: bigint;
+    actual: bigint;
+    missing: string;
+    met: boolean;
+}
+export declare function buildAssetBalanceRequirement(required: bigint, actual: bigint): AssetBalanceRequirement;

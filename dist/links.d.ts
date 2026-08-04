@@ -12,9 +12,88 @@
  * having to manually construct a Change Trust operation in Stellar Lab.
  *
  * Reference: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0007.md
+ *
+ * ## FAQ anchor deep links (Issue #104)
+ *
+ * Each failing check maps to a specific anchor in `docs/FAQ.md` so
+ * contributors land on the exact fix rather than a generic docs page.
+ * Use `buildFaqLink` to generate a durable link from a check name,
+ * or `getFaqAnchorForCheck` to resolve the anchor directly.
+ *
+ * The base URL defaults to this repository's `docs/FAQ.md` but can be
+ * overridden with the `docs_base_url` action input for forks or mirrors.
+ * Invalid overrides fall back to the default silently so comment posting
+ * is never blocked by a bad URL input.
  */
+/**
+ * The default base URL for the TrustBridge FAQ document.
+ * All anchor fragments are appended to this URL.
+ */
+export declare const DEFAULT_FAQ_BASE_URL = "https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/FAQ.md";
+/**
+ * Stable FAQ anchor names. Each corresponds to a heading in `docs/FAQ.md`
+ * with an explicit `{#anchor-name}` fragment.
+ *
+ * Keep this enum in sync with the headings in `docs/FAQ.md`. The CI test
+ * `__tests__/faq-anchors.test.ts` verifies every anchor name resolves to
+ * a heading in the doc.
+ */
+export declare const FAQ_ANCHORS: {
+    readonly ACCOUNT_NOT_FUNDED: "account-not-funded";
+    readonly TRUSTLINE_MISSING: "trustline-missing";
+    readonly XLM_RESERVE_TOO_LOW: "xlm-reserve-too-low";
+    readonly TESTING_ON_TESTNET: "testing-on-testnet";
+    readonly HORIZON_ERROR: "horizon-error";
+    readonly DEBUG_MODE: "debug-mode";
+    readonly WEBHOOK_NOT_RECEIVED: "webhook-not-received";
+};
+export type FaqAnchor = (typeof FAQ_ANCHORS)[keyof typeof FAQ_ANCHORS];
+/**
+ * Resolve the FAQ anchor most relevant to a check label.
+ *
+ * Returns `undefined` when no mapping is found so callers can omit the
+ * FAQ link gracefully.
+ *
+ * @param checkLabel  The human-readable check label from the `ValidationResult`.
+ */
+export declare function getFaqAnchorForCheck(checkLabel: string): FaqAnchor | undefined;
+/**
+ * Build a full FAQ deep link URL for a given anchor.
+ *
+ * @param anchor   A value from `FAQ_ANCHORS`.
+ * @param baseUrl  Optional override for the FAQ base URL (e.g. a fork's
+ *                 mirror). When the value is not a valid HTTPS URL, the
+ *                 default base URL is used silently so comment posting is
+ *                 never blocked by an invalid override.
+ */
+export declare function buildFaqLink(anchor: FaqAnchor, baseUrl?: string): string;
+/**
+ * Build a FAQ deep link for a check label, resolving the anchor automatically.
+ *
+ * Returns `undefined` when no FAQ anchor is mapped for the given label, so
+ * callers can skip rendering the link.
+ *
+ * @param checkLabel  The human-readable check label from the ValidationResult.
+ * @param baseUrl     Optional FAQ base URL override.
+ */
+export declare function buildFaqLinkForCheck(checkLabel: string, baseUrl?: string): string | undefined;
 export type StellarNetwork = 'public' | 'testnet';
 export declare function inferStellarNetwork(horizonUrl: string): StellarNetwork;
+/**
+ * Known Horizon presets and the network they belong to. Used by cross-network
+ * detection to identify which network an address was most recently active on.
+ */
+export declare const KNOWN_HORIZON_NETWORKS: Record<string, StellarNetwork>;
+/**
+ * Returns the "opposite" Stellar network (for cross-network mismatch error
+ * messages that suggest switching to the correct Horizon URL).
+ */
+export declare function oppositeNetwork(network: StellarNetwork): StellarNetwork;
+/**
+ * Returns the canonical Horizon base URL for a given network.
+ * Useful when suggesting "switch to the correct Horizon" in error messages.
+ */
+export declare function canonicalHorizonUrl(network: StellarNetwork): string;
 export declare function buildAccountViewerLink(stellarAddress: string, network: StellarNetwork): string;
 export declare function buildChangeTrustLink(network: StellarNetwork): string;
 export declare function buildLobstrLink(): string;

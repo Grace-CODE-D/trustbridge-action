@@ -1,7 +1,10 @@
 import { ValidationResult } from './checks';
 
 export function escapeMarkdownInline(value: string): string {
-  return value.replace(/([`*_{}[\]()#+.!|>~-])/g, '\\$1');
+  // Escape Markdown control characters that can break comment structure or
+  // enable link/emphasis injection. Dots and hyphens are left alone so domains
+  // and URLs remain readable inside and outside inline code spans.
+  return value.replace(/([`*_{}[\]()#+!|>~])/g, '\\$1');
 }
 
 export function inlineCode(value: string): string {
