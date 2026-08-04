@@ -183,8 +183,21 @@ async function run(): Promise<void> {
   const forceComment = parseBooleanInput(core.getInput('force_comment'), false);
   const snoozeWindowMs = snoozeWindowMinutes * 60 * 1000;
 
+  // Wave #30 — comment posting mode: post | dry-run | off
+  const VALID_COMMENT_MODES = new Set(['post', 'dry-run', 'off']);
+  const commentModeRaw = (core.getInput('comment_mode') || 'post').trim().toLowerCase();
+  if (!VALID_COMMENT_MODES.has(commentModeRaw)) {
+    throw new Error(
+      `Invalid comment_mode "${commentModeRaw}". Expected one of: post, dry-run, off.`,
+    );
+  }
+  const commentMode = commentModeRaw as 'post' | 'dry-run' | 'off';
+  const shouldPostComment = commentMode === 'post';
+
   // Signed dashboard webhook (Issue #101)
-  const webhookUrl = core.getInput('webhook_url') || '';
+  // dashboard_webhook_url is a Wave #38 / dry-run harness alias for webhook_url.
+  const webhookUrl =
+    core.getInput('webhook_url') || core.getInput('dashboard_webhook_url') || '';
   const webhookSecret = core.getInput('webhook_secret') || '';
   const webhookTimeoutMs = parseNumberInput(core.getInput('webhook_timeout_ms'), 5000, {
     min: 100,
@@ -216,10 +229,14 @@ async function run(): Promise<void> {
   const effectiveFailOnMissing = failOnMissing;
   const resolvedAddress = stellarAddress;
   const jobController = new AbortController();
-  const horizonMaxRequests = parseNumberInput(core.getInput('horizon_max_requests') || '100', 100, {
-    min: 1,
-    max: 10000,
-  });
+  const horizonMaxRequests = parseNumberInput(
+    core.getInput('horizon_max_requests') || '0',
+    0,
+    {
+      min: 0, // 0 = unlimited (matches action.yml)
+      max: 10000,
+    },
+  );
   const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms') || '30000', 30000, {
     min: 0,
     max: 600_000,
@@ -259,9 +276,12 @@ async function run(): Promise<void> {
   }
 
   // #145 — issues:write preflight (optional early exit)
-  const preflight = await runIssuesPreflight(githubToken);
-  if (preflight.skip) {
-    core.info(preflight.message);
+  // Skip when comment_mode won't post — dry-run/off don't need issues:write.
+  if (shouldPostComment) {
+    const preflight = await runIssuesPreflight(githubToken);
+    if (preflight.skip) {
+      core.info(preflight.message);
+    }
   }
   if (preflightOnly) {
     core.info('preflight_only=true — exiting after issues:write preflight.');
@@ -548,18 +568,24 @@ async function run(): Promise<void> {
   }
 
   let commentUrl: string | undefined;
-  try {
-    commentUrl = await postIssueComment(githubToken, effectiveCommentBody, { 
-      sticky: stickyComment,
-      forceComment,
-      snoozeWindowMs,
-    });
-    if (commentUrl) {
-      logger.info('Issue comment created', { component: 'index', commentUrl });
+  if (!shouldPostComment) {
+    core.info(
+      `comment_mode=${commentMode} — skipping issue comment post (outputs still set).`,
+    );
+  } else {
+    try {
+      commentUrl = await postIssueComment(githubToken, effectiveCommentBody, {
+        sticky: stickyComment,
+        forceComment,
+        snoozeWindowMs,
+      });
+      if (commentUrl) {
+        logger.info('Issue comment created', { component: 'index', commentUrl });
+      }
+    } catch (commentError) {
+      const message = commentError instanceof Error ? commentError.message : String(commentError);
+      core.warning(`Failed to post issue comment (non-fatal): ${message}`);
     }
-  } catch (commentError) {
-    const message = commentError instanceof Error ? commentError.message : String(commentError);
-    core.warning(`Failed to post issue comment (non-fatal): ${message}`);
   }
 
   setValidationOutputs(result, commentUrl, fullReportPath);
