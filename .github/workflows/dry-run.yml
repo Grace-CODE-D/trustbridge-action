@@ -48,6 +48,7 @@ jobs:
         id: trustbridge
         uses: ./
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           stellar_address_input: ${{ matrix.test-case.address }}
           horizon_url: ${{ matrix.test-case.horizon }}
           asset_code: ${{ matrix.test-case.asset_code }}
@@ -121,6 +122,7 @@ jobs:
         id: trustbridge_webhook
         uses: ./
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           stellar_address_input: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
           horizon_url: "https://horizon.stellar.org"
           asset_code: "USDC"
