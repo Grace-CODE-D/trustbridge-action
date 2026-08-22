@@ -684,3 +684,226 @@ export async function postIssueComment(
   core.info(`Posted TrustBridge comment on issue #${issueNumber}.`);
   return response.data.html_url;
 }
+
+// ---------------------------------------------------------------------------
+// GitHub Discussions comment path (Issue #221)
+//
+// Discussion events carry a GraphQL node id (e.g. "DIC_...") instead of an
+// issue number. The REST issues API 404s on a discussion node id — or, worse,
+// comments on the wrong issue when the id happens to be numeric. TrustBridge
+// therefore posts discussion comments exclusively through the GraphQL
+// `addDiscussionComment` / `updateDiscussionComment` mutations and never falls
+// back to the REST issues API for discussion events.
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the GitHub Discussion node id from an event payload, if present.
+ *
+ * Discussion webhook events (`discussion`, `discussion_comment`) embed the
+ * discussion under `payload.discussion.node_id`. Returns `undefined` for
+ * non-discussion events so callers can route between the issue (REST) and
+ * discussion (GraphQL) comment paths.
+ *
+ * @internal Exported for testing.
+ */
+export function resolveDiscussionNodeId(payload: unknown): string | undefined {
+  if (payload && typeof payload === 'object') {
+    const discussion = (payload as { discussion?: { node_id?: unknown } }).discussion;
+    const nodeId = discussion?.node_id;
+    if (typeof nodeId === 'string' && nodeId.trim()) {
+      return nodeId.trim();
+    }
+  }
+  return undefined;
+}
+
+export interface UpsertDiscussionCommentOptions extends UpsertCommentOptions {
+  /**
+   * Explicit discussion node id (e.g. "DIC_kw..."). When omitted, the id is
+   * resolved from `github.context.payload.discussion.node_id`.
+   */
+  discussionId?: string;
+}
+
+interface DiscussionCommentNode {
+  id: string;
+  body: string;
+}
+
+interface DiscussionCommentsPage {
+  node: {
+    comments: {
+      nodes: DiscussionCommentNode[];
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
+  } | null;
+}
+
+interface DiscussionCommentMutationResult {
+  updateDiscussionComment?: { comment: { url: string } };
+  addDiscussionComment?: { comment: { url: string } };
+}
+
+/**
+ * Find TrustBridge's previous sticky comment on a discussion, if any.
+ *
+ * Paginates through every discussion comment (100 per page) so the marker is
+ * found even on high-traffic threads — same semantics as `findStickyComment`
+ * for issues. Matches on the current versioned marker, the legacy marker, and
+ * the action footer so comments posted by older releases are still eligible
+ * for upsert.
+ */
+export async function findStickyDiscussionComment(
+  octokit: Octokit,
+  discussionId: string,
+): Promise<DiscussionCommentNode | undefined> {
+  const query = `
+    query FindTrustBridgeDiscussionComment($discussionId: ID!, $cursor: String) {
+      node(id: $discussionId) {
+        ... on Discussion {
+          comments(first: 100, after: $cursor) {
+            nodes {
+              id
+              body
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  let cursor: string | null = null;
+  let lastMatch: DiscussionCommentNode | undefined;
+
+  do {
+    const data = (await octokit.graphql(
+      query,
+      { discussionId, cursor },
+    )) as DiscussionCommentsPage;
+
+    const comments = data?.node?.comments;
+    if (!comments) {
+      // Discussion was deleted or the token cannot read it — stop paginating.
+      break;
+    }
+
+    for (const comment of comments.nodes) {
+      if (isTrustBridgeComment(comment.body)) {
+        // Use the last matching comment so that if multiple TrustBridge
+        // comments exist (e.g. sticky was toggled off then on), we upsert
+        // the most recent one.
+        lastMatch = comment;
+      }
+    }
+
+    if (!comments.pageInfo.hasNextPage) {
+      break;
+    }
+    cursor = comments.pageInfo.endCursor;
+  } while (cursor);
+
+  return lastMatch;
+}
+
+/**
+ * Post (or sticky-upsert) a TrustBridge comment on a GitHub Discussion via
+ * the GraphQL API.
+ *
+ * Discussion events have a node id, not an issue number, so this path never
+ * touches the REST issues API. When `sticky` is enabled the previous
+ * TrustBridge comment on the discussion is updated in place via
+ * `updateDiscussionComment`; otherwise a new comment is created via
+ * `addDiscussionComment`.
+ *
+ * Requires `discussions: write` permission on the workflow token (documented
+ * in docs/USAGE.md). A missing permission surfaces as a GraphQL mutation
+ * error, which the caller is expected to catch and downgrade to a warning —
+ * comment posting must never fail the run.
+ *
+ * @returns The URL of the created/updated discussion comment, or `undefined`
+ *          when there is no discussion context in the event payload.
+ */
+export async function postDiscussionComment(
+  token: string,
+  body: string,
+  options: UpsertDiscussionCommentOptions = {},
+): Promise<string | undefined> {
+  const sticky = options.sticky ?? true;
+  const forceComment = options.forceComment ?? false;
+  const snoozeWindowMs = options.snoozeWindowMs ?? 0;
+  const context = github.context;
+  const discussionId =
+    options.discussionId ?? resolveDiscussionNodeId(context.payload);
+
+  if (!discussionId) {
+    core.warning(
+      'No discussion context found — skipping comment. Run this action on a `discussion` event (the payload must include discussion.node_id).',
+    );
+    return undefined;
+  }
+
+  const octokit = github.getOctokit(token, { baseUrl: context.apiUrl });
+
+  let existingComment: DiscussionCommentNode | undefined;
+  if (sticky) {
+    try {
+      existingComment = await findStickyDiscussionComment(octokit, discussionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      core.warning(
+        `Could not look up existing TrustBridge discussion comment, falling back to a new comment: ${message}`,
+      );
+    }
+  }
+
+  // Check snooze state (Issue #155) — mirrors the issue-comment path.
+  if (existingComment && snoozeWindowMs > 0 && !forceComment) {
+    const lastMarker = parseSnoozeMarker(existingComment.body);
+    const currentPassed = body.includes('<!-- trustbridge-action:snooze:status=pass');
+    const snoozeState = evaluateSnoozeState(currentPassed, lastMarker, snoozeWindowMs);
+
+    if (snoozeState.isSnoozed) {
+      core.info(
+        `Snooze window active (${Math.round((snoozeState.elapsedMs ?? 0) / 1000)}s elapsed). Suppressing discussion comment update. Outputs remain updated.`,
+      );
+      return undefined;
+    }
+  }
+
+  if (existingComment) {
+    try {
+      const data = (await octokit.graphql(
+        `mutation UpdateTrustBridgeDiscussionComment($commentId: ID!, $body: String!) {
+          updateDiscussionComment(input: { commentId: $commentId, body: $body }) {
+            comment { id url }
+          }
+        }`,
+        { commentId: existingComment.id, body },
+      )) as DiscussionCommentMutationResult;
+      const url = data.updateDiscussionComment?.comment.url;
+      core.info(`Updated existing TrustBridge comment on discussion ${discussionId}.`);
+      return url;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      core.warning(
+        `Could not update existing TrustBridge discussion comment (id=${existingComment.id}), falling back to a new comment: ${message}`,
+      );
+    }
+  }
+
+  const data = (await octokit.graphql(
+    `mutation AddTrustBridgeDiscussionComment($discussionId: ID!, $body: String!) {
+      addDiscussionComment(input: { discussionId: $discussionId, body: $body }) {
+        comment { id url }
+      }
+    }`,
+    { discussionId, body },
+  )) as DiscussionCommentMutationResult;
+
+  core.info(`Posted TrustBridge comment on discussion ${discussionId}.`);
+  return data.addDiscussionComment?.comment.url;
+}

@@ -12,6 +12,9 @@ import {
   formatCommentBody,
   isTrustBridgeComment,
   postIssueComment,
+  resolveDiscussionNodeId,
+  findStickyDiscussionComment,
+  postDiscussionComment,
   buildTruncatedCommentBody,
   writeFullReport,
 } from '../src/comment';
@@ -247,6 +250,7 @@ describe('formatCommentBody', () => {
 function makeOctokit(overrides: Record<string, jest.Mock> = {}) {
   return {
     paginate: jest.fn(),
+    graphql: jest.fn(),
     rest: {
       issues: {
         listComments: jest.fn(),
@@ -388,6 +392,274 @@ describe('postIssueComment', () => {
     expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-3');
     expect(octokit.rest.issues.createComment).toHaveBeenCalled();
     expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GitHub Discussions comment path (Issue #221)
+// ---------------------------------------------------------------------------
+
+describe('resolveDiscussionNodeId', () => {
+  it('extracts the node id from a discussion event payload', () => {
+    expect(
+      resolveDiscussionNodeId({ discussion: { node_id: 'DIC_kwDOABCD' } }),
+    ).toBe('DIC_kwDOABCD');
+  });
+
+  it('returns undefined for payloads without a discussion', () => {
+    expect(resolveDiscussionNodeId({})).toBeUndefined();
+    expect(resolveDiscussionNodeId({ issue: { number: 7 } })).toBeUndefined();
+    expect(resolveDiscussionNodeId(null)).toBeUndefined();
+    expect(resolveDiscussionNodeId('not-an-object')).toBeUndefined();
+  });
+
+  it('returns undefined for empty or non-string node ids', () => {
+    expect(resolveDiscussionNodeId({ discussion: { node_id: '' } })).toBeUndefined();
+    expect(resolveDiscussionNodeId({ discussion: { node_id: 123 } })).toBeUndefined();
+    expect(resolveDiscussionNodeId({ discussion: {} })).toBeUndefined();
+  });
+});
+
+describe('findStickyDiscussionComment', () => {
+  function discussionGraphqlResponse(
+    nodes: Array<{ id: string; body: string }>,
+    pageInfo: { hasNextPage: boolean; endCursor: string | null },
+  ) {
+    return {
+      node: {
+        comments: { nodes, pageInfo },
+      },
+    };
+  }
+
+  it('returns the last TrustBridge comment across pages (pagination)', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql
+      .mockResolvedValueOnce(
+        discussionGraphqlResponse(
+          [
+            { id: 'DC_1', body: 'unrelated' },
+            { id: 'DC_2', body: `${STICKY_COMMENT_MARKER}\nfirst` },
+          ],
+          { hasNextPage: true, endCursor: 'cursor-1' },
+        ),
+      )
+      .mockResolvedValueOnce(
+        discussionGraphqlResponse(
+          [
+            { id: 'DC_3', body: 'another unrelated' },
+            { id: 'DC_4', body: `${STICKY_COMMENT_MARKER}\nsecond` },
+          ],
+          { hasNextPage: false, endCursor: null },
+        ),
+      );
+
+    const result = await findStickyDiscussionComment(
+      octokit as unknown as Parameters<typeof findStickyDiscussionComment>[0],
+      'DIC_kwDOABCD',
+    );
+
+    expect(result).toEqual({ id: 'DC_4', body: `${STICKY_COMMENT_MARKER}\nsecond` });
+    expect(octokit.graphql).toHaveBeenCalledTimes(2);
+    expect(octokit.graphql).toHaveBeenNthCalledWith(
+      1,
+      expect.any(String),
+      expect.objectContaining({ discussionId: 'DIC_kwDOABCD', cursor: null }),
+    );
+    expect(octokit.graphql).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({ cursor: 'cursor-1' }),
+    );
+  });
+
+  it('returns undefined when no comment carries the marker', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql.mockResolvedValue(
+      discussionGraphqlResponse(
+        [{ id: 'DC_1', body: 'unrelated' }],
+        { hasNextPage: false, endCursor: null },
+      ),
+    );
+
+    const result = await findStickyDiscussionComment(
+      octokit as unknown as Parameters<typeof findStickyDiscussionComment>[0],
+      'DIC_kwDOABCD',
+    );
+
+    expect(result).toBeUndefined();
+  });
+
+  it('stops paginating when the discussion node is null (deleted/inaccessible)', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql.mockResolvedValue({ node: null });
+
+    const result = await findStickyDiscussionComment(
+      octokit as unknown as Parameters<typeof findStickyDiscussionComment>[0],
+      'DIC_kwDOABCD',
+    );
+
+    expect(result).toBeUndefined();
+    expect(octokit.graphql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('postDiscussionComment', () => {
+  const mockedGithub = github as unknown as {
+    context: {
+      payload: { discussion?: { node_id?: string }; issue?: { number: number } };
+      repo: { owner: string; repo: string };
+      apiUrl: string;
+    };
+    getOctokit: jest.Mock;
+  };
+
+  const DISCUSSION_NODE_ID = 'DIC_kwDOABCD';
+
+  beforeEach(() => {
+    mockedGithub.context.payload = { discussion: { node_id: DISCUSSION_NODE_ID } };
+    mockedGithub.context.apiUrl = 'https://api.github.com';
+  });
+
+  it('returns undefined and warns when there is no discussion context', async () => {
+    mockedGithub.context.payload = {};
+    const octokit = makeOctokit();
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const result = await postDiscussionComment('token', 'body');
+
+    expect(result).toBeUndefined();
+    expect(octokit.graphql).not.toHaveBeenCalled();
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
+  it('creates a new discussion comment via GraphQL when no prior TrustBridge comment exists', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql
+      .mockResolvedValueOnce({ node: { comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } })
+      .mockResolvedValueOnce({
+        addDiscussionComment: {
+          comment: { url: 'https://github.com/o/r/discussions/12#discussioncomment-100' },
+        },
+      });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postDiscussionComment('token', 'new body', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/discussions/12#discussioncomment-100');
+    expect(octokit.graphql).toHaveBeenCalledTimes(2);
+    const createCall = octokit.graphql.mock.calls[1];
+    expect(createCall[1]).toEqual(
+      expect.objectContaining({ discussionId: DISCUSSION_NODE_ID, body: 'new body' }),
+    );
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(mockedGithub.getOctokit).toHaveBeenCalledWith('token', {
+      baseUrl: 'https://api.github.com',
+    });
+  });
+
+  it('updates the existing sticky discussion comment via GraphQL instead of creating a new one', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql
+      .mockResolvedValueOnce({
+        node: {
+          comments: {
+            nodes: [{ id: 'DC_99', body: `${STICKY_COMMENT_MARKER}\nold result` }],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        updateDiscussionComment: {
+          comment: { url: 'https://github.com/o/r/discussions/12#discussioncomment-99' },
+        },
+      });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postDiscussionComment('token', 'updated body', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/discussions/12#discussioncomment-99');
+    expect(octokit.graphql).toHaveBeenCalledTimes(2);
+    const updateCall = octokit.graphql.mock.calls[1];
+    expect(updateCall[1]).toEqual(
+      expect.objectContaining({ commentId: 'DC_99', body: 'updated body' }),
+    );
+  });
+
+  it('always creates a new comment when sticky is disabled', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql.mockResolvedValueOnce({
+      addDiscussionComment: {
+        comment: { url: 'https://github.com/o/r/discussions/12#discussioncomment-101' },
+      },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postDiscussionComment('token', 'body', { sticky: false });
+
+    expect(url).toBe('https://github.com/o/r/discussions/12#discussioncomment-101');
+    expect(octokit.graphql).toHaveBeenCalledTimes(1);
+    expect(octokit.graphql).toHaveBeenCalledWith(
+      expect.stringContaining('addDiscussionComment'),
+      expect.objectContaining({ discussionId: DISCUSSION_NODE_ID }),
+    );
+  });
+
+  it('falls back to creating a new comment when the sticky lookup fails', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql
+      .mockRejectedValueOnce(new Error('GraphQL rate limit exceeded'))
+      .mockResolvedValueOnce({
+        addDiscussionComment: {
+          comment: { url: 'https://github.com/o/r/discussions/12#discussioncomment-102' },
+        },
+      });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postDiscussionComment('token', 'body', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/discussions/12#discussioncomment-102');
+    expect(octokit.graphql).toHaveBeenCalledTimes(2);
+  });
+
+  it('honours an explicit discussionId option over the event payload', async () => {
+    mockedGithub.context.payload = { discussion: { node_id: 'DIC_FROM_EVENT' } };
+    const octokit = makeOctokit();
+    octokit.graphql.mockResolvedValueOnce({
+      addDiscussionComment: {
+        comment: { url: 'https://github.com/o/r/discussions/12#discussioncomment-103' },
+      },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postDiscussionComment('token', 'body', {
+      sticky: false,
+      discussionId: 'DIC_EXPLICIT',
+    });
+
+    expect(url).toBe('https://github.com/o/r/discussions/12#discussioncomment-103');
+    expect(octokit.graphql).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ discussionId: 'DIC_EXPLICIT' }),
+    );
+  });
+
+  it('never calls the REST issues API when posting a discussion comment', async () => {
+    const octokit = makeOctokit();
+    octokit.graphql
+      .mockResolvedValueOnce({ node: { comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } })
+      .mockResolvedValueOnce({
+        addDiscussionComment: {
+          comment: { url: 'https://github.com/o/r/discussions/12#discussioncomment-104' },
+        },
+      });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    await postDiscussionComment('token', 'body', { sticky: true });
+
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    expect(octokit.rest.issues.listComments).not.toHaveBeenCalled();
   });
 });
 
