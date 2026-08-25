@@ -35,6 +35,9 @@ import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
+import { registerCorePlugins } from './corePlugins';
+import { loadPluginsFromAllowlist } from './pluginLoader';
+import { defaultRegistry } from './plugin';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -172,6 +175,13 @@ async function run(): Promise<void> {
   const previousValidationPath = core.getInput('previous_validation_path') || '';
   const privacyMode = parseBooleanInput(core.getInput('privacy_mode'), false);
 
+  // External plugins from workspace (allowlisted only)
+  const trustbridgePluginsPathRaw = core.getInput('trustbridge_plugins_path') || '';
+  const allowedPluginPaths = trustbridgePluginsPathRaw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+
   // Internationalization (Issue #59)
   const localeInput = core.getInput('locale') || 'en';
   const locale = parseLocaleInput(localeInput);
@@ -212,6 +222,30 @@ async function run(): Promise<void> {
   clearSpans();
 
   globalMetrics.stopTimer('input_parse');
+
+  // Register core plugins and load external plugins from allowlist
+  registerCorePlugins();
+
+  if (allowedPluginPaths.length > 0) {
+    try {
+      const externalPlugins = await loadPluginsFromAllowlist({
+        workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
+        allowedPluginPaths,
+        debugMode,
+      });
+
+      for (const plugin of externalPlugins) {
+        defaultRegistry.register(plugin);
+      }
+
+      if (externalPlugins.length > 0) {
+        core.info(`Loaded ${externalPlugins.length} external plugin(s)`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      core.warning(`Failed to load external plugins (proceeding with core plugins only): ${message}`);
+    }
+  }
 
   // Never weaken TLS verification by default (Issue #71). TrustBridge does
   // not set NODE_TLS_REJECT_UNAUTHORIZED itself; if something else in the

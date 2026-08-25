@@ -328,6 +328,16 @@ inputs:
       workflow workspace. Default "validation.json".
     required: false
     default: 'validation.json'
+  trustbridge_plugins_path:
+    description: >-
+      Comma-separated list of workspace-relative paths to external CheckPlugin
+      modules to load and register (e.g. "plugins/kyc.ts,plugins/custom-check.ts").
+      Plugins are loaded from the workspace only and must be allowlisted here.
+      Each path is validated against path-traversal attacks. Default empty (no
+      external plugins). When a plugin fails to load, a warning is logged and
+      the run continues (fail-open).
+    required: false
+    default: ''
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
