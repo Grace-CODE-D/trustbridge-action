@@ -370,6 +370,15 @@ export class MetricsCollector {
   }
 
   /**
+   * Get a single timer value by name (e.g., 'input_parse' → milliseconds).
+   * Returns 0 if timer was never started or stopped.
+   */
+  getTimerValue(name: string): number {
+    const point = this.metrics.find((m) => m.name === `${name}_duration`);
+    return point ? point.value : 0;
+  }
+
+  /**
    * Get a summary of all recorded metrics.
    */
   getSummary(): {

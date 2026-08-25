@@ -314,6 +314,20 @@ inputs:
       (blocks valid).
     required: false
     default: 'warn'
+  write_validation_json:
+    description: >-
+      When true, write the validation result to validation_json_path as a
+      machine-readable JSON artifact. Includes all check results, account
+      state, and metadata. Default false.
+    required: false
+    default: 'false'
+  validation_json_path:
+    description: >-
+      File path where the validation result JSON is written when
+      write_validation_json is true. Relative paths are resolved from the
+      workflow workspace. Default "validation.json".
+    required: false
+    default: 'validation.json'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────

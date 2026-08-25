@@ -93,6 +93,10 @@ function resolveStellarAddressInput(
 }
 
 async function run(): Promise<void> {
+  // Start total action timer
+  globalMetrics.startTimer('total');
+  globalMetrics.startTimer('input_parse');
+
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
@@ -206,6 +210,8 @@ async function run(): Promise<void> {
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
+
+  globalMetrics.stopTimer('input_parse');
 
   // Never weaken TLS verification by default (Issue #71). TrustBridge does
   // not set NODE_TLS_REJECT_UNAUTHORIZED itself; if something else in the
@@ -418,6 +424,8 @@ async function run(): Promise<void> {
   
   const rateBudgetTracker = new RateBudgetTracker(horizonMaxRequests);
 
+  globalMetrics.startTimer('horizon_fetch');
+
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
@@ -449,7 +457,10 @@ async function run(): Promise<void> {
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
       : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
+    globalMetrics.stopTimer('horizon_fetch');
+    globalMetrics.startTimer('checks');
     result = runAccountChecks(account, checkConfig);
+    globalMetrics.stopTimer('checks');
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
@@ -497,7 +508,21 @@ async function run(): Promise<void> {
     }
   }
 
-  setValidationOutputs(result);
+  // Collect timing metrics from globalMetrics
+  const timings = {
+    input_parse_ms: globalMetrics.getTimerValue('input_parse'),
+    horizon_fetch_ms: globalMetrics.getTimerValue('horizon_fetch'),
+    checks_ms: globalMetrics.getTimerValue('checks'),
+    comment_post_ms: globalMetrics.getTimerValue('comment_post'),
+    total_ms: globalMetrics.getTimerValue('total'),
+  };
+
+  setValidationOutputs(result, undefined, undefined, {
+    horizonUrl: effectiveHorizonUrl,
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+    timings,
+  });
 
   if (writeValidationJsonEnabled) {
     writeValidationJson({
@@ -573,22 +598,30 @@ async function run(): Promise<void> {
       `comment_mode=${commentMode} — skipping issue comment post (outputs still set).`,
     );
   } else {
+    globalMetrics.startTimer('comment_post');
     try {
       commentUrl = await postIssueComment(githubToken, effectiveCommentBody, {
         sticky: stickyComment,
         forceComment,
         snoozeWindowMs,
       });
+      globalMetrics.stopTimer('comment_post');
       if (commentUrl) {
         logger.info('Issue comment created', { component: 'index', commentUrl });
       }
     } catch (commentError) {
+      globalMetrics.stopTimer('comment_post');
       const message = commentError instanceof Error ? commentError.message : String(commentError);
       core.warning(`Failed to post issue comment (non-fatal): ${message}`);
     }
   }
 
-  setValidationOutputs(result, commentUrl, fullReportPath);
+  setValidationOutputs(result, commentUrl, fullReportPath, {
+    horizonUrl: effectiveHorizonUrl,
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+    timings,
+  });
 
   // Signed dashboard webhook notification (Issue #101)
   // Fires after comment posting; failures are isolated and never block the run.
@@ -615,6 +648,9 @@ async function run(): Promise<void> {
       core.debug(JSON.stringify(spans, null, 2));
     }
   }
+
+  // Stop total timer and collect timing metrics
+  globalMetrics.stopTimer('total');
 
   // Wave #27: write Job Summary with latency, failure codes, JSON artifact
   await writeJobSummary(globalMetrics.buildJobSummary());
