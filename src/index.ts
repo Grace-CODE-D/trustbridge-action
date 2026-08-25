@@ -35,6 +35,7 @@ import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
+import { createCheckRun } from './checks-run';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -294,6 +295,9 @@ async function run(): Promise<void> {
   const homeDomainCheckModeRaw = core.getInput('home_domain_check_mode').trim().toLowerCase();
   const homeDomainCheckMode: HomeDomainCheckMode =
     homeDomainCheckModeRaw === 'strict' ? 'strict' : 'warn';
+
+  // GitHub Checks API integration (Wave #26 — optional, off by default)
+  const useCheckRuns = parseBooleanInput(core.getInput('use_check_runs'), false);
 
   // Ledger freshness / lag guard inputs (Issue #107 — optional, off by default)
   const checkLedgerFreshnessEnabled = parseBooleanInput(core.getInput('check_ledger_freshness'), false);
@@ -589,6 +593,19 @@ async function run(): Promise<void> {
   }
 
   setValidationOutputs(result, commentUrl, fullReportPath);
+
+  // GitHub Checks API: create a Check Run with individual checks as annotations (Wave #26)
+  // Fires after comment posting; failures are isolated and never block the run.
+  if (useCheckRuns) {
+    const checkRunResult = await createCheckRun(result, githubToken, {
+      stellarAddress: resolvedAddress,
+    });
+    if (checkRunResult.success) {
+      core.info(checkRunResult.message);
+    } else {
+      core.warning(checkRunResult.message);
+    }
+  }
 
   // Signed dashboard webhook notification (Issue #101)
   // Fires after comment posting; failures are isolated and never block the run.
