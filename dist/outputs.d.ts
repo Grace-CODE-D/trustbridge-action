@@ -12,6 +12,7 @@ export interface ActionOutputExtras {
     assetCode?: string;
     assetIssuer?: string;
     timings?: ActionTimings;
+    validatedAt?: string;
 }
 export interface ActionOutputs {
     trustline_exists: string;
@@ -20,6 +21,7 @@ export interface ActionOutputs {
     comment_url: string;
     full_report_path: string;
     ready: string;
+    validated_at: string;
     reason_code: string;
     horizon_url: string;
     asset_code: string;

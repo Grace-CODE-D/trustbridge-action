@@ -15,13 +15,19 @@ import {
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { checkLedgerFreshness } from './freshness';
-import { formatCommentBody, postIssueComment, postDiscussionComment, resolveDiscussionNodeId, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
-import { normalizeAssetConfig, parseAssetsJson } from './assets';
+import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
+import {
+  normalizeAssetConfig,
+  parseAssetsJson,
+  getCampaignPreset,
+  validateNetworkAssetCompatibility,
+} from './assets';
 import {
   getErrorMessage,
   parseAssigneeAddressMap,
   parseBooleanInput,
   parseNumberInput,
+  parsePresetInput,
   resolveAddressFromAssigneeMap,
 } from './inputs';
 import { formatFailureSummary } from './summary';
@@ -37,12 +43,7 @@ import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
-import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
-import { lookupAddressFromContract, ContractLookupError } from './soroban';
-import { buildSarifOutput, serializeSarif, validateSarifSchema } from './sarif';
-import { runPlugins } from './pluginRunner';
-import { corePlugins } from './corePlugins';
-import { PluginRegistry, CheckPluginContext } from './plugin';
+import { DiagnosticsConfig } from './diagnostics';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -101,16 +102,26 @@ function resolveStellarAddressInput(
 }
 
 async function run(): Promise<void> {
-  // Start total action timer
-  globalMetrics.startTimer('total');
-  globalMetrics.startTimer('input_parse');
+  // Campaign presets (Issue #207) — resolved first so they can provide defaults.
+  const networkInput = core.getInput('network') || '';
+  const presetInput = core.getInput('preset') || '';
+  const presetName = parsePresetInput(networkInput, presetInput);
+  const campaignPreset = presetName ? getCampaignPreset(presetName) : undefined;
+  if (presetName && !campaignPreset) {
+    throw new Error(
+      `Unknown campaign preset "${presetName}". Valid presets: testnet, testnet-usdc, public, mainnet.`,
+    );
+  }
 
-  const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
-  const assetCode = core.getInput('asset_code') || 'USDC';
+  const horizonUrl =
+    core.getInput('horizon_url') || campaignPreset?.horizonUrl || 'https://horizon.stellar.org';
+  const assetCode = core.getInput('asset_code') || campaignPreset?.assetCode || 'USDC';
   const assetIssuer =
     core.getInput('asset_issuer') ||
+    campaignPreset?.assetIssuer ||
     'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
-  const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+  const minXlmReserveRaw =
+    core.getInput('min_xlm_reserve') || campaignPreset?.minXlmReserve || '1.5';
   const stellarAddressInput = core.getInput('stellar_address_input');
   const assigneeAddressMapRaw = core.getInput('assignee_address_map');
   const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
@@ -436,6 +447,15 @@ async function run(): Promise<void> {
 
   const normalizedAsset = normalizeAssetConfig({ assetCode, assetIssuer });
 
+  // Validate network/asset compatibility using the campaign preset (Issue #207).
+  // Catches testnet issuer on public Horizon (or vice versa) and preset conflicts.
+  validateNetworkAssetCompatibility(
+    horizonUrl,
+    normalizedAsset.assetCode,
+    normalizedAsset.assetIssuer,
+    presetName || undefined,
+  );
+
   // Soroban fungible token contracts (SEP-41) use a "C..." contract address
   // as their issuer instead of a classic "G..." account. Validate that
   // shape up front so a malformed contract address fails fast with a clear
@@ -560,7 +580,7 @@ async function run(): Promise<void> {
   }
 
   let result;
-  
+
   const rateBudgetTracker = new RateBudgetTracker(horizonMaxRequests);
 
   globalMetrics.startTimer('horizon_fetch');
@@ -575,6 +595,11 @@ async function run(): Promise<void> {
     rateBudgetTracker,
     horizonMaxRequests,
   };
+
+  const horizonFetchStartMs = Date.now();
+  let horizonFetchLatencyMs = 0;
+  let horizonFetchStatusCode: number | undefined;
+  let horizonFetchError: string | undefined;
 
   try {
     const account = waitUntilFunded
@@ -595,24 +620,16 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, effectiveResolvedAddress, horizonOptions);
-
-    // Use plugin runner when flag is enabled; fall back to monolith otherwise
-    if (usePluginRunner) {
-      const ctx: CheckPluginContext = {
-        account,
-        config: checkConfig,
-        stellarAddress: effectiveResolvedAddress,
-      };
-      const registry = new PluginRegistry();
-      corePlugins.forEach((p) => registry.register(p));
-      result = runPlugins(ctx, registry);
-    } else {
-      result = runAccountChecks(account, checkConfig);
-    }
+      : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
+    horizonFetchLatencyMs = Date.now() - horizonFetchStartMs;
+    horizonFetchStatusCode = 200;
+    result = runAccountChecks(account, checkConfig);
   } catch (error) {
+    horizonFetchLatencyMs = Date.now() - horizonFetchStartMs;
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
+      horizonFetchStatusCode = 404;
+      horizonFetchError = error.message;
       // #144: attempt cross-network detection before building the result so
       // the comment surfaces a clear mismatch error when the address is active
       // on the opposite network. Fire-and-forget with a short timeout so a
@@ -628,12 +645,15 @@ async function run(): Promise<void> {
       }
       result = unfundedAccountResult(stellarAddress, checkConfig, mismatchHint);
     } else if (error instanceof HorizonError) {
+      horizonFetchStatusCode = error.statusCode;
+      horizonFetchError = error.message;
       core.error(error.message);
       globalMetrics.incrementCounter('errors');
       globalMetrics.recordMetric('horizon_error', error.statusCode, 'http_status');
       result = horizonFailureResult(error.message, checkConfig);
     } else {
       const message = getErrorMessage(error);
+      horizonFetchError = message;
       core.error(message);
       globalMetrics.incrementCounter('errors');
       result = horizonFailureResult(message, checkConfig);
@@ -647,6 +667,9 @@ async function run(): Promise<void> {
   if (result == null) {
     return;
   }
+
+  // Capture the validation timestamp once, used for validated_at output and delta.
+  const validatedAt = new Date().toISOString();
 
   // Attach the freshness result to every result path so comment.ts can render it.
   if (freshnessResult !== undefined) {
@@ -747,6 +770,31 @@ async function run(): Promise<void> {
     );
   }
 
+  // Build diagnostics config when debug_mode is on (Issue #205).
+  // Never includes secrets; addresses are redacted in the block builder.
+  let diagnosticsConfig: DiagnosticsConfig | undefined;
+  if (debugMode) {
+    diagnosticsConfig = {
+      inputs: {
+        horizonUrl,
+        horizonUrlFallback: horizonUrlFallback || undefined,
+        assetCode: effectiveAssetCode,
+        assetIssuer: effectiveAssetIssuer,
+        minXlmReserve: effectiveMinXlmReserveRaw,
+        horizonTimeoutMs,
+        useCache,
+        cacheTtlMs: horizonCacheTtlMs,
+        allowCrossNetworkFallback,
+        debugMode,
+      },
+      runInfo: {
+        horizonStatusCode: horizonFetchStatusCode,
+        horizonLatencyMs: horizonFetchLatencyMs,
+        horizonError: horizonFetchError,
+      },
+    };
+  }
+
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
     stellarAddress: effectiveResolvedAddress,
@@ -762,6 +810,8 @@ async function run(): Promise<void> {
     locale,
     debugMode,
     docsBaseUrl: core.getInput('docs_base_url') || undefined,
+    delta,
+    diagnosticsConfig,
   });
 
   // Detect oversize and write the full report to a workspace file when needed.
@@ -824,25 +874,7 @@ async function run(): Promise<void> {
     }
   }
 
-  setValidationOutputs(result, commentUrl, fullReportPath, {
-    horizonUrl: effectiveHorizonUrl,
-    assetCode: effectiveAssetCode,
-    assetIssuer: effectiveAssetIssuer,
-    timings,
-  });
-
-  // GitHub Checks API: create a Check Run with individual checks as annotations (Wave #26)
-  // Fires after comment posting; failures are isolated and never block the run.
-  if (useCheckRuns) {
-    const checkRunResult = await createCheckRun(result, githubToken, {
-      stellarAddress: resolvedAddress,
-    });
-    if (checkRunResult.success) {
-      core.info(checkRunResult.message);
-    } else {
-      core.warning(checkRunResult.message);
-    }
-  }
+  setValidationOutputs(result, commentUrl, fullReportPath, { validatedAt });
 
   // Signed dashboard webhook notification (Issue #101)
   // Fires after comment posting; failures are isolated and never block the run.

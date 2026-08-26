@@ -24,6 +24,7 @@ export interface ActionOutputExtras {
   assetCode?: string;
   assetIssuer?: string;
   timings?: ActionTimings;
+  validatedAt?: string;
 }
 
 export interface ActionOutputs {
@@ -35,6 +36,7 @@ export interface ActionOutputs {
   full_report_path: string;
   // Extended audit / timing outputs
   ready: string;
+  validated_at: string;
   reason_code: string;
   horizon_url: string;
   asset_code: string;
@@ -61,20 +63,7 @@ export function toActionOutputs(
   extras: ActionOutputExtras = {},
 ): ActionOutputs {
   const timings = extras.timings ?? {};
-  
-  // Generate badges (best-effort)
-  let badgeMarkdown = '';
-  let badgeUrl = '';
-  try {
-    const badges = generateBadgeSnippets(result);
-    if (badges) {
-      badgeMarkdown = badges.markdown ?? '';
-      badgeUrl = badges.url ?? '';
-    }
-  } catch {
-    // Badge generation is best-effort; do not fail if generation throws
-  }
-
+  const validatedAt = extras.validatedAt ?? new Date().toISOString();
   return {
     trustline_exists: String(result.trustlineExists),
     xlm_balance: result.xlmBalance,
@@ -82,6 +71,7 @@ export function toActionOutputs(
     comment_url: commentUrl ?? '',
     full_report_path: fullReportPath ?? '',
     ready: String(result.valid),
+    validated_at: validatedAt,
     reason_code: result.reasonCode ?? (result.valid ? 'SUCCESS' : 'FAILED'),
     horizon_url: extras.horizonUrl ?? '',
     asset_code: extras.assetCode ?? '',

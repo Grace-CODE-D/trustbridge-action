@@ -261,6 +261,22 @@ inputs:
       URL; invalid values fall back to the default silently. (Issue #104)
     required: false
     default: ''
+  network:
+    description: >-
+      Stellar network shorthand: "testnet", "public", or "mainnet". When set
+      (and "preset" is empty), the matching campaign preset overrides
+      horizon_url, asset_code, and asset_issuer defaults. Explicit action
+      inputs always win over preset values. (Issue #207)
+    required: false
+    default: ''
+  preset:
+    description: >-
+      Campaign preset name (e.g. "testnet", "public", "testnet-usdc",
+      "mainnet"). When set, overrides horizon_url, asset_code, and
+      asset_issuer defaults. Takes precedence over the "network" input.
+      Explicit action inputs always win. (Issue #207)
+    required: false
+    default: ''
 
   comment_mode:
     description: >-
