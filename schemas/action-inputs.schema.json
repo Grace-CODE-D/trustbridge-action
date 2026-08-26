@@ -359,6 +359,30 @@
       "type": "string",
       "description": "Home domain check mode: warn or strict.",
       "default": "warn"
+    },
+    "locale": {
+      "type": "string",
+      "description": "Language for issue comments. Supported: en, es, pt. Invalid falls back to en.",
+      "enum": [
+        "en",
+        "es",
+        "pt"
+      ],
+      "default": "en"
+    },
+    "stellar_addresses": {
+      "type": "string",
+      "description": "Newline-separated or JSON array of Stellar addresses for batch validation.",
+      "default": ""
+    },
+    "auto_wallet_labels": {
+      "type": "string",
+      "description": "Automatically apply a wallet state label to the issue after each check run.",
+      "enum": [
+        "true",
+        "false"
+      ],
+      "default": "false"
     }
   }
 }
