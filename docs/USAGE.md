@@ -1554,3 +1554,232 @@ explicitly register it alongside the core checks.
 ---
 
 [← Back to README](../README.md) · [Cron re-validation →](CRON_REVALIDATION.md)
+
+## New Features — Wave #26-28 Enhancements
+
+### Badge outputs for README/dashboard embeds
+
+TrustBridge now exposes `badge_markdown` and `badge_url` outputs containing pass/fail/pending status badges suitable for embedding in README.md or maintainer dashboards.
+
+**Outputs available:**
+- `badge_markdown`: Markdown-formatted badge link (e.g. `[![TrustBridge Ready](https://img.shields.io/badge/trustbridge-ready-brightgreen)](...)`)
+- `badge_url`: Direct Shields.io badge URL for embedding in HTML or docs
+
+**Use case:** Display wallet readiness status in your project README without exposing account details.
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  id: bridge
+  with:
+    stellar_address_input: G...
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Create badge
+  run: |
+    echo "${{ steps.bridge.outputs.badge_markdown }}" >> README.md
+```
+
+### Persistent cache backend (opt-in)
+
+When running matrix validation jobs, each leg re-fetches the same account from Horizon and risks hitting rate limits (429s). TrustBridge now supports optional persistent caching via GitHub Actions cache backend to reuse account data across matrix legs and between workflow runs.
+
+**Inputs:**
+- `use_cache`: Enable in-memory TTL cache within a single action run (default: `false`)
+- `use_actions_cache_backend`: Persist cache to GitHub Actions backend across runs (default: `false`)
+- `horizon_cache_ttl_ms`: Cache TTL in milliseconds (default: `60000`, max: `3600000`)
+
+**Constraints:**
+- Cache misses on HTTP 404 (unfunded accounts may become funded) — always re-fetches
+- Cache keys are namespaced by Horizon URL + address to prevent cross-network collisions
+- No secrets or sensitive data in cache keys (addresses are hashed)
+- Fail-open: cache backend errors never block validation
+
+**Example — matrix payout with persistent cache:**
+
+```yaml
+strategy:
+  matrix:
+    address: [GAAA..., GBBB..., GCCC...]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ matrix.address }}
+          use_cache: 'true'
+          use_actions_cache_backend: 'true'
+          horizon_cache_ttl_ms: '300000'    # 5 minutes
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Dead code cleanup
+
+Removed duplicate/orphaned modules:
+- `src/error-log.ts` — was a duplicate of `src/horizon.ts`
+- `src/validator.ts` — was a duplicate of `src/metrics.ts`
+
+**Migration:** No action needed. These modules were not exposed in the public API and existing workflows are unaffected.
+
+### GitHub Checks API for required status gates
+
+When enabled via `use_check_runs: true`, TrustBridge creates a GitHub Check Run with individual validation checks as annotations and a conclusion (success/failure) reflecting the overall result. This allows merge queues and required checks to gate on TrustBridge as a named check.
+
+**Permissions required:**
+```yaml
+permissions:
+  issues: write
+  checks: write      # NEW: required for Check Run creation
+```
+
+**Behavior:**
+- Each validation check (account funded, trustline exists, XLM reserve) appears as an annotation in the Check Run
+- Check conclusion is `success` if all checks pass, `failure` otherwise
+- Annotations are visible in the Actions UI under the "Annotations" panel
+- Fail-open: if Checks API returns 403 (permission denied), a warning is logged and validation continues
+
+**Example — gated merge queue:**
+
+```yaml
+name: Verify wallet + allow merge
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      checks: write   # NEW
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: G...
+          use_check_runs: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**In GitHub UI:**
+1. Open a pull request targeting this repository
+2. Navigate to the "Checks" tab
+3. Find the "TrustBridge Validation" check
+4. Click to see individual check annotations (account funded, trustline, reserve)
+5. Add this check as a required status check in branch protection rules to gate merges
+
+**Troubleshooting:**
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Checks API permission denied (403)` | Token lacks `checks: write` | Add `permissions: { checks: write }` to the workflow job |
+| No Check Run appears | `use_check_runs: false` or not set | Set `use_check_runs: 'true'` in the action input |
+| Check Run appears but no annotations | Checks API annotation limit (50 per request) — TrustBridge truncates to first 50 | This is expected behavior; all checks still run locally |
+
+**Known limitations:**
+- Fork pull requests: `GITHUB_TOKEN` in fork runs is read-only by default; you need an org-level token or GitHub App to post checks from a fork (GitHub Actions limitation, not specific to TrustBridge).
+- GitHub Enterprise Server: Supported via the existing `@actions/github` Octokit client (same as comment posting). Follow the comment-posting GHES guide above; no additional setup is required for Check Runs.
+
+---
+
+## Schema & Output Contract
+
+TrustBridge maintains a JSON schema for all outputs to enable consumer tooling (code generation, validation, type-checking) and catch API mismatches early.
+
+### Schema files
+
+- `schemas/action-inputs.schema.json` — validates `action.yml` inputs and `.trustbridge.yml` config files
+- **Outputs schema** — currently maintained as inline TypeScript interfaces in `src/outputs.ts` and `src/badge.ts`
+
+### All declared outputs
+
+**Legacy (backward compatible):**
+- `trustline_exists` (boolean string)
+- `xlm_balance` (decimal string)
+- `account_funded` (boolean string)
+- `comment_url` (URL string or empty)
+- `full_report_path` (file path string or empty)
+
+**Audit & integration:**
+- `ready` (boolean string)
+- `validated_at` (ISO-8601 timestamp string)
+- `horizon_url` (URL string)
+- `asset_code` (asset code string)
+- `asset_issuer` (G-address string)
+- `reason_code` (enum string: SUCCESS, ACCOUNT_NOT_FUNDED, TRUSTLINE_MISSING, RESERVE_TOO_LOW, etc.)
+- `checks_json` (JSON array string of `{ label, passed, detail }` objects)
+
+**Badge:**
+- `badge_markdown` (Markdown string with embedded Shields.io URL)
+- `badge_url` (Shields.io URL string)
+
+**Timing:**
+- `timings_json` (JSON object string: `{ input_parse_ms, horizon_fetch_ms, checks_ms, comment_post_ms, total_ms }`)
+- `timing_*_ms` (individual phase timings as numeric strings)
+
+**Sponsorship:**
+- `num_sponsoring` (numeric string)
+- `num_sponsored` (numeric string)
+
+All outputs are **strings** (GitHub Actions limitation). Consume them as:
+- Boolean: `${{ steps.bridge.outputs.ready == 'true' }}`
+- Number: `parseFloat('${{ steps.bridge.outputs.timing_total_ms }}')`
+- JSON: `JSON.parse('${{ steps.bridge.outputs.checks_json }}')`
+
+---
+
+## Validation & Testing
+
+TrustBridge runs a comprehensive test suite covering all features:
+
+```bash
+# Run all tests (unit + integration)
+npm test
+
+# Run badge tests only
+npm test -- --testPathPattern badge
+
+# Run cache tests only
+npm test -- --testPathPattern cache
+
+# Run output contract tests
+npm test -- --testPathPattern outputs
+
+# Check + build (required before PR)
+npm run lint && npm run build
+```
+
+Tests validate:
+- Output contract (all declared outputs are set and have correct types)
+- Badge generation (pass/fail/pending states correctly mapped to shield states)
+- Cache behavior (TTL expiration, hit/miss, persistent backend)
+- Check Run creation (permission errors handled gracefully, fail-open)
+- Dead code is removed (no orphaned modules imported)
+
+---
+
+## Changelog
+
+### Wave #28 — Badge Outputs Contract
+- **Added:** `badge_markdown` and `badge_url` outputs declared in `action.yml`
+- **Fixed:** Consumer workflows using badge outputs no longer break in composite actions
+- **Docs:** Badge output examples in README and USAGE.md
+
+### Wave #27 — Persistent Cache Backend
+- **Added:** `use_cache` and `use_actions_cache_backend` inputs
+- **Added:** `CacheBackendOptions` and `PersistentCacheBackend` interfaces for pluggable backends
+- **Constraint:** 404 responses never cached (unfunded accounts may become funded)
+- **Testing:** Cache behavior validated across matrix legs and runs
+
+### Wave #26 — GitHub Checks API
+- **Added:** `use_check_runs` input and `checks-run.ts` module
+- **Added:** Per-check annotations visible in GitHub UI
+- **Fail-open:** Permission errors logged as warnings, validation continues
+- **Testing:** Checks API mocked for unit tests (no live GitHub integration required)
+
+### Cleanup — Dead Code Removal
+- **Removed:** `src/error-log.ts` (duplicate of `src/horizon.ts`)
+- **Removed:** `src/validator.ts` (duplicate of `src/metrics.ts`)
+- **Impact:** Zero; these modules were not part of the public API
+- **Verify:** `npm run build && npm test` confirm no imports of deleted modules
+

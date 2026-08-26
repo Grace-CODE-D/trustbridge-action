@@ -40,6 +40,10 @@ export interface ActionOutputs {
   asset_code: string;
   asset_issuer: string;
   checks_json: string;
+  // Badge outputs for README/dashboard embeds
+  badge_markdown: string;
+  badge_url: string;
+  // Timing breakdown outputs
   timings_json: string;
   timing_input_parse_ms: string;
   timing_horizon_fetch_ms: string;
@@ -57,6 +61,20 @@ export function toActionOutputs(
   extras: ActionOutputExtras = {},
 ): ActionOutputs {
   const timings = extras.timings ?? {};
+  
+  // Generate badges (best-effort)
+  let badgeMarkdown = '';
+  let badgeUrl = '';
+  try {
+    const badges = generateBadgeSnippets(result);
+    if (badges) {
+      badgeMarkdown = badges.markdown ?? '';
+      badgeUrl = badges.url ?? '';
+    }
+  } catch {
+    // Badge generation is best-effort; do not fail if generation throws
+  }
+
   return {
     trustline_exists: String(result.trustlineExists),
     xlm_balance: result.xlmBalance,
@@ -75,6 +93,8 @@ export function toActionOutputs(
         detail: check.detail,
       })),
     ),
+    badge_markdown: badgeMarkdown,
+    badge_url: badgeUrl,
     timings_json: JSON.stringify({
       input_parse_ms: timings.input_parse_ms ?? 0,
       horizon_fetch_ms: timings.horizon_fetch_ms ?? 0,
@@ -101,17 +121,6 @@ export function setValidationOutputs(
   const outputs = toActionOutputs(result, commentUrl, fullReportPath, extras);
   for (const [name, value] of Object.entries(outputs)) {
     core.setOutput(name, value);
-  }
-
-  // Optional badge snippets for workflow summaries
-  try {
-    const badges = generateBadgeSnippets(result);
-    if (badges) {
-      core.setOutput('badge_markdown', badges.markdown ?? '');
-      core.setOutput('badge_url', badges.url ?? '');
-    }
-  } catch {
-    // Badge generation is best-effort and must not fail the action.
   }
 }
 

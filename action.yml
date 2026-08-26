@@ -126,6 +126,16 @@ inputs:
     description: 'Cache successful Horizon responses in job memory (true/false)'
     required: false
     default: 'false'
+  use_actions_cache_backend:
+    description: >-
+      Enable GitHub Actions cache backend persistence (true/false) to share
+      cached Horizon responses across matrix legs and subsequent workflow runs.
+      When enabled, cached data is persisted to GitHub Actions' cache backend
+      with TTL respected. TTL violations and poisoning is prevented by
+      validating account state on cache hits. Defaults to false for
+      backward compatibility.
+    required: false
+    default: 'false'
   allow_cross_network_fallback:
     description: >-
       By default, the fallback URL (`horizon_url_fallback`/`rpc_fallback_url`)
@@ -316,6 +326,14 @@ inputs:
       (blocks valid).
     required: false
     default: 'warn'
+  use_check_runs:
+    description: >-
+      Enable GitHub Checks API to create a Check Run with status checks as
+      annotations and the validation result as the check conclusion. When
+      enabled, Checks API permission is required (checks: write). Default false.
+      When disabled, only issue comments are posted. (Issue #26)
+    required: false
+    default: 'false'
 
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
@@ -348,6 +366,12 @@ outputs:
     description: 'Machine-readable failure reason code (e.g. SUCCESS, ACCOUNT_NOT_FUNDED, TRUSTLINE_MISSING, RESERVE_TOO_LOW)'
   checks_json:
     description: 'JSON string array of individual check results and pass/fail statuses'
+
+  # ── Badge outputs (Issue #TBD) ────────────────────────────────────────────
+  badge_markdown:
+    description: 'Markdown-formatted badge snippet (e.g. for README embeds) linking to TrustBridge repo'
+  badge_url:
+    description: 'Shields.io badge URL reflecting validation state (pass/fail/pending)'
 
   # ── Timing breakdown outputs (Issue #93) ──────────────────────────────────
   timings_json:
