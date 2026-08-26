@@ -165,7 +165,9 @@ inputs:
       branch and on non-fork pull requests. For fork pull requests, org-level
       token restrictions, or GitHub Enterprise Server, you may need a
       fine-grained PAT or a GitHub App token with the Issues (read and write)
-      permission. Omit or leave empty when running in a context where comment
+      permission. For `discussion` events, the comment is posted via GraphQL
+      and requires `discussions: write` instead of `issues: write` (Issue
+      #221). Omit or leave empty when running in a context where comment
       posting is not required (outputs are still set).
     required: true
   assets_json:

@@ -10,7 +10,7 @@ Related docs: [README](../README.md) · [Architecture](ARCHITECTURE.md) · [Erro
 
 1. A GitHub repository with Actions enabled
 2. A Stellar **G-address** to validate (contributor wallet)
-3. Workflow permissions allowing issue comments
+3. Workflow permissions allowing issue comments (`issues: write`) or discussion comments (`discussions: write` — see [GitHub Discussions — bounty threads](#github-discussions--bounty-threads-issue-221))
 
 ---
 
@@ -64,6 +64,50 @@ jobs:
 ```
 
 > **Note:** Comments are only posted when the workflow runs in an **issue** context. For standalone `workflow_dispatch` without an open issue, checks still run and outputs are set; comment posting is skipped with a warning.
+
+---
+
+## GitHub Discussions — bounty threads (Issue #221)
+
+Some projects run their bounty program from **GitHub Discussions** instead of issues. TrustBridge can post (and sticky-upsert) its validation comment there too.
+
+```yaml
+name: Verify Stellar wallet on discussion activity
+
+on:
+  discussion:
+    types: [created, category_changed]
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      discussions: write   # required — GraphQL path, not issues: write
+      contents: read
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: GCONTRIBUTORADDRESSHERE
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### How it works
+
+- Discussion events carry a **GraphQL node id** (e.g. `DIC_…`), **not an issue number**. The REST issues API 404s on a discussion id — or, worse, comments on the wrong issue when the id happens to be numeric.
+- When `github.event_name` is a discussion event, TrustBridge posts the comment through the GitHub **GraphQL API** (`addDiscussionComment` / `updateDiscussionComment` mutations) instead of the REST issues API.
+- **Sticky comments work the same way as issues**: with `sticky_comment: true` (default), the previous TrustBridge comment on the discussion is found (paginated via GraphQL) and updated in place.
+- Issue and PR comment paths are **unchanged**; the discussion path is only taken for discussion events.
+
+### Permissions
+
+| Target | Required permission |
+|--------|--------------------|
+| Issue / PR comments (REST) | `issues: write` |
+| Discussion comments (GraphQL) | `discussions: write` |
+
+A token that only has `issues: write` cannot post discussion comments — the GraphQL mutation fails with a 403-style error. TrustBridge logs this as a non-fatal warning (checks still run, outputs are still set). The action **never falls back to the issues API for a discussion event**, so it cannot accidentally comment on the wrong issue.
+
+> **Note:** the repository must have the **Discussions** feature enabled. Discussion polls, and converting a discussion → issue mid-flight, are intentionally out of scope.
 
 ---
 

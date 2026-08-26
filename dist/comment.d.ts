@@ -188,4 +188,55 @@ export declare function isTrustBridgeComment(body: string | undefined | null): b
  */
 export declare function findStickyComment(octokit: Octokit, owner: string, repo: string, issueNumber: number): Promise<number | undefined>;
 export declare function postIssueComment(token: string, body: string, options?: UpsertCommentOptions): Promise<string | undefined>;
+/**
+ * Extract the GitHub Discussion node id from an event payload, if present.
+ *
+ * Discussion webhook events (`discussion`, `discussion_comment`) embed the
+ * discussion under `payload.discussion.node_id`. Returns `undefined` for
+ * non-discussion events so callers can route between the issue (REST) and
+ * discussion (GraphQL) comment paths.
+ *
+ * @internal Exported for testing.
+ */
+export declare function resolveDiscussionNodeId(payload: unknown): string | undefined;
+export interface UpsertDiscussionCommentOptions extends UpsertCommentOptions {
+    /**
+     * Explicit discussion node id (e.g. "DIC_kw..."). When omitted, the id is
+     * resolved from `github.context.payload.discussion.node_id`.
+     */
+    discussionId?: string;
+}
+interface DiscussionCommentNode {
+    id: string;
+    body: string;
+}
+/**
+ * Find TrustBridge's previous sticky comment on a discussion, if any.
+ *
+ * Paginates through every discussion comment (100 per page) so the marker is
+ * found even on high-traffic threads — same semantics as `findStickyComment`
+ * for issues. Matches on the current versioned marker, the legacy marker, and
+ * the action footer so comments posted by older releases are still eligible
+ * for upsert.
+ */
+export declare function findStickyDiscussionComment(octokit: Octokit, discussionId: string): Promise<DiscussionCommentNode | undefined>;
+/**
+ * Post (or sticky-upsert) a TrustBridge comment on a GitHub Discussion via
+ * the GraphQL API.
+ *
+ * Discussion events have a node id, not an issue number, so this path never
+ * touches the REST issues API. When `sticky` is enabled the previous
+ * TrustBridge comment on the discussion is updated in place via
+ * `updateDiscussionComment`; otherwise a new comment is created via
+ * `addDiscussionComment`.
+ *
+ * Requires `discussions: write` permission on the workflow token (documented
+ * in docs/USAGE.md). A missing permission surfaces as a GraphQL mutation
+ * error, which the caller is expected to catch and downgrade to a warning —
+ * comment posting must never fail the run.
+ *
+ * @returns The URL of the created/updated discussion comment, or `undefined`
+ *          when there is no discussion context in the event payload.
+ */
+export declare function postDiscussionComment(token: string, body: string, options?: UpsertDiscussionCommentOptions): Promise<string | undefined>;
 export {};

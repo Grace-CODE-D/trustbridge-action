@@ -13,7 +13,7 @@ import {
 } from './checks';
 import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
 import { checkLedgerFreshness } from './freshness';
-import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
+import { formatCommentBody, postIssueComment, postDiscussionComment, resolveDiscussionNodeId, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
 import { normalizeAssetConfig, parseAssetsJson } from './assets';
 import {
   getErrorMessage,
@@ -277,7 +277,10 @@ async function run(): Promise<void> {
 
   // #145 — issues:write preflight (optional early exit)
   // Skip when comment_mode won't post — dry-run/off don't need issues:write.
-  if (shouldPostComment) {
+  // Skip for discussion events too: discussions use the GraphQL path which
+  // requires `discussions: write`, not `issues: write` (Issue #221).
+  const discussionNodeId = resolveDiscussionNodeId(github.context.payload);
+  if (shouldPostComment && !discussionNodeId) {
     const preflight = await runIssuesPreflight(githubToken);
     if (preflight.skip) {
       core.info(preflight.message);
@@ -572,6 +575,26 @@ async function run(): Promise<void> {
     core.info(
       `comment_mode=${commentMode} — skipping issue comment post (outputs still set).`,
     );
+  } else if (discussionNodeId) {
+    // Discussion events carry a GraphQL node id, not an issue number —
+    // comment via GraphQL, never the REST issues API (Issue #221).
+    try {
+      commentUrl = await postDiscussionComment(githubToken, effectiveCommentBody, {
+        sticky: stickyComment,
+        forceComment,
+        snoozeWindowMs,
+      });
+      if (commentUrl) {
+        logger.info('Discussion comment created', { component: 'index', commentUrl });
+      } else {
+        logger.info('No discussion comment posted (no discussion context).', {
+          component: 'index',
+        });
+      }
+    } catch (commentError) {
+      const message = commentError instanceof Error ? commentError.message : String(commentError);
+      core.warning(`Failed to post discussion comment (non-fatal): ${message}`);
+    }
   } else {
     try {
       commentUrl = await postIssueComment(githubToken, effectiveCommentBody, {
