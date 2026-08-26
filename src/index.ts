@@ -35,7 +35,9 @@ import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
-import { createCheckRun } from './checks-run';
+import { registerCorePlugins } from './corePlugins';
+import { loadPluginsFromAllowlist } from './pluginLoader';
+import { defaultRegistry } from './plugin';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -94,6 +96,10 @@ function resolveStellarAddressInput(
 }
 
 async function run(): Promise<void> {
+  // Start total action timer
+  globalMetrics.startTimer('total');
+  globalMetrics.startTimer('input_parse');
+
   const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
   const assetCode = core.getInput('asset_code') || 'USDC';
   const assetIssuer =
@@ -169,6 +175,13 @@ async function run(): Promise<void> {
   const previousValidationPath = core.getInput('previous_validation_path') || '';
   const privacyMode = parseBooleanInput(core.getInput('privacy_mode'), false);
 
+  // External plugins from workspace (allowlisted only)
+  const trustbridgePluginsPathRaw = core.getInput('trustbridge_plugins_path') || '';
+  const allowedPluginPaths = trustbridgePluginsPathRaw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+
   // Internationalization (Issue #59)
   const localeInput = core.getInput('locale') || 'en';
   const locale = parseLocaleInput(localeInput);
@@ -207,6 +220,32 @@ async function run(): Promise<void> {
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
+
+  globalMetrics.stopTimer('input_parse');
+
+  // Register core plugins and load external plugins from allowlist
+  registerCorePlugins();
+
+  if (allowedPluginPaths.length > 0) {
+    try {
+      const externalPlugins = await loadPluginsFromAllowlist({
+        workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
+        allowedPluginPaths,
+        debugMode,
+      });
+
+      for (const plugin of externalPlugins) {
+        defaultRegistry.register(plugin);
+      }
+
+      if (externalPlugins.length > 0) {
+        core.info(`Loaded ${externalPlugins.length} external plugin(s)`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      core.warning(`Failed to load external plugins (proceeding with core plugins only): ${message}`);
+    }
+  }
 
   // Never weaken TLS verification by default (Issue #71). TrustBridge does
   // not set NODE_TLS_REJECT_UNAUTHORIZED itself; if something else in the
@@ -425,6 +464,8 @@ async function run(): Promise<void> {
   
   const rateBudgetTracker = new RateBudgetTracker(horizonMaxRequests);
 
+  globalMetrics.startTimer('horizon_fetch');
+
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
@@ -456,7 +497,10 @@ async function run(): Promise<void> {
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
       : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
+    globalMetrics.stopTimer('horizon_fetch');
+    globalMetrics.startTimer('checks');
     result = runAccountChecks(account, checkConfig);
+    globalMetrics.stopTimer('checks');
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
@@ -504,7 +548,21 @@ async function run(): Promise<void> {
     }
   }
 
-  setValidationOutputs(result);
+  // Collect timing metrics from globalMetrics
+  const timings = {
+    input_parse_ms: globalMetrics.getTimerValue('input_parse'),
+    horizon_fetch_ms: globalMetrics.getTimerValue('horizon_fetch'),
+    checks_ms: globalMetrics.getTimerValue('checks'),
+    comment_post_ms: globalMetrics.getTimerValue('comment_post'),
+    total_ms: globalMetrics.getTimerValue('total'),
+  };
+
+  setValidationOutputs(result, undefined, undefined, {
+    horizonUrl: effectiveHorizonUrl,
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+    timings,
+  });
 
   if (writeValidationJsonEnabled) {
     writeValidationJson({
@@ -600,22 +658,30 @@ async function run(): Promise<void> {
       core.warning(`Failed to post discussion comment (non-fatal): ${message}`);
     }
   } else {
+    globalMetrics.startTimer('comment_post');
     try {
       commentUrl = await postIssueComment(githubToken, effectiveCommentBody, {
         sticky: stickyComment,
         forceComment,
         snoozeWindowMs,
       });
+      globalMetrics.stopTimer('comment_post');
       if (commentUrl) {
         logger.info('Issue comment created', { component: 'index', commentUrl });
       }
     } catch (commentError) {
+      globalMetrics.stopTimer('comment_post');
       const message = commentError instanceof Error ? commentError.message : String(commentError);
       core.warning(`Failed to post issue comment (non-fatal): ${message}`);
     }
   }
 
-  setValidationOutputs(result, commentUrl, fullReportPath);
+  setValidationOutputs(result, commentUrl, fullReportPath, {
+    horizonUrl: effectiveHorizonUrl,
+    assetCode: effectiveAssetCode,
+    assetIssuer: effectiveAssetIssuer,
+    timings,
+  });
 
   // GitHub Checks API: create a Check Run with individual checks as annotations (Wave #26)
   // Fires after comment posting; failures are isolated and never block the run.
@@ -655,6 +721,9 @@ async function run(): Promise<void> {
       core.debug(JSON.stringify(spans, null, 2));
     }
   }
+
+  // Stop total timer and collect timing metrics
+  globalMetrics.stopTimer('total');
 
   // Wave #27: write Job Summary with latency, failure codes, JSON artifact
   await writeJobSummary(globalMetrics.buildJobSummary());

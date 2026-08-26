@@ -19,7 +19,7 @@
  * so no untrusted value can inject Markdown formatting.
  */
 
-import { CheckPlugin, CheckPluginContext, CheckPluginResult } from './plugin';
+import { CheckPlugin, CheckPluginContext, CheckPluginResult, defaultRegistry } from './plugin';
 import {
   STELLAR_MIN_ACCOUNT_BALANCE_XLM,
   estimateTrustlineSetupCost,
@@ -264,3 +264,11 @@ export const corePlugins: CheckPlugin[] = [
   xlmReservePlugin,
   homeDomainPlugin,
 ];
+
+/**
+ * Register all core plugins with the default registry.
+ * Called once at action startup before any user plugins are loaded.
+ */
+export function registerCorePlugins(): void {
+  corePlugins.forEach((p) => defaultRegistry.register(p));
+}
