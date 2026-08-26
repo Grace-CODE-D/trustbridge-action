@@ -13,7 +13,8 @@ import {
   HomeDomainCheckMode,
   LedgerFreshnessCheckResult,
 } from './checks';
-import { fetchAccount, HorizonError, waitForFundedAccount } from './horizon';
+import { fetchAccount, HorizonError, waitForFundedAccount, applyWalletLabels } from './horizon';
+import type { HorizonAccount, HorizonBalance } from './horizon';
 import { checkLedgerFreshness } from './freshness';
 import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
 import {
@@ -43,7 +44,13 @@ import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
-import { DiagnosticsConfig } from './diagnostics';
+import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
+import { lookupAddressFromContract, ContractLookupError } from './soroban';
+import { buildSarifOutput, serializeSarif, validateSarifSchema } from './sarif';
+import { runPlugins } from './pluginRunner';
+import { corePlugins } from './corePlugins';
+import { PluginRegistry, CheckPluginContext } from './plugin';
+import { parseBatchAddresses, runBatchValidation, buildBatchSummary, formatBatchSummaryMarkdown } from './batch';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -124,7 +131,10 @@ async function run(): Promise<void> {
     core.getInput('min_xlm_reserve') || campaignPreset?.minXlmReserve || '1.5';
   const stellarAddressInput = core.getInput('stellar_address_input');
   const assigneeAddressMapRaw = core.getInput('assignee_address_map');
-  const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
+  const stellarAddressesRaw = core.getInput('stellar_addresses') || '';
+  const stellarAddress = stellarAddressesRaw.trim()
+    ? '' // batch mode — address resolved later
+    : resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
   const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
@@ -487,43 +497,62 @@ async function run(): Promise<void> {
   };
 
   // ---------------------------------------------------------------------------
-  // Soroban contract registry lookup (Issue #195)
-  // When RPC URL + contract id are set, resolve GitHub username to Stellar
-  // address from the on-chain registry before running Horizon checks.
+  // Batch mode (Issue #199)
+  // When stellar_addresses is set, validate all addresses and post a batch
+  // summary comment instead of the single-address flow.
   // ---------------------------------------------------------------------------
-  let effectiveResolvedAddress = resolvedAddress;
-  if (sorobanRpcUrl.trim() && contractId.trim() && githubUsername.trim()) {
-    core.info(`Looking up Stellar address for @${githubUsername} from contract registry…`);
-    try {
-      const lookup = await lookupAddressFromContract(githubUsername, {
-        sorobanRpcUrl: sorobanRpcUrl.trim(),
-        contractId: contractId.trim(),
+  if (stellarAddressesRaw.trim()) {
+    const batchAddresses = parseBatchAddresses(stellarAddressesRaw);
+    core.info(`Batch mode: validating ${batchAddresses.length} address(es)…`);
+
+    const batchCheckConfig: CheckConfig = {
+      ...normalizedAsset,
+      minXlmReserve: Number(effectiveMinXlmReserveRaw),
+      horizonUrl: effectiveHorizonUrl,
+    };
+
+    const batchResults = await runBatchValidation(batchAddresses, batchCheckConfig, effectiveHorizonUrl, {
+      fetchOptions: {
         timeoutMs: horizonTimeoutMs,
-      });
-      if (lookup.address) {
-        effectiveResolvedAddress = lookup.address;
-        core.info(`Resolved @${githubUsername} → ${effectiveResolvedAddress} from contract registry`);
-        globalMetrics.incrementCounter('soroban_registry_hit');
-      } else {
-        core.warning(
-          `@${githubUsername} is not registered in the contract registry — falling back to stellar_address_input.`,
-        );
-        globalMetrics.incrementCounter('soroban_registry_miss');
+      },
+    });
+
+    const batchSummary = buildBatchSummary(batchResults);
+    const batchMarkdown = formatBatchSummaryMarkdown(batchSummary, effectiveAssetCode);
+
+    if (shouldPostComment) {
+      try {
+        const batchCommentUrl = await postIssueComment(githubToken, batchMarkdown, {
+          sticky: stickyComment,
+          forceComment,
+          snoozeWindowMs,
+        });
+        if (batchCommentUrl) {
+          logger.info('Batch comment created', { component: 'index', commentUrl: batchCommentUrl });
+        }
+      } catch (commentError) {
+        const message = commentError instanceof Error ? commentError.message : String(commentError);
+        core.warning(`Failed to post batch comment (non-fatal): ${message}`);
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof ContractLookupError) {
-        core.warning(
-          `Contract registry lookup failed (${err.retryable ? 'retryable' : 'non-retryable'}): ${msg} — falling back to stellar_address_input.`,
-        );
-      } else {
-        core.warning(`Contract registry lookup failed: ${msg} — falling back to stellar_address_input.`);
-      }
-      globalMetrics.incrementCounter('soroban_registry_error');
     }
+
+    // Set batch-specific outputs
+    core.setOutput('batch_summary_json', JSON.stringify(batchSummary));
+    core.setOutput('batch_passed_count', String(batchSummary.passed));
+    core.setOutput('batch_failed_count', String(batchSummary.failed));
+
+    if (batchSummary.failed > 0 && effectiveFailOnMissing) {
+      core.setFailed(`Batch validation: ${batchSummary.failed} of ${batchSummary.total} addresses failed.`);
+    } else if (batchSummary.failed > 0) {
+      core.warning(`Batch validation: ${batchSummary.failed} of ${batchSummary.total} addresses failed.`);
+    } else {
+      core.info('Batch validation: all addresses passed.');
+    }
+
+    return;
   }
 
-  core.info(`Checking Stellar account ${effectiveResolvedAddress} via ${horizonUrl}`);
+  core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -596,13 +625,10 @@ async function run(): Promise<void> {
     horizonMaxRequests,
   };
 
-  const horizonFetchStartMs = Date.now();
-  let horizonFetchLatencyMs = 0;
-  let horizonFetchStatusCode: number | undefined;
-  let horizonFetchError: string | undefined;
+  let account: HorizonAccount | null = null;
 
   try {
-    const account = waitUntilFunded
+    account = waitUntilFunded
       ? await waitForFundedAccount(
           horizonUrl,
           effectiveResolvedAddress,
@@ -680,21 +706,58 @@ async function run(): Promise<void> {
     }
   }
 
-  // Collect timing metrics from globalMetrics
-  const timings = {
-    input_parse_ms: globalMetrics.getTimerValue('input_parse'),
-    horizon_fetch_ms: globalMetrics.getTimerValue('horizon_fetch'),
-    checks_ms: globalMetrics.getTimerValue('checks'),
-    comment_post_ms: globalMetrics.getTimerValue('comment_post'),
-    total_ms: globalMetrics.getTimerValue('total'),
-  };
+  // ---------------------------------------------------------------------------
+  // Multi-asset trustline checks (Issue #201)
+  // Run trustline checks for additional assets from assets_json.
+  // ---------------------------------------------------------------------------
+  interface MultiAssetResult {
+    assetCode: string;
+    assetIssuer: string;
+    trustlineExists: boolean;
+    balance: string;
+  }
+  let multiAssetResults: MultiAssetResult[] = [];
+  if (assetsJsonRaw.trim()) {
+    const extraAssets = parseAssetsJson(assetsJsonRaw);
+    const dedupedAssets = extraAssets.filter(
+      (a) => !(a.assetCode === normalizedAsset.assetCode && a.assetIssuer === normalizedAsset.assetIssuer),
+    );
+    if (dedupedAssets.length > 0 && account) {
+      core.info(`Checking trustlines for ${dedupedAssets.length} additional asset(s)…`);
+      for (const asset of dedupedAssets) {
+        const hasTrustline = account.balances.some(
+          (b: HorizonBalance) =>
+            b.asset_type !== 'native' &&
+            'asset_code' in b &&
+            b.asset_code === asset.assetCode &&
+            'asset_issuer' in b &&
+            b.asset_issuer === asset.assetIssuer,
+        );
+        const balanceEntry = account.balances.find(
+          (b: HorizonBalance) =>
+            b.asset_type !== 'native' &&
+            'asset_code' in b &&
+            b.asset_code === asset.assetCode &&
+            'asset_issuer' in b &&
+            b.asset_issuer === asset.assetIssuer,
+        );
+        const balance = balanceEntry && 'balance' in balanceEntry ? balanceEntry.balance : '0';
+        multiAssetResults.push({
+          assetCode: asset.assetCode,
+          assetIssuer: asset.assetIssuer,
+          trustlineExists: hasTrustline,
+          balance,
+        });
+        if (hasTrustline) {
+          core.info(`  ✓ ${asset.assetCode} (${asset.assetIssuer}) — trustline exists`);
+        } else {
+          core.warning(`  ✗ ${asset.assetCode} (${asset.assetIssuer}) — trustline missing`);
+        }
+      }
+    }
+  }
 
-  setValidationOutputs(result, undefined, undefined, {
-    horizonUrl: effectiveHorizonUrl,
-    assetCode: effectiveAssetCode,
-    assetIssuer: effectiveAssetIssuer,
-    timings,
-  });
+  setValidationOutputs(result);
 
   if (writeValidationJsonEnabled) {
     writeValidationJson({
@@ -875,6 +938,41 @@ async function run(): Promise<void> {
   }
 
   setValidationOutputs(result, commentUrl, fullReportPath, { validatedAt });
+
+  // ---------------------------------------------------------------------------
+  // Wallet labels (Issue #200)
+  // When auto_wallet_labels is true and we're in an issue context, apply
+  // the appropriate wallet state label to the issue.
+  // ---------------------------------------------------------------------------
+  if (autoWalletLabels && result) {
+    const issueNumber = github.context.payload.issue?.number;
+    if (issueNumber) {
+      const { owner, repo } = github.context.repo;
+      try {
+        const octokit = github.getOctokit(githubToken);
+        const labelResult = await applyWalletLabels(
+          octokit,
+          owner,
+          repo,
+          issueNumber,
+          {
+            accountFunded: result.accountFunded,
+            trustlineExists: result.trustlineExists,
+            xlmReserveMet: result.xlmReserveMet,
+          },
+          { removeStale: true },
+        );
+        if (labelResult.error) {
+          core.warning(`Wallet label failed (non-fatal): ${labelResult.error}`);
+        } else {
+          core.info(`Applied wallet label: ${labelResult.applied}`);
+        }
+      } catch (labelError) {
+        const msg = labelError instanceof Error ? labelError.message : String(labelError);
+        core.warning(`Failed to apply wallet label (non-fatal): ${msg}`);
+      }
+    }
+  }
 
   // Signed dashboard webhook notification (Issue #101)
   // Fires after comment posting; failures are isolated and never block the run.

@@ -383,14 +383,24 @@
       "description": "Home domain check mode: warn or strict.",
       "default": "warn"
     },
-    "sarif_output_path": {
+    "locale": {
       "type": "string",
-      "description": "Path to write SARIF 2.1.0 output file for GitHub Advanced Security integration. Leave empty to skip.",
+      "description": "Language for issue comments. Supported: en, es, pt. Invalid falls back to en.",
+      "enum": [
+        "en",
+        "es",
+        "pt"
+      ],
+      "default": "en"
+    },
+    "stellar_addresses": {
+      "type": "string",
+      "description": "Newline-separated or JSON array of Stellar addresses for batch validation.",
       "default": ""
     },
-    "use_plugin_runner": {
+    "auto_wallet_labels": {
       "type": "string",
-      "description": "Use the plugin-based check pipeline instead of the monolith runAccountChecks.",
+      "description": "Automatically apply a wallet state label to the issue after each check run.",
       "enum": [
         "true",
         "false"

@@ -34144,6 +34144,273 @@ function generateBadgeSnippets(result, label = 'trustbridge') {
 
 /***/ }),
 
+/***/ 2983:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/**
+ * Batch multi-address validation (Issue #105).
+ *
+ * Validates a list of Stellar addresses sequentially, collecting per-address
+ * results and aggregate metrics. Sequential execution keeps request pressure
+ * on Horizon predictable and avoids triggering rate limits.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseBatchAddresses = parseBatchAddresses;
+exports.runBatchValidation = runBatchValidation;
+exports.buildBatchSummary = buildBatchSummary;
+exports.formatBatchSummaryMarkdown = formatBatchSummaryMarkdown;
+const checks_1 = __nccwpck_require__(2122);
+const horizon_1 = __nccwpck_require__(9164);
+const metrics_1 = __nccwpck_require__(5670);
+const DEFAULT_REQUEST_DELAY_MS = 200;
+async function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+/**
+ * Parse the `stellar_addresses` input into a deduplicated list of addresses.
+ *
+ * Accepts:
+ * - Newline-separated list: one address per line (blank lines ignored)
+ * - JSON array: `["GABC...", "GDEF..."]`
+ *
+ * Throws if the resulting list is empty.
+ */
+function parseBatchAddresses(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        throw new Error('stellar_addresses input is empty. Provide at least one Stellar address.');
+    }
+    let addresses;
+    if (trimmed.startsWith('[')) {
+        // JSON array
+        let parsed;
+        try {
+            parsed = JSON.parse(trimmed);
+        }
+        catch {
+            throw new Error('stellar_addresses looks like a JSON array but could not be parsed. Check the JSON syntax.');
+        }
+        if (!Array.isArray(parsed)) {
+            throw new Error('stellar_addresses JSON must be an array of strings.');
+        }
+        addresses = parsed.map((item, i) => {
+            if (typeof item !== 'string') {
+                throw new Error(`stellar_addresses JSON array item at index ${i} is not a string.`);
+            }
+            return item.trim();
+        });
+    }
+    else {
+        // Newline-separated
+        addresses = trimmed
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+    }
+    if (addresses.length === 0) {
+        throw new Error('stellar_addresses input contains no non-empty entries.');
+    }
+    // Deduplicate, preserving order
+    const seen = new Set();
+    const deduped = [];
+    for (const addr of addresses) {
+        if (!seen.has(addr)) {
+            seen.add(addr);
+            deduped.push(addr);
+        }
+    }
+    return deduped;
+}
+/**
+ * Run validation checks against each address in `addresses` sequentially.
+ * A configurable delay between requests keeps Horizon pressure low.
+ */
+async function runBatchValidation(addresses, config, horizonUrl, options = {}) {
+    const requestDelayMs = options.requestDelayMs ?? DEFAULT_REQUEST_DELAY_MS;
+    const fetchOptions = options.fetchOptions ?? {};
+    metrics_1.globalMetrics.incrementCounter('batch_run_start');
+    metrics_1.globalMetrics.recordMetric('batch_size', addresses.length, 'count');
+    const results = [];
+    for (let i = 0; i < addresses.length; i++) {
+        const address = addresses[i];
+        // Delay between requests (skip before first)
+        if (i > 0 && requestDelayMs > 0) {
+            await sleep(requestDelayMs);
+        }
+        // Validate address format before hitting Horizon
+        if (!(0, checks_1.isValidStellarAddress)(address)) {
+            results.push({
+                address,
+                valid: false,
+                accountFunded: false,
+                trustlineExists: false,
+                xlmBalance: '0',
+                xlmReserveMet: false,
+                failureReason: `Invalid Stellar address format: "${address}"`,
+            });
+            metrics_1.globalMetrics.incrementCounter('batch_address_invalid');
+            continue;
+        }
+        try {
+            const account = await (0, horizon_1.fetchAccount)(horizonUrl, address, fetchOptions);
+            const result = (0, checks_1.runAccountChecks)(account, config);
+            let failureReason = null;
+            if (!result.valid) {
+                const reasons = [];
+                if (!result.trustlineExists)
+                    reasons.push('trustline missing');
+                if (!result.xlmReserveMet)
+                    reasons.push('XLM reserve insufficient');
+                failureReason = reasons.join('; ');
+            }
+            results.push({
+                address,
+                valid: result.valid,
+                accountFunded: result.accountFunded,
+                trustlineExists: result.trustlineExists,
+                xlmBalance: result.xlmBalance,
+                xlmReserveMet: result.xlmReserveMet,
+                failureReason,
+            });
+            if (result.valid) {
+                metrics_1.globalMetrics.incrementCounter('batch_address_passed');
+            }
+            else {
+                metrics_1.globalMetrics.incrementCounter('batch_address_failed');
+                if (!result.trustlineExists)
+                    metrics_1.globalMetrics.incrementCounter('batch_fail_trustline_missing');
+                if (!result.xlmReserveMet)
+                    metrics_1.globalMetrics.incrementCounter('batch_fail_reserve_insufficient');
+            }
+        }
+        catch (error) {
+            let failureReason;
+            let isFunded = false;
+            if (error instanceof horizon_1.HorizonError && error.statusCode === 404) {
+                failureReason = 'account not funded';
+                metrics_1.globalMetrics.incrementCounter('batch_fail_account_not_funded');
+            }
+            else if (error instanceof horizon_1.HorizonError) {
+                failureReason = `Horizon error (${error.statusCode}): ${error.message}`;
+                metrics_1.globalMetrics.incrementCounter('batch_fail_horizon_error');
+                isFunded = false;
+            }
+            else {
+                const msg = error instanceof Error ? error.message : 'unknown error';
+                failureReason = `error: ${msg}`;
+                metrics_1.globalMetrics.incrementCounter('batch_fail_horizon_error');
+            }
+            const syntheticResult = error instanceof horizon_1.HorizonError && error.statusCode === 404
+                ? (0, checks_1.unfundedAccountResult)(address, config)
+                : (0, checks_1.horizonFailureResult)(error instanceof Error ? error.message : 'unknown error', config);
+            results.push({
+                address,
+                valid: false,
+                accountFunded: isFunded || syntheticResult.accountFunded,
+                trustlineExists: false,
+                xlmBalance: syntheticResult.xlmBalance,
+                xlmReserveMet: false,
+                failureReason,
+            });
+        }
+    }
+    metrics_1.globalMetrics.recordMetric('batch_passed', results.filter((r) => r.valid).length, 'count');
+    metrics_1.globalMetrics.recordMetric('batch_failed', results.filter((r) => !r.valid).length, 'count');
+    metrics_1.globalMetrics.incrementCounter('batch_run_complete');
+    return results;
+}
+/**
+ * Compute aggregate summary metrics from batch results.
+ */
+function buildBatchSummary(results) {
+    const passed = results.filter((r) => r.valid).length;
+    const failed = results.length - passed;
+    const failures = results
+        .filter((r) => !r.valid)
+        .map((r) => ({ address: r.address, reason: r.failureReason ?? 'unknown' }));
+    const taxonomy = {
+        accountNotFunded: 0,
+        trustlineMissing: 0,
+        reserveInsufficient: 0,
+        horizonError: 0,
+        invalidAddress: 0,
+    };
+    for (const r of results) {
+        if (r.valid)
+            continue;
+        const reason = r.failureReason ?? '';
+        if (reason.includes('not funded'))
+            taxonomy.accountNotFunded++;
+        else if (reason.includes('Invalid Stellar address'))
+            taxonomy.invalidAddress++;
+        else if (reason.startsWith('Horizon error') || reason.startsWith('error:'))
+            taxonomy.horizonError++;
+        else {
+            if (reason.includes('trustline'))
+                taxonomy.trustlineMissing++;
+            if (reason.includes('reserve'))
+                taxonomy.reserveInsufficient++;
+        }
+    }
+    return {
+        total: results.length,
+        passed,
+        failed,
+        failures,
+        failureTaxonomy: taxonomy,
+    };
+}
+/**
+ * Render a compact Markdown summary table for the batch results.
+ * Suitable for posting as a single issue comment in batch mode.
+ */
+function formatBatchSummaryMarkdown(summary, assetCode) {
+    const statusLine = summary.failed === 0
+        ? '✅ All addresses passed validation.'
+        : `⚠️ ${summary.failed} of ${summary.total} addresses failed validation.`;
+    const rows = [
+        '| Address | Funded | Trustline | Reserve | Status |',
+        '| ------- | ------ | --------- | ------- | ------ |',
+    ];
+    // We don't have per-row detail here without the full results — callers
+    // should use the JSON artifact for per-address detail and pass results
+    // directly. This summary markdown uses the failures list.
+    // Build rows from failures only (passed rows omitted for brevity)
+    for (const { address, reason } of summary.failures) {
+        const short = address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+        rows.push(`| \`${short}\` | ❌ | — | — | ${reason} |`);
+    }
+    const taxonomy = summary.failureTaxonomy;
+    const taxLines = [
+        taxonomy.accountNotFunded > 0 ? `- Account not funded: **${taxonomy.accountNotFunded}**` : '',
+        taxonomy.trustlineMissing > 0 ? `- ${assetCode} trustline missing: **${taxonomy.trustlineMissing}**` : '',
+        taxonomy.reserveInsufficient > 0 ? `- XLM reserve insufficient: **${taxonomy.reserveInsufficient}**` : '',
+        taxonomy.horizonError > 0 ? `- Horizon errors: **${taxonomy.horizonError}**` : '',
+        taxonomy.invalidAddress > 0 ? `- Invalid address format: **${taxonomy.invalidAddress}**` : '',
+    ].filter(Boolean);
+    const parts = [
+        '## TrustBridge — Batch Validation Summary',
+        '',
+        statusLine,
+        '',
+        `**Total:** ${summary.total} · **Passed:** ${summary.passed} · **Failed:** ${summary.failed}`,
+        '',
+    ];
+    if (summary.failed > 0) {
+        parts.push('### Failed addresses', '', ...rows, '');
+        if (taxLines.length > 0) {
+            parts.push('### Failure taxonomy', '', ...taxLines, '');
+        }
+    }
+    parts.push('_Posted by [trustbridge-action](https://github.com/Stellar-TrustBridge/trustbridge-action)_');
+    return parts.join('\n');
+}
+
+
+/***/ }),
+
 /***/ 7377:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -38277,12 +38544,7 @@ const validation_1 = __nccwpck_require__(4344);
 const i18n_1 = __nccwpck_require__(4859);
 const webhook_1 = __nccwpck_require__(8378);
 const preflight_1 = __nccwpck_require__(4504);
-const configReader_1 = __nccwpck_require__(6094);
-const soroban_1 = __nccwpck_require__(3597);
-const sarif_1 = __nccwpck_require__(866);
-const pluginRunner_1 = __nccwpck_require__(9050);
-const corePlugins_1 = __nccwpck_require__(4098);
-const plugin_1 = __nccwpck_require__(2375);
+const batch_1 = __nccwpck_require__(2983);
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
  * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
@@ -38341,7 +38603,10 @@ async function run() {
     const minXlmReserveRaw = core.getInput('min_xlm_reserve') || campaignPreset?.minXlmReserve || '1.5';
     const stellarAddressInput = core.getInput('stellar_address_input');
     const assigneeAddressMapRaw = core.getInput('assignee_address_map');
-    const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
+    const stellarAddressesRaw = core.getInput('stellar_addresses') || '';
+    const stellarAddress = stellarAddressesRaw.trim()
+        ? '' // batch mode — address resolved later
+        : resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
     const failOnMissing = (0, inputs_1.parseBooleanInput)(core.getInput('fail_on_missing'), true);
     const debugMode = (0, inputs_1.parseBooleanInput)(core.getInput('debug_mode'), false);
     const horizonTimeoutMs = (0, inputs_1.parseNumberInput)(core.getInput('horizon_timeout_ms'), 15000, {
@@ -38594,41 +38859,57 @@ async function run() {
         ledgerFreshnessFailOnStale,
     };
     // ---------------------------------------------------------------------------
-    // Soroban contract registry lookup (Issue #195)
-    // When RPC URL + contract id are set, resolve GitHub username to Stellar
-    // address from the on-chain registry before running Horizon checks.
+    // Batch mode (Issue #199)
+    // When stellar_addresses is set, validate all addresses and post a batch
+    // summary comment instead of the single-address flow.
     // ---------------------------------------------------------------------------
-    let effectiveResolvedAddress = resolvedAddress;
-    if (sorobanRpcUrl.trim() && contractId.trim() && githubUsername.trim()) {
-        core.info(`Looking up Stellar address for @${githubUsername} from contract registry…`);
-        try {
-            const lookup = await (0, soroban_1.lookupAddressFromContract)(githubUsername, {
-                sorobanRpcUrl: sorobanRpcUrl.trim(),
-                contractId: contractId.trim(),
+    if (stellarAddressesRaw.trim()) {
+        const batchAddresses = (0, batch_1.parseBatchAddresses)(stellarAddressesRaw);
+        core.info(`Batch mode: validating ${batchAddresses.length} address(es)…`);
+        const batchCheckConfig = {
+            ...normalizedAsset,
+            minXlmReserve: Number(effectiveMinXlmReserveRaw),
+            horizonUrl: effectiveHorizonUrl,
+        };
+        const batchResults = await (0, batch_1.runBatchValidation)(batchAddresses, batchCheckConfig, effectiveHorizonUrl, {
+            fetchOptions: {
                 timeoutMs: horizonTimeoutMs,
-            });
-            if (lookup.address) {
-                effectiveResolvedAddress = lookup.address;
-                core.info(`Resolved @${githubUsername} → ${effectiveResolvedAddress} from contract registry`);
-                metrics_1.globalMetrics.incrementCounter('soroban_registry_hit');
+            },
+        });
+        const batchSummary = (0, batch_1.buildBatchSummary)(batchResults);
+        const batchMarkdown = (0, batch_1.formatBatchSummaryMarkdown)(batchSummary, effectiveAssetCode);
+        if (shouldPostComment) {
+            try {
+                const batchCommentUrl = await (0, comment_1.postIssueComment)(githubToken, batchMarkdown, {
+                    sticky: stickyComment,
+                    forceComment,
+                    snoozeWindowMs,
+                });
+                if (batchCommentUrl) {
+                    logger_1.logger.info('Batch comment created', { component: 'index', commentUrl: batchCommentUrl });
+                }
             }
-            else {
-                core.warning(`@${githubUsername} is not registered in the contract registry — falling back to stellar_address_input.`);
-                metrics_1.globalMetrics.incrementCounter('soroban_registry_miss');
+            catch (commentError) {
+                const message = commentError instanceof Error ? commentError.message : String(commentError);
+                core.warning(`Failed to post batch comment (non-fatal): ${message}`);
             }
         }
-        catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (err instanceof soroban_1.ContractLookupError) {
-                core.warning(`Contract registry lookup failed (${err.retryable ? 'retryable' : 'non-retryable'}): ${msg} — falling back to stellar_address_input.`);
-            }
-            else {
-                core.warning(`Contract registry lookup failed: ${msg} — falling back to stellar_address_input.`);
-            }
-            metrics_1.globalMetrics.incrementCounter('soroban_registry_error');
+        // Set batch-specific outputs
+        core.setOutput('batch_summary_json', JSON.stringify(batchSummary));
+        core.setOutput('batch_passed_count', String(batchSummary.passed));
+        core.setOutput('batch_failed_count', String(batchSummary.failed));
+        if (batchSummary.failed > 0 && effectiveFailOnMissing) {
+            core.setFailed(`Batch validation: ${batchSummary.failed} of ${batchSummary.total} addresses failed.`);
         }
+        else if (batchSummary.failed > 0) {
+            core.warning(`Batch validation: ${batchSummary.failed} of ${batchSummary.total} addresses failed.`);
+        }
+        else {
+            core.info('Batch validation: all addresses passed.');
+        }
+        return;
     }
-    core.info(`Checking Stellar account ${effectiveResolvedAddress} via ${horizonUrl}`);
+    core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
     if (waitUntilFunded) {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
     }
@@ -38693,13 +38974,10 @@ async function run() {
         rateBudgetTracker,
         horizonMaxRequests,
     };
-    const horizonFetchStartMs = Date.now();
-    let horizonFetchLatencyMs = 0;
-    let horizonFetchStatusCode;
-    let horizonFetchError;
+    let account = null;
     try {
-        const account = waitUntilFunded
-            ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, effectiveResolvedAddress, {
+        account = waitUntilFunded
+            ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, resolvedAddress, {
                 timeoutMs: waitUntilFundedTimeoutMs,
                 pollIntervalMs: waitUntilFundedIntervalMs,
                 requestTimeoutMs: horizonTimeoutMs,
@@ -38764,6 +39042,39 @@ async function run() {
         // When stale AND fail-on-stale is enabled, override valid so the gate fires.
         if (freshnessResult.blocksValid && result.valid) {
             result = { ...result, valid: false };
+        }
+    }
+    let multiAssetResults = [];
+    if (assetsJsonRaw.trim()) {
+        const extraAssets = (0, assets_1.parseAssetsJson)(assetsJsonRaw);
+        const dedupedAssets = extraAssets.filter((a) => !(a.assetCode === normalizedAsset.assetCode && a.assetIssuer === normalizedAsset.assetIssuer));
+        if (dedupedAssets.length > 0 && account) {
+            core.info(`Checking trustlines for ${dedupedAssets.length} additional asset(s)…`);
+            for (const asset of dedupedAssets) {
+                const hasTrustline = account.balances.some((b) => b.asset_type !== 'native' &&
+                    'asset_code' in b &&
+                    b.asset_code === asset.assetCode &&
+                    'asset_issuer' in b &&
+                    b.asset_issuer === asset.assetIssuer);
+                const balanceEntry = account.balances.find((b) => b.asset_type !== 'native' &&
+                    'asset_code' in b &&
+                    b.asset_code === asset.assetCode &&
+                    'asset_issuer' in b &&
+                    b.asset_issuer === asset.assetIssuer);
+                const balance = balanceEntry && 'balance' in balanceEntry ? balanceEntry.balance : '0';
+                multiAssetResults.push({
+                    assetCode: asset.assetCode,
+                    assetIssuer: asset.assetIssuer,
+                    trustlineExists: hasTrustline,
+                    balance,
+                });
+                if (hasTrustline) {
+                    core.info(`  ✓ ${asset.assetCode} (${asset.assetIssuer}) — trustline exists`);
+                }
+                else {
+                    core.warning(`  ✗ ${asset.assetCode} (${asset.assetIssuer}) — trustline missing`);
+                }
+            }
         }
     }
     (0, outputs_1.setValidationOutputs)(result);
@@ -38932,7 +39243,36 @@ async function run() {
             core.warning(`Failed to post issue comment (non-fatal): ${message}`);
         }
     }
-    (0, outputs_1.setValidationOutputs)(result, commentUrl, fullReportPath, { validatedAt });
+    (0, outputs_1.setValidationOutputs)(result, commentUrl, fullReportPath);
+    // ---------------------------------------------------------------------------
+    // Wallet labels (Issue #200)
+    // When auto_wallet_labels is true and we're in an issue context, apply
+    // the appropriate wallet state label to the issue.
+    // ---------------------------------------------------------------------------
+    if (autoWalletLabels && result) {
+        const issueNumber = github.context.payload.issue?.number;
+        if (issueNumber) {
+            const { owner, repo } = github.context.repo;
+            try {
+                const octokit = github.getOctokit(githubToken);
+                const labelResult = await (0, horizon_1.applyWalletLabels)(octokit, owner, repo, issueNumber, {
+                    accountFunded: result.accountFunded,
+                    trustlineExists: result.trustlineExists,
+                    xlmReserveMet: result.xlmReserveMet,
+                }, { removeStale: true });
+                if (labelResult.error) {
+                    core.warning(`Wallet label failed (non-fatal): ${labelResult.error}`);
+                }
+                else {
+                    core.info(`Applied wallet label: ${labelResult.applied}`);
+                }
+            }
+            catch (labelError) {
+                const msg = labelError instanceof Error ? labelError.message : String(labelError);
+                core.warning(`Failed to apply wallet label (non-fatal): ${msg}`);
+            }
+        }
+    }
     // Signed dashboard webhook notification (Issue #101)
     // Fires after comment posting; failures are isolated and never block the run.
     if (webhookUrl) {

@@ -382,6 +382,32 @@ inputs:
     required: false
     default: 'false'
 
+  locale:
+    description: >-
+      Language for issue comments. Supported values: en (English, default),
+      es (Spanish), pt (Portuguese). Invalid or unsupported locales fall
+      back to English. (Issue #202)
+    required: false
+    default: 'en'
+
+  stellar_addresses:
+    description: >-
+      Newline-separated list or JSON array of Stellar addresses for batch
+      validation. When set, validates all addresses and posts a batch
+      summary comment. Single-address jobs should use
+      stellar_address_input instead. (Issue #199)
+    required: false
+    default: ''
+
+  auto_wallet_labels:
+    description: >-
+      Automatically apply a wallet state label to the issue
+      (wallet: funded | wallet: unfunded | wallet: trustline-missing |
+      wallet: reserve-low | wallet: horizon-error). Requires
+      issues: write permission. Default false. (Issue #200)
+    required: false
+    default: 'false'
+
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
   trustline_exists:
