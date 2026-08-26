@@ -9,10 +9,11 @@
  * - **Local artifact path (recommended):** workflow downloads the previous
  *   run's artifact to `previous_validation_path`. No extra API scopes; explicit
  *   matching; fails soft when the file is absent (first run).
- * - **GitHub Actions API from inside the action:** would auto-discover the
- *   prior run's artifact, but needs `actions: read`, is brittle around
- *   artifact names / retention / matrix jobs, and couples the action to
- *   Actions API rate limits. Not implemented here.
+ * - **GitHub Actions API auto-discovery (Issue #212):** when no local path is
+ *   provided and `GITHUB_TOKEN` + `GITHUB_REPOSITORY` + `GITHUB_RUN_ID` are
+ *   available, the action queries the Actions API for the most recent completed
+ *   run that uploaded a `validation.json` artifact and downloads it in-memory.
+ *   Fails open on 403 / API errors so delta is never required.
  */
 import { CheckResultItem, ValidationGate, ValidationResult } from './checks';
 /** Minimal prior-check shape used for comparison (label + pass/fail). */
@@ -106,3 +107,25 @@ export declare function buildValidationArtifact(options: BuildValidationArtifact
  * Returns an empty string when there is no delta (first run).
  */
 export declare function formatDeltaMarkdown(delta: ValidationDelta | null | undefined): string;
+/**
+ * Attempt to auto-discover and download the most recent `validation.json`
+ * artifact from prior workflow runs via the GitHub Actions REST API.
+ *
+ * This is a best-effort, fail-open operation:
+ * - Returns `null` when required context is missing (non-Actions env).
+ * - Returns `null` on API errors (403, rate limit, network).
+ * - Returns `null` when no prior artifact is found (first run).
+ *
+ * Requires `GITHUB_TOKEN` with `actions: read` permission. When the token
+ * lacks this scope, the function returns `null` gracefully so delta is
+ * never a hard requirement.
+ */
+export declare function discoverPreviousValidationArtifact(githubToken: string, artifactName?: string): Promise<ValidationArtifact | null>;
+/**
+ * Minimal ZIP extraction for a single named file.
+ * Parses the ZIP local file headers to find and decompress the target file.
+ * Returns the file content as a UTF-8 string, or null if not found.
+ *
+ * @internal Exported for testing.
+ */
+export declare function extractFromZip(zipBuffer: Buffer, targetFileName: string): string | null;

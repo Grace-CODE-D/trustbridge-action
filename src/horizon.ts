@@ -2,7 +2,7 @@ import { defaultCache, SimpleCache } from './cache';
 import { logger, redactHorizonUrl, redactStellarAddress, redactString, LogContext } from './logger';
 import { inferStellarNetwork } from './links';
 import { globalMetrics } from './metrics';
-import { RateBudgetTracker } from './resilience';
+import { RateBudgetTracker, CircuitBreaker, CircuitOpenError } from './resilience';
 import { validateHorizonUrl } from './validation';
 
 export interface HorizonBalanceNative {
@@ -180,6 +180,12 @@ export interface FetchAccountOptions {
   retryMaxDelayMs?: number;
   retryMaxTotalWaitMs?: number;
   rateBudgetTracker?: RateBudgetTracker;
+  /**
+   * Optional circuit breaker for Horizon fetches (Issue #209).
+   * When the circuit is open, requests are fast-failed without reaching
+   * the network. Cache hits bypass the circuit breaker.
+   */
+  circuitBreaker?: CircuitBreaker;
   /**
    * By default, a fallback URL that resolves to a *different* Stellar
    * network than the primary `horizon_url` (public vs testnet, inferred
@@ -389,6 +395,7 @@ async function fetchAccountOnce(
   retryMaxTotalWaitMs: number,
   parentSignal?: AbortSignal,
   rateBudgetTracker?: RateBudgetTracker,
+  circuitBreaker?: CircuitBreaker,
 ): Promise<FetchOnceResult> {
   const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
   const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
@@ -431,11 +438,22 @@ async function fetchAccountOnce(
         rateBudgetTracker.recordRequest();
       }
 
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: controller.signal,
-      });
+      // Issue #209: Wrap Horizon fetches with the circuit breaker.
+      // When the circuit is open, this throws CircuitOpenError immediately
+      // without reaching the network. Cache hits bypass the circuit breaker.
+      const response = circuitBreaker
+        ? await circuitBreaker.execute(() =>
+            fetch(url, {
+              method: 'GET',
+              headers: { Accept: 'application/json' },
+              signal: controller.signal,
+            }),
+          )
+        : await fetch(url, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            signal: controller.signal,
+          });
 
       const latencyMs = Date.now() - requestStartedAt;
 
@@ -495,13 +513,21 @@ async function fetchAccountOnce(
 
         if (retryable && attempt < maxRetries) {
           const retryAfterHeader = parseRetryAfterMs(response);
-          const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
-          
-          if (retryAfter > retryMaxDelayMs || totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
-             throw new HorizonRateLimitError(
-               `Horizon rate limit exceeded (Retry-After ${retryAfter}ms exceeds cap of ${retryMaxDelayMs}ms per-retry or ${retryMaxTotalWaitMs}ms total). Please try again later.`,
-               retryAfter
-             );
+          // Issue #218: Honor Retry-After on 429s, capped at retryMaxDelayMs.
+          // When the header is missing or the value exceeds the cap, fall back
+          // to exponential backoff so the action never waits unbounded.
+          let retryAfter: number;
+          if (retryAfterHeader !== null) {
+            retryAfter = Math.min(retryAfterHeader, retryMaxDelayMs);
+          } else {
+            retryAfter = Math.min(1000 * 2 ** attempt, retryMaxDelayMs);
+          }
+
+          if (totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
+            throw new HorizonRateLimitError(
+              `Horizon rate limit exceeded (total wait ${totalWaitMs + retryAfter}ms exceeds cap of ${retryMaxTotalWaitMs}ms). Please try again later.`,
+              retryAfter,
+            );
           }
           
           totalWaitMs += retryAfter;
@@ -517,6 +543,7 @@ async function fetchAccountOnce(
             attempt,
             retryAfterMs: retryAfter,
             retryAfterFromHeader: retryAfterHeader !== null,
+            retryAfterCapped: retryAfterHeader !== null && retryAfterHeader > retryMaxDelayMs,
             nextAttempt: attempt + 1,
           }));
           await cancellableSleep(retryAfter, parentSignal);
@@ -565,6 +592,25 @@ async function fetchAccountOnce(
     } catch (error) {
       if (error instanceof HorizonError || (error instanceof Error && error.name === 'RateBudgetExhaustedError')) {
         throw error;
+      }
+
+      // Issue #209: CircuitOpenError means the circuit breaker is open.
+      // Treat as non-retryable — the breaker will transition to half-open
+      // after its recovery timeout.
+      if (error instanceof CircuitOpenError) {
+        logger.debug('Horizon request blocked by circuit breaker', safeHorizonContext({
+          component: 'horizon',
+          stellarAddress,
+          horizonUrl: targetHorizonUrl,
+          endpointKind,
+          attempt,
+          final: true,
+        }));
+        throw new HorizonError(
+          `Horizon request blocked by circuit breaker: ${error.message}`,
+          0,
+          false,
+        );
       }
 
       const tlsCode = tlsErrorCode(error);
@@ -770,6 +816,7 @@ export async function fetchAccount(
   }
 
   let primaryError: HorizonError | undefined;
+  const circuitBreaker = options.circuitBreaker;
 
   try {
     const result = await fetchAccountOnce(
@@ -783,6 +830,7 @@ export async function fetchAccount(
       retryMaxTotalWaitMs,
       signal,
       rateBudgetTracker,
+      circuitBreaker,
     );
 
     result.account._servedByUrl = normalizedHorizonUrl;
@@ -869,6 +917,7 @@ export async function fetchAccount(
       retryMaxTotalWaitMs,
       signal,
       rateBudgetTracker,
+      circuitBreaker,
     );
 
     fallbackResult.account._servedByUrl = normalizedFallbackUrl;
