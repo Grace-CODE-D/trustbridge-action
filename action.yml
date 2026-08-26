@@ -351,6 +351,21 @@ inputs:
     required: false
     default: ''
 
+  sarif_output_path:
+    description: >-
+      Path to write SARIF 2.1.0 output file for GitHub Advanced Security
+      integration. Leave empty to skip SARIF output. The file is written
+      under GITHUB_WORKSPACE. (Issue #197)
+    required: false
+    default: ''
+
+  use_plugin_runner:
+    description: >-
+      Use the plugin-based check pipeline (runPlugins + core plugins)
+      instead of the monolith runAccountChecks. Default false. (Issue #198)
+    required: false
+    default: 'false'
+
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
   trustline_exists:

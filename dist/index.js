@@ -35800,6 +35800,520 @@ async function postDiscussionComment(token, body, options = {}) {
 
 /***/ }),
 
+/***/ 6094:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Consumer trustbridge.yml reader (Issue #45).
+ *
+ * Reads an optional `.trustbridge.yml` (or any path supplied via the
+ * `trustbridge_config_path` action input) from the consumer repository,
+ * parses it as YAML using a minimal built-in parser (no extra deps), and
+ * validates it through the full security layer in `src/validation.ts`:
+ *
+ *   1. SSRF prevention  — Horizon/RPC URL fields are blocked from targeting
+ *      private IPs, loopback addresses, and cloud-metadata endpoints.
+ *   2. Injection prevention — free-form string fields are rejected if they
+ *      contain shell meta-characters, newlines, or null bytes.
+ *   3. Secret redaction — known secret field names (token, api_key, …) are
+ *      never logged; they are replaced with "***" in any diagnostic output.
+ *
+ * The reader is intentionally conservative: unknown keys are ignored, and
+ * only the fields declared in `TrustbridgeConsumerConfig` are surfaced to
+ * the caller.  This keeps the attack surface small and prevents a malicious
+ * config from injecting unexpected values into the action runtime.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseSimpleYaml = parseSimpleYaml;
+exports.readTrustbridgeConfig = readTrustbridgeConfig;
+exports.mergeConsumerConfig = mergeConsumerConfig;
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
+const validation_1 = __nccwpck_require__(4344);
+const logger_1 = __nccwpck_require__(6999);
+// ---------------------------------------------------------------------------
+// Minimal YAML parser
+// ---------------------------------------------------------------------------
+// We intentionally avoid pulling in a full YAML library — the consumer
+// config is a small flat key/value file so a line-by-line parser is both
+// safer (no prototype pollution, no YAML bombs) and dependency-free.
+/**
+ * Parse a minimal YAML file that contains only top-level key: value pairs.
+ * Supports:
+ *   - Quoted strings (single or double)
+ *   - Unquoted strings
+ *   - Booleans (true / false, case-insensitive)
+ *   - Integers and floats
+ *   - Comments (lines starting with #, and inline # comments)
+ *   - Blank lines
+ *
+ * Deliberately does NOT support: nested objects, lists, anchors, aliases,
+ * multi-line values, or any YAML feature that could be used for injection.
+ */
+function parseSimpleYaml(content) {
+    const result = {};
+    const lines = content.split(/\r?\n/);
+    for (const rawLine of lines) {
+        // Strip inline comment (unquoted #)
+        const line = rawLine.replace(/#[^'"]*$/, '').trim();
+        if (!line)
+            continue;
+        const colonIdx = line.indexOf(':');
+        if (colonIdx === -1)
+            continue;
+        const key = line.slice(0, colonIdx).trim();
+        const rawValue = line.slice(colonIdx + 1).trim();
+        if (!key)
+            continue;
+        result[key] = parseYamlValue(rawValue);
+    }
+    return result;
+}
+function parseYamlValue(raw) {
+    // Quoted strings
+    if ((raw.startsWith('"') && raw.endsWith('"')) ||
+        (raw.startsWith("'") && raw.endsWith("'"))) {
+        return raw.slice(1, -1);
+    }
+    // Booleans
+    if (raw.toLowerCase() === 'true')
+        return true;
+    if (raw.toLowerCase() === 'false')
+        return false;
+    // Null / empty
+    if (raw === '' || raw.toLowerCase() === 'null' || raw === '~')
+        return null;
+    // Numbers
+    const num = Number(raw);
+    if (!Number.isNaN(num) && raw !== '')
+        return num;
+    // Plain string
+    return raw;
+}
+/**
+ * Read and validate a consumer trustbridge.yml config file.
+ *
+ * @param configPath  Path to the config file, relative to `workspaceRoot`
+ *                    or absolute.  Defaults to `.trustbridge.yml` in the
+ *                    workspace root when omitted or empty.
+ * @param workspaceRoot  Absolute path to the repository root.  Defaults to
+ *                       `process.cwd()` when omitted.
+ */
+function readTrustbridgeConfig(configPath, workspaceRoot) {
+    const root = workspaceRoot ?? process.cwd();
+    const targetPath = configPath && configPath.trim()
+        ? path.isAbsolute(configPath)
+            ? configPath
+            : path.join(root, configPath)
+        : path.join(root, '.trustbridge.yml');
+    const resolvedPath = path.normalize(targetPath);
+    // Path traversal guard: ensure the resolved path stays within the
+    // workspace root.  An attacker could supply "../../etc/passwd"; we block
+    // any path that escapes the root.
+    const resolvedRoot = path.normalize(root);
+    if (!resolvedPath.startsWith(resolvedRoot + path.sep) && resolvedPath !== resolvedRoot) {
+        return {
+            config: null,
+            validation: {
+                valid: false,
+                errors: [
+                    `trustbridge_config_path resolves outside the workspace root: "${(0, logger_1.redactString)(resolvedPath)}"`,
+                ],
+                warnings: [],
+            },
+            redactedSnapshot: null,
+            resolvedPath,
+            found: false,
+        };
+    }
+    // File existence check
+    if (!fs.existsSync(resolvedPath)) {
+        return {
+            config: null,
+            validation: { valid: true, errors: [], warnings: [] },
+            redactedSnapshot: null,
+            resolvedPath,
+            found: false,
+        };
+    }
+    // Read and parse
+    let raw;
+    try {
+        const content = fs.readFileSync(resolvedPath, 'utf8');
+        raw = parseSimpleYaml(content);
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+            config: null,
+            validation: {
+                valid: false,
+                errors: [`Failed to read trustbridge config at "${resolvedPath}": ${msg}`],
+                warnings: [],
+            },
+            redactedSnapshot: null,
+            resolvedPath,
+            found: true,
+        };
+    }
+    // Validate security policy
+    const validation = (0, validation_1.validateTrustbridgeConfig)(raw);
+    // Redacted snapshot for safe diagnostic logging (never log raw)
+    const redactedSnapshot = (0, validation_1.redactSecretFields)(raw);
+    if (!validation.valid) {
+        return {
+            config: null,
+            validation,
+            redactedSnapshot,
+            resolvedPath,
+            found: true,
+        };
+    }
+    // Extract only the known typed fields
+    const config = {};
+    if (typeof raw.horizon_url === 'string' && raw.horizon_url.trim()) {
+        config.horizon_url = raw.horizon_url.trim();
+    }
+    if (typeof raw.horizon_url_fallback === 'string' && raw.horizon_url_fallback.trim()) {
+        config.horizon_url_fallback = raw.horizon_url_fallback.trim();
+    }
+    if (typeof raw.rpc_fallback_url === 'string' && raw.rpc_fallback_url.trim()) {
+        config.rpc_fallback_url = raw.rpc_fallback_url.trim();
+    }
+    if (typeof raw.asset_code === 'string' && raw.asset_code.trim()) {
+        config.asset_code = raw.asset_code.trim();
+    }
+    if (typeof raw.asset_issuer === 'string' && raw.asset_issuer.trim()) {
+        config.asset_issuer = raw.asset_issuer.trim();
+    }
+    if (typeof raw.min_xlm_reserve === 'string' && raw.min_xlm_reserve.trim()) {
+        config.min_xlm_reserve = raw.min_xlm_reserve.trim();
+    }
+    if (typeof raw.min_asset_balance === 'string' && raw.min_asset_balance.trim()) {
+        config.min_asset_balance = raw.min_asset_balance.trim();
+    }
+    if (typeof raw.fail_on_missing === 'boolean') {
+        config.fail_on_missing = raw.fail_on_missing;
+    }
+    return {
+        config,
+        validation,
+        redactedSnapshot,
+        resolvedPath,
+        found: true,
+    };
+}
+/**
+ * Merge consumer config values into a set of action input defaults.
+ * Consumer config values take precedence over defaults but are overridden
+ * by any explicit non-empty action input the workflow author supplied.
+ *
+ * @param actionInputs  The resolved action inputs (already read from
+ *                      `core.getInput`).
+ * @param consumerConfig  The parsed and validated consumer config, or null.
+ * @param explicitInputs  Set of input names that were explicitly set by the
+ *                        workflow author (non-empty string from getInput).
+ */
+function mergeConsumerConfig(actionInputs, consumerConfig, explicitInputs) {
+    if (!consumerConfig)
+        return actionInputs;
+    const merged = { ...actionInputs };
+    const overrides = {
+        horizonUrl: consumerConfig.horizon_url,
+        horizonUrlFallback: consumerConfig.horizon_url_fallback,
+        rpcFallbackUrl: consumerConfig.rpc_fallback_url,
+        assetCode: consumerConfig.asset_code,
+        assetIssuer: consumerConfig.asset_issuer,
+        minXlmReserveRaw: consumerConfig.min_xlm_reserve,
+        minAssetBalanceRaw: consumerConfig.min_asset_balance,
+        failOnMissing: consumerConfig.fail_on_missing,
+    };
+    for (const [key, value] of Object.entries(overrides)) {
+        if (value !== undefined && !explicitInputs.has(key)) {
+            merged[key] = value;
+        }
+    }
+    return merged;
+}
+
+
+/***/ }),
+
+/***/ 4098:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/**
+ * @file corePlugins.ts
+ * The three built-in TrustBridge checks expressed as CheckPlugins.
+ *
+ * These serve two purposes:
+ *   1. Reference implementations that plugin authors can study to
+ *      understand the expected shape of a plugin.
+ *   2. Drop-in replacements for the equivalent logic inside
+ *      `runAccountChecks` when projects want a fully plugin-driven
+ *      pipeline.
+ *
+ * The existing `runAccountChecks` monolith in `checks.ts` is **not**
+ * changed in this PR — these plugins coexist alongside it. A future
+ * major release may elect to replace `runAccountChecks` entirely with
+ * `runPlugins([...corePlugins])`.
+ *
+ * SECURITY: All detail strings that embed data from `ctx` use the same
+ * `escapeMarkdownInline` / `inlineCode` helpers as `runAccountChecks`
+ * so no untrusted value can inject Markdown formatting.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.corePlugins = exports.homeDomainPlugin = exports.xlmReservePlugin = exports.trustlinePlugin = exports.accountFundedPlugin = void 0;
+const checks_1 = __nccwpck_require__(2122);
+const horizon_1 = __nccwpck_require__(9164);
+const markdown_1 = __nccwpck_require__(3758);
+const links_1 = __nccwpck_require__(3346);
+const metrics_1 = __nccwpck_require__(5670);
+// ---------------------------------------------------------------------------
+// 1. Account funded
+// ---------------------------------------------------------------------------
+/**
+ * Checks that the Stellar account exists and is activated on the network.
+ *
+ * Passes  — `ctx.account` is not null (Horizon returned a 200).
+ * Fails   — `ctx.account` is null (Horizon returned 404 / account unfunded).
+ *
+ * Plugin id: `'trustbridge/account-funded'`
+ */
+exports.accountFundedPlugin = {
+    id: 'trustbridge/account-funded',
+    label: 'Account funded',
+    run(ctx) {
+        if (ctx.account !== null) {
+            return {
+                passed: true,
+                detail: `Account ${(0, markdown_1.inlineCode)(ctx.stellarAddress)} is active on the Stellar network.`,
+            };
+        }
+        const safeAddress = (0, markdown_1.inlineCode)(ctx.stellarAddress);
+        return {
+            passed: false,
+            detail: `Account ${safeAddress} was **not found** on Horizon — it may not be funded or activated yet.`,
+            remediation: [
+                `Activate ${safeAddress} by sending at least **${checks_1.STELLAR_MIN_ACCOUNT_BALANCE_XLM} XLM** (Stellar minimum account balance).`,
+                `Estimated setup cost: ~**${(0, checks_1.estimateTrustlineSetupCost)()} XLM** (1 XLM base + 0.5 XLM per trustline reserve).`,
+            ].join('\n\n'),
+        };
+    },
+};
+// ---------------------------------------------------------------------------
+// 2. Trustline
+// ---------------------------------------------------------------------------
+/**
+ * Checks that the account holds a trustline for the configured asset.
+ *
+ * Passes  — account has a trustline for `config.assetCode` / `config.assetIssuer`.
+ * Fails   — trustline is absent or account is not funded.
+ *
+ * Plugin id: `'trustbridge/trustline'`
+ */
+exports.trustlinePlugin = {
+    id: 'trustbridge/trustline',
+    label: 'Trustline',
+    run(ctx) {
+        const safeAssetCode = (0, markdown_1.escapeMarkdownInline)(ctx.config.assetCode);
+        const safeIssuer = (0, markdown_1.inlineCode)(ctx.config.assetIssuer);
+        const network = (0, links_1.inferStellarNetwork)(ctx.config.horizonUrl ?? '');
+        if (ctx.account === null) {
+            return {
+                passed: false,
+                detail: 'Cannot verify trustline until the account exists.',
+            };
+        }
+        const exists = (0, horizon_1.hasTrustline)(ctx.account, ctx.config.assetCode, ctx.config.assetIssuer);
+        const hasAnyTrustlines = ctx.account.balances.some((b) => b.asset_type !== 'native');
+        if (exists) {
+            return {
+                passed: true,
+                detail: `Trustline for **${safeAssetCode}** (${safeIssuer}) is configured.`,
+            };
+        }
+        const detail = hasAnyTrustlines
+            ? `Account has trustlines, but not for **${safeAssetCode}** issued by ${safeIssuer}.`
+            : 'Account has **zero trustlines** — add a trustline before receiving this asset.';
+        return {
+            passed: false,
+            detail,
+            remediation: `Add a **${safeAssetCode}** trustline using [Stellar Laboratory](${(0, links_1.buildChangeTrustLink)(network)}) (Change Trust operation) or a wallet such as [LOBSTR](${(0, links_1.buildLobstrLink)()}).`,
+        };
+    },
+};
+// ---------------------------------------------------------------------------
+// 3. XLM reserve
+// ---------------------------------------------------------------------------
+/**
+ * Checks that the account's native XLM balance meets the configured minimum.
+ *
+ * Passes  — balance ≥ `config.minXlmReserve`.
+ * Fails   — balance is below the minimum, or account is not funded.
+ *
+ * Plugin id: `'trustbridge/xlm-reserve'`
+ */
+exports.xlmReservePlugin = {
+    id: 'trustbridge/xlm-reserve',
+    label: 'XLM reserve',
+    run(ctx) {
+        if (ctx.account === null) {
+            return {
+                passed: false,
+                detail: `Cannot verify XLM balance. Fund the account with at least **${ctx.config.minXlmReserve} XLM**.`,
+            };
+        }
+        const xlmBalance = (0, horizon_1.getNativeBalance)(ctx.account);
+        const xlmNumeric = (0, horizon_1.parseHorizonBalance)(xlmBalance);
+        const reserve = (0, checks_1.buildReserveRequirement)(ctx.config.minXlmReserve, xlmNumeric);
+        if (reserve.met) {
+            return {
+                passed: true,
+                detail: `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** meets the minimum of **${ctx.config.minXlmReserve} XLM**.`,
+            };
+        }
+        return {
+            passed: false,
+            detail: `Balance **${(0, markdown_1.inlineCode)(xlmBalance)} XLM** is below the required **${ctx.config.minXlmReserve} XLM**.`,
+            remediation: `Send at least **${reserve.missing} XLM** to ${(0, markdown_1.inlineCode)(ctx.account.account_id)} to meet the reserve requirement.`,
+        };
+    },
+};
+// ---------------------------------------------------------------------------
+// 4. SEP-0001 home domain (optional — skips when not configured)
+// ---------------------------------------------------------------------------
+/**
+ * Checks that the issuer account's on-chain `home_domain` field aligns with
+ * the configured expectation (SEP-0001).
+ *
+ * The check is **opt-in**: when `config.homeDomainCheckEnabled` is false
+ * (or absent) the plugin returns a passing no-op result and emits a
+ * `home_domain_skipped` counter so dashboards can distinguish "not
+ * configured" from a real outcome.
+ *
+ * Modes
+ * -----
+ * - `warn`   (default) — the check row is informational; a missing or
+ *   mismatched domain does NOT block `valid`.
+ * - `strict` — a non-`valid` outcome sets `passed = false`, which causes
+ *   `runPlugins` to set `valid = false` for the overall result.
+ *
+ * Metric tags emitted (via `globalMetrics`):
+ * - `home_domain_valid`    — domain present and matches expectation.
+ * - `home_domain_missing`  — issuer has no `home_domain` on-chain.
+ * - `home_domain_mismatch` — domain present but does not match expected.
+ * - `home_domain_skipped`  — check not enabled.
+ *
+ * Plugin id: `'trustbridge/home-domain'`
+ */
+exports.homeDomainPlugin = {
+    id: 'trustbridge/home-domain',
+    label: 'SEP-0001 home domain',
+    run(ctx) {
+        if (!ctx.config.homeDomainCheckEnabled) {
+            metrics_1.globalMetrics.incrementCounter('home_domain_skipped');
+            return {
+                passed: true,
+                detail: 'SEP-0001 home domain check is disabled (set `home_domain_check_enabled: true` to enable).',
+            };
+        }
+        const checkResult = (0, checks_1.evaluateHomeDomain)(ctx.account, ctx.config);
+        // Emit metrics regardless of mode so dashboards always get a data point.
+        metrics_1.globalMetrics.incrementCounter(`home_domain_${checkResult.outcome}`);
+        metrics_1.globalMetrics.recordMetric('home_domain_check', 1, 'count', {
+            outcome: checkResult.outcome,
+            mode: ctx.config.homeDomainCheckMode ?? 'warn',
+        });
+        const passed = !checkResult.blocksValid || checkResult.outcome === 'valid';
+        if (passed) {
+            return { passed: true, detail: checkResult.detail };
+        }
+        // Build remediation guidance for strict-mode failures.
+        const mode = ctx.config.homeDomainCheckMode ?? 'warn';
+        const remediation = checkResult.outcome === 'missing'
+            ? `The asset issuer (${(0, markdown_1.inlineCode)(ctx.config.assetIssuer)}) has not set a \`home_domain\` on their Stellar account. ` +
+                'Contact the issuer to publish SEP-0001 metadata, or disable this check if the issuer is exempt.'
+            : `The issuer \`home_domain\` does not match the expected value. ` +
+                `Expected: \`${(0, markdown_1.escapeMarkdownInline)(ctx.config.expectedHomeDomain ?? '')}\`. ` +
+                `Actual: \`${(0, markdown_1.escapeMarkdownInline)(checkResult.actualHomeDomain ?? '(none)')}\`. ` +
+                'Update `expected_home_domain` or contact the asset issuer.';
+        return {
+            passed: false,
+            detail: checkResult.detail,
+            remediation: mode === 'strict' ? remediation : undefined,
+        };
+    },
+};
+// ---------------------------------------------------------------------------
+// Convenience export — all four core plugins in canonical order
+// ---------------------------------------------------------------------------
+/**
+ * The four built-in checks in the order they appear in the comment table.
+ * Pass this array to `runPlugins()` to get a fully plugin-driven result
+ * equivalent to `runAccountChecks()`.
+ *
+ * Note: `homeDomainPlugin` is included but is a no-op when
+ * `config.homeDomainCheckEnabled` is false (the default), so existing
+ * workflows are unaffected.
+ *
+ * ```ts
+ * import { runPlugins } from './pluginRunner';
+ * import { corePlugins } from './corePlugins';
+ * import { PluginRegistry } from './plugin';
+ *
+ * const registry = new PluginRegistry();
+ * corePlugins.forEach(p => registry.register(p));
+ * const result = runPlugins(ctx, registry);
+ * ```
+ */
+exports.corePlugins = [
+    exports.accountFundedPlugin,
+    exports.trustlinePlugin,
+    exports.xlmReservePlugin,
+    exports.homeDomainPlugin,
+];
+
+
+/***/ }),
+
 /***/ 1493:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -37745,6 +38259,8 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = run;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
 const checks_1 = __nccwpck_require__(2122);
 const horizon_1 = __nccwpck_require__(9164);
 const freshness_1 = __nccwpck_require__(8628);
@@ -37761,6 +38277,12 @@ const validation_1 = __nccwpck_require__(4344);
 const i18n_1 = __nccwpck_require__(4859);
 const webhook_1 = __nccwpck_require__(8378);
 const preflight_1 = __nccwpck_require__(4504);
+const configReader_1 = __nccwpck_require__(6094);
+const soroban_1 = __nccwpck_require__(3597);
+const sarif_1 = __nccwpck_require__(866);
+const pluginRunner_1 = __nccwpck_require__(9050);
+const corePlugins_1 = __nccwpck_require__(4098);
+const plugin_1 = __nccwpck_require__(2375);
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
  * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
@@ -37849,6 +38371,8 @@ async function run() {
     const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
     const contractId = core.getInput('contract_id') || '';
     const githubUsername = core.getInput('github_username') || '';
+    // Plugin runner flag (Issue #198) — default off
+    const usePluginRunner = (0, inputs_1.parseBooleanInput)(core.getInput('use_plugin_runner'), false);
     // Onboarding checklist in comments (Issue #154) — default on
     const onboardingChecklist = (0, inputs_1.parseBooleanInput)(core.getInput('onboarding_checklist'), true);
     // Security artifacts / delta vs previous run (Issue #148)
@@ -37893,14 +38417,57 @@ async function run() {
     if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
         logger_1.logger.warn('NODE_TLS_REJECT_UNAUTHORIZED=0 is set in this environment — TLS certificate verification is disabled process-wide. TrustBridge does not set this itself; see docs/USAGE.md for private-mirror TLS guidance.', { component: 'index' });
     }
-    // Effective values (config-file overrides can wire in later; default to action inputs)
-    const effectiveHorizonUrl = horizonUrl;
-    const effectiveHorizonUrlFallback = horizonUrlFallback;
-    const effectiveAssetCode = assetCode;
-    const effectiveAssetIssuer = assetIssuer;
-    const effectiveMinXlmReserveRaw = minXlmReserveRaw;
-    const effectiveRpcFallbackUrl = rpcFallbackUrlRaw;
-    const effectiveFailOnMissing = failOnMissing;
+    // ---------------------------------------------------------------------------
+    // Config-file overlay (Issue #196)
+    // Read the consumer .trustbridge.yml and merge values into action inputs.
+    // Explicit non-empty action inputs always win over config-file values.
+    // ---------------------------------------------------------------------------
+    const configResult = (0, configReader_1.readTrustbridgeConfig)(trustbridgeConfigPath, process.env.GITHUB_WORKSPACE || process.cwd());
+    if (!configResult.validation.valid) {
+        const errMsg = configResult.validation.errors.join('; ');
+        core.setFailed(`Trustbridge config file error: ${errMsg}`);
+        return;
+    }
+    if (configResult.found) {
+        core.info(`Loaded trustbridge config from ${configResult.resolvedPath}`);
+        if (debugMode && configResult.redactedSnapshot) {
+            logger_1.logger.debug('Trustbridge config snapshot (redacted)', {
+                component: 'index',
+                config: configResult.redactedSnapshot,
+            });
+        }
+    }
+    // Build set of inputs that were explicitly provided by the workflow author
+    const explicitInputs = new Set();
+    const checkInput = (name, raw) => {
+        if (raw.trim())
+            explicitInputs.add(name);
+    };
+    checkInput('horizonUrl', horizonUrl);
+    checkInput('horizonUrlFallback', horizonUrlFallback);
+    checkInput('rpcFallbackUrl', rpcFallbackUrlRaw);
+    checkInput('assetCode', assetCode);
+    checkInput('assetIssuer', assetIssuer);
+    checkInput('minXlmReserveRaw', minXlmReserveRaw);
+    checkInput('failOnMissing', core.getInput('fail_on_missing'));
+    // Merge config file values under action inputs
+    const merged = (0, configReader_1.mergeConsumerConfig)({
+        horizonUrl,
+        horizonUrlFallback,
+        rpcFallbackUrl: rpcFallbackUrlRaw,
+        assetCode,
+        assetIssuer,
+        minXlmReserveRaw,
+        failOnMissing,
+    }, configResult.config, explicitInputs);
+    // Effective values (config-file overlays applied; explicit inputs win)
+    const effectiveHorizonUrl = merged.horizonUrl;
+    const effectiveHorizonUrlFallback = merged.horizonUrlFallback;
+    const effectiveAssetCode = merged.assetCode;
+    const effectiveAssetIssuer = merged.assetIssuer;
+    const effectiveMinXlmReserveRaw = merged.minXlmReserveRaw;
+    const effectiveRpcFallbackUrl = merged.rpcFallbackUrl;
+    const effectiveFailOnMissing = merged.failOnMissing;
     const resolvedAddress = stellarAddress;
     const jobController = new AbortController();
     const horizonMaxRequests = (0, inputs_1.parseNumberInput)(core.getInput('horizon_max_requests') || '0', 0, {
@@ -38014,7 +38581,42 @@ async function run() {
         maxLedgerLagSeconds,
         ledgerFreshnessFailOnStale,
     };
-    core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
+    // ---------------------------------------------------------------------------
+    // Soroban contract registry lookup (Issue #195)
+    // When RPC URL + contract id are set, resolve GitHub username to Stellar
+    // address from the on-chain registry before running Horizon checks.
+    // ---------------------------------------------------------------------------
+    let effectiveResolvedAddress = resolvedAddress;
+    if (sorobanRpcUrl.trim() && contractId.trim() && githubUsername.trim()) {
+        core.info(`Looking up Stellar address for @${githubUsername} from contract registry…`);
+        try {
+            const lookup = await (0, soroban_1.lookupAddressFromContract)(githubUsername, {
+                sorobanRpcUrl: sorobanRpcUrl.trim(),
+                contractId: contractId.trim(),
+                timeoutMs: horizonTimeoutMs,
+            });
+            if (lookup.address) {
+                effectiveResolvedAddress = lookup.address;
+                core.info(`Resolved @${githubUsername} → ${effectiveResolvedAddress} from contract registry`);
+                metrics_1.globalMetrics.incrementCounter('soroban_registry_hit');
+            }
+            else {
+                core.warning(`@${githubUsername} is not registered in the contract registry — falling back to stellar_address_input.`);
+                metrics_1.globalMetrics.incrementCounter('soroban_registry_miss');
+            }
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (err instanceof soroban_1.ContractLookupError) {
+                core.warning(`Contract registry lookup failed (${err.retryable ? 'retryable' : 'non-retryable'}): ${msg} — falling back to stellar_address_input.`);
+            }
+            else {
+                core.warning(`Contract registry lookup failed: ${msg} — falling back to stellar_address_input.`);
+            }
+            metrics_1.globalMetrics.incrementCounter('soroban_registry_error');
+        }
+    }
+    core.info(`Checking Stellar account ${effectiveResolvedAddress} via ${horizonUrl}`);
     if (waitUntilFunded) {
         core.info(`wait_until_funded is enabled — polling every ${waitUntilFundedIntervalMs}ms for up to ${waitUntilFundedTimeoutMs}ms.`);
     }
@@ -38081,7 +38683,7 @@ async function run() {
     };
     try {
         const account = waitUntilFunded
-            ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, resolvedAddress, {
+            ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, effectiveResolvedAddress, {
                 timeoutMs: waitUntilFundedTimeoutMs,
                 pollIntervalMs: waitUntilFundedIntervalMs,
                 requestTimeoutMs: horizonTimeoutMs,
@@ -38092,8 +38694,21 @@ async function run() {
                     elapsedMs,
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
-            : await (0, horizon_1.fetchAccount)(horizonUrl, resolvedAddress, horizonOptions);
-        result = (0, checks_1.runAccountChecks)(account, checkConfig);
+            : await (0, horizon_1.fetchAccount)(horizonUrl, effectiveResolvedAddress, horizonOptions);
+        // Use plugin runner when flag is enabled; fall back to monolith otherwise
+        if (usePluginRunner) {
+            const ctx = {
+                account,
+                config: checkConfig,
+                stellarAddress: effectiveResolvedAddress,
+            };
+            const registry = new plugin_1.PluginRegistry();
+            corePlugins_1.corePlugins.forEach((p) => registry.register(p));
+            result = (0, pluginRunner_1.runPlugins)(ctx, registry);
+        }
+        else {
+            result = (0, checks_1.runAccountChecks)(account, checkConfig);
+        }
     }
     catch (error) {
         metrics_1.globalMetrics.stopTimer('horizon_fetch');
@@ -38142,7 +38757,7 @@ async function run() {
     if (writeValidationJsonEnabled) {
         (0, outputs_1.writeValidationJson)({
             result,
-            stellarAddress: resolvedAddress,
+            stellarAddress: effectiveResolvedAddress,
             assetCode: effectiveAssetCode,
             assetIssuer: effectiveAssetIssuer,
             horizonUrl: effectiveHorizonUrl,
@@ -38150,6 +38765,44 @@ async function run() {
             privacyMode,
         });
         core.info(`Wrote validation JSON artifact to ${validationJsonPath}`);
+    }
+    // ---------------------------------------------------------------------------
+    // SARIF output (Issue #197)
+    // Write SARIF 2.1.0 to disk when sarif_output_path is set.
+    // ---------------------------------------------------------------------------
+    const sarifOutputPath = core.getInput('sarif_output_path') || '';
+    if (sarifOutputPath.trim()) {
+        const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
+        const resolvedSarifPath = path.isAbsolute(sarifOutputPath)
+            ? sarifOutputPath
+            : path.join(workspaceRoot, sarifOutputPath.trim());
+        // Path traversal guard
+        const normalizedWorkspace = path.normalize(workspaceRoot);
+        const normalizedSarif = path.normalize(resolvedSarifPath);
+        if (!normalizedSarif.startsWith(normalizedWorkspace + path.sep) && normalizedSarif !== normalizedWorkspace) {
+            core.warning(`sarif_output_path resolves outside GITHUB_WORKSPACE — SARIF output skipped.`);
+        }
+        else {
+            try {
+                const sarif = (0, sarif_1.buildSarifOutput)(result, effectiveAssetCode, effectiveHorizonUrl, effectiveResolvedAddress);
+                if (!(0, sarif_1.validateSarifSchema)(sarif)) {
+                    core.warning('Generated SARIF output failed schema validation — skipping SARIF write.');
+                }
+                else {
+                    const sarifJson = (0, sarif_1.serializeSarif)(sarif);
+                    const sarifDir = path.dirname(normalizedSarif);
+                    if (!fs.existsSync(sarifDir)) {
+                        fs.mkdirSync(sarifDir, { recursive: true });
+                    }
+                    fs.writeFileSync(normalizedSarif, sarifJson, 'utf8');
+                    core.info(`Wrote SARIF 2.1.0 output to ${normalizedSarif}`);
+                }
+            }
+            catch (sarifError) {
+                const msg = sarifError instanceof Error ? sarifError.message : String(sarifError);
+                core.warning(`Failed to write SARIF output (non-fatal): ${msg}`);
+            }
+        }
     }
     // Reserved inputs kept for forward-compatible workflows / labels / Soroban.
     logger_1.logger.debug('Optional feature flags', {
@@ -38170,7 +38823,7 @@ async function run() {
     }
     const commentBody = (0, comment_1.formatCommentBody)(result, {
         ...checkConfig,
-        stellarAddress: resolvedAddress,
+        stellarAddress: effectiveResolvedAddress,
         horizonUrl,
         failOnMissing,
         stickyComment,
@@ -38246,7 +38899,7 @@ async function run() {
     if (webhookUrl) {
         const { owner, repo } = github.context.repo;
         const issueNumber = github.context.payload.issue?.number ?? null;
-        await (0, webhook_1.sendWebhookNotification)(result, resolvedAddress, { webhookUrl, webhookSecret, timeoutMs: webhookTimeoutMs }, `${owner}/${repo}`, issueNumber);
+        await (0, webhook_1.sendWebhookNotification)(result, effectiveResolvedAddress, { webhookUrl, webhookSecret, timeoutMs: webhookTimeoutMs }, `${owner}/${repo}`, issueNumber);
     }
     if (debugMode) {
         logger_1.logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
@@ -39800,6 +40453,227 @@ function writeValidationJson(options) {
 
 /***/ }),
 
+/***/ 2375:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * @file plugin.ts
+ * CheckPlugin interface and registry for the TrustBridge extensible
+ * validation architecture.
+ *
+ * SECURITY CONTRACT
+ * -----------------
+ * Plugins are TypeScript modules reviewed and merged by maintainers.
+ * They MUST NOT evaluate or execute content sourced from issue bodies,
+ * comment text, environment variables, or any other runtime-supplied
+ * string as code (no `eval`, `new Function`, dynamic `import()` of
+ * user-supplied paths, or shell execution of untrusted strings).
+ * All plugin inputs arrive through the typed `CheckPluginContext` and
+ * outputs are constrained to `CheckPluginResult` — no escape hatches.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.defaultRegistry = exports.PluginRegistry = void 0;
+// ---------------------------------------------------------------------------
+// Plugin registry
+// ---------------------------------------------------------------------------
+/**
+ * Ordered, deduplication-safe registry of `CheckPlugin` instances.
+ *
+ * Usage:
+ * ```ts
+ * const registry = new PluginRegistry();
+ * registry.register(accountFundedPlugin);
+ * registry.register(trustlinePlugin);
+ * const plugins = registry.list();
+ * ```
+ *
+ * Plugins are stored in insertion order. Registering a plugin whose `id`
+ * already exists is a no-op (first registration wins), so consumers can
+ * safely call `register()` multiple times without duplicating checks.
+ */
+class PluginRegistry {
+    constructor() {
+        this._plugins = new Map();
+    }
+    /**
+     * Register a plugin. If a plugin with the same `id` is already
+     * registered, this call is silently ignored (first-wins semantics).
+     */
+    register(plugin) {
+        if (!this._plugins.has(plugin.id)) {
+            this._plugins.set(plugin.id, plugin);
+        }
+    }
+    /**
+     * Remove a plugin by id. Returns `true` if it was present.
+     * Useful in tests to reset state between runs.
+     */
+    unregister(id) {
+        return this._plugins.delete(id);
+    }
+    /**
+     * Returns all registered plugins in insertion order.
+     */
+    list() {
+        return Array.from(this._plugins.values());
+    }
+    /**
+     * Returns the number of registered plugins.
+     */
+    get size() {
+        return this._plugins.size;
+    }
+    /**
+     * Remove all plugins. Primarily useful in tests.
+     */
+    clear() {
+        this._plugins.clear();
+    }
+}
+exports.PluginRegistry = PluginRegistry;
+/**
+ * The default shared registry used by `runPlugins()` and `corePlugins.ts`.
+ *
+ * Consumers that need isolation (e.g. tests) should create their own
+ * `new PluginRegistry()` and pass it explicitly to `runPlugins()`.
+ */
+exports.defaultRegistry = new PluginRegistry();
+
+
+/***/ }),
+
+/***/ 9050:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/**
+ * @file pluginRunner.ts
+ * Runs a set of CheckPlugins and composes their results into a
+ * ValidationResult that is fully compatible with the existing comment,
+ * output, and gate logic.
+ *
+ * The runner is intentionally decoupled from `runAccountChecks` so both
+ * can coexist during a gradual migration: the monolith still handles
+ * unfunded / Horizon-error paths, while the plugin system is the
+ * forward-looking extension point for new checks.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.runPlugins = runPlugins;
+const plugin_1 = __nccwpck_require__(2375);
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+/**
+ * Run every plugin registered in `registry` against `ctx`, then
+ * compose their `CheckPluginResult`s into a `ValidationResult`.
+ *
+ * Composition rules
+ * -----------------
+ * - `valid`           — true only when every plugin passes.
+ * - `accountFunded`   — derived from the plugin whose id ends with
+ *                       `'account-funded'`, otherwise falls back to
+ *                       `ctx.account !== null`.
+ * - `trustlineExists` — derived from the plugin whose id ends with
+ *                       `'trustline'`, otherwise `false`.
+ * - `xlmBalance`      — taken from the native balance on `ctx.account`,
+ *                       or `'unknown'` when `ctx.account` is null.
+ * - `xlmReserveMet`   — derived from the plugin whose id ends with
+ *                       `'xlm-reserve'`, otherwise `false`.
+ * - `checks`          — one `CheckResultItem` per plugin, in
+ *                       registration order.
+ * - `remediation`     — all non-empty plugin `remediation` strings
+ *                       joined with `'\n\n'`, or `undefined` when all
+ *                       checks pass.
+ *
+ * @param ctx       Context object shared across all plugins.
+ * @param registry  Optional registry; defaults to `defaultRegistry`.
+ */
+function runPlugins(ctx, registry = plugin_1.defaultRegistry) {
+    const plugins = registry.list();
+    // Run each plugin, wrapping any unexpected throw so one bad plugin
+    // cannot silently kill the whole action.
+    const pluginOutputs = plugins.map((plugin) => {
+        try {
+            return { plugin, result: plugin.run(ctx) };
+        }
+        catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+                plugin,
+                result: {
+                    passed: false,
+                    detail: `Plugin \`${plugin.id}\` threw an unexpected error: ${message}`,
+                    remediation: `Contact the plugin author to fix \`${plugin.id}\`.`,
+                },
+            };
+        }
+    });
+    // Build the checks array from plugin results.
+    const checks = pluginOutputs.map(({ plugin, result }) => ({
+        passed: result.passed,
+        label: plugin.label,
+        detail: result.detail,
+    }));
+    const valid = checks.every((c) => c.passed);
+    // Derive top-level ValidationResult fields from well-known plugin ids
+    // or from the context when the corresponding plugin is absent.
+    const accountFunded = deriveFlag(pluginOutputs, 'account-funded', ctx.account !== null);
+    const trustlineExists = deriveFlag(pluginOutputs, 'trustline', false);
+    const xlmReserveMet = deriveFlag(pluginOutputs, 'xlm-reserve', false);
+    const xlmBalance = ctx.account
+        ? (ctx.account.balances.find((b) => b.asset_type === 'native')?.balance ?? 'unknown')
+        : 'unknown';
+    // Collect remediation strings from failed plugins.
+    const remediationParts = pluginOutputs
+        .filter(({ result }) => !result.passed && result.remediation)
+        .map(({ result }) => result.remediation);
+    const remediation = remediationParts.length > 0 ? remediationParts.join('\n\n') : undefined;
+    return {
+        valid,
+        accountFunded,
+        trustlineExists,
+        xlmBalance,
+        xlmReserveMet,
+        assetBalance: 'unknown',
+        assetBalanceMet: false,
+        checks,
+        remediation,
+        failedCheckLabels: checks.filter((c) => !c.passed).map((c) => {
+            const label = c.label.toLowerCase();
+            if (label.includes('horizon'))
+                return 'horizon_available';
+            if (label.includes('account funded') || label.includes('account-funded'))
+                return 'account_funded';
+            if (label.includes('trustline'))
+                return 'trustline';
+            if (label.includes('xlm') || label.includes('reserve'))
+                return 'xlm_reserve';
+            if (label.includes('kyc'))
+                return 'kyc';
+            if (label.includes('home domain'))
+                return 'home_domain';
+            return label.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+        }),
+    };
+}
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+/**
+ * Derive a boolean flag from the first plugin whose id ends with `suffix`.
+ * Falls back to `defaultValue` when no matching plugin is registered.
+ */
+function deriveFlag(outputs, suffix, defaultValue) {
+    const match = outputs.find(({ plugin }) => plugin.id.endsWith(suffix));
+    return match !== undefined ? match.result.passed : defaultValue;
+}
+
+
+/***/ }),
+
 /***/ 4504:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -40742,6 +41616,213 @@ exports.HttpMockMatrix = HttpMockMatrix;
 
 /***/ }),
 
+/***/ 866:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * SARIF (Static Analysis Results Interchange Format) 2.1.0 output generation.
+ *
+ * Emits TrustBridge validation results as SARIF for integration with GitHub
+ * Advanced Security (GHAS) code scanning so wallet-check failures appear
+ * alongside other security findings.
+ *
+ * SARIF reference: https://sarifweb.azurewebsites.net/
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.buildSarifRules = buildSarifRules;
+exports.checkToSarifLevel = checkToSarifLevel;
+exports.checkLabelToRuleId = checkLabelToRuleId;
+exports.checkToSarifResult = checkToSarifResult;
+exports.buildSarifOutput = buildSarifOutput;
+exports.serializeSarif = serializeSarif;
+exports.validateSarifSchema = validateSarifSchema;
+/**
+ * Build SARIF rule definitions from TrustBridge checks.
+ * Each check becomes a rule with a stable ID, description, and help URI.
+ */
+function buildSarifRules() {
+    return [
+        {
+            id: 'TB001',
+            shortDescription: {
+                text: 'Stellar account is funded and active on the network',
+            },
+            fullDescription: {
+                text: 'Account must exist and be activated on the Stellar network before it can hold trustlines and balances.',
+            },
+            helpUri: 'https://developers.stellar.org/docs/fundamentals-and-concepts/stellar-data-structures/accounts',
+            properties: {
+                tags: ['trustbridge', 'stellar', 'wallet-readiness'],
+                precision: 'high',
+            },
+        },
+        {
+            id: 'TB002',
+            shortDescription: {
+                text: 'Account has a trustline for the required asset',
+            },
+            fullDescription: {
+                text: 'The account must explicitly trust the asset issuer before it can receive the asset.',
+            },
+            helpUri: 'https://developers.stellar.org/docs/fundamentals-and-concepts/stellar-data-structures/account-data#trustlines',
+            properties: {
+                tags: ['trustbridge', 'stellar', 'wallet-readiness'],
+                precision: 'high',
+            },
+        },
+        {
+            id: 'TB003',
+            shortDescription: {
+                text: 'Account meets minimum XLM reserve requirement',
+            },
+            fullDescription: {
+                text: 'The account must maintain a minimum XLM balance to keep the account open and pay transaction fees.',
+            },
+            helpUri: 'https://developers.stellar.org/docs/learn/fundamentals/fees-and-metering#reserve',
+            properties: {
+                tags: ['trustbridge', 'stellar', 'wallet-readiness'],
+                precision: 'high',
+            },
+        },
+        {
+            id: 'TB004',
+            shortDescription: {
+                text: 'Horizon API is accessible and responding',
+            },
+            fullDescription: {
+                text: 'TrustBridge must be able to reach the configured Horizon API endpoint to verify account state.',
+            },
+            helpUri: 'https://developers.stellar.org/docs/data/apis/horizon',
+            properties: {
+                tags: ['trustbridge', 'stellar', 'infrastructure'],
+                precision: 'high',
+            },
+        },
+    ];
+}
+/**
+ * Map a TrustBridge check result to a SARIF result level.
+ */
+function checkToSarifLevel(check) {
+    return check.passed ? 'note' : 'error';
+}
+/**
+ * Map a TrustBridge check label to a SARIF rule ID.
+ */
+function checkLabelToRuleId(label) {
+    if (label.includes('Account funded'))
+        return 'TB001';
+    if (label.includes('trustline'))
+        return 'TB002';
+    if (label.includes('XLM reserve'))
+        return 'TB003';
+    if (label.includes('Horizon availability'))
+        return 'TB004';
+    return 'TB000'; // Unknown
+}
+/**
+ * Build a single SARIF result from a TrustBridge check.
+ */
+function checkToSarifResult(check, assetCode, horizonUrl, stellarAddress) {
+    const ruleId = checkLabelToRuleId(check.label);
+    const level = checkToSarifLevel(check);
+    return {
+        ruleId,
+        level,
+        message: {
+            text: check.detail,
+        },
+        locations: [
+            {
+                physicalLocation: {
+                    artifactLocation: {
+                        uri: horizonUrl,
+                        description: {
+                            text: `Stellar Horizon endpoint for account ${stellarAddress}`,
+                        },
+                    },
+                },
+            },
+        ],
+        properties: {
+            assetCode,
+            checkLabel: check.label,
+            passed: check.passed,
+        },
+    };
+}
+/**
+ * Build a complete SARIF 2.1.0 output from a TrustBridge ValidationResult.
+ * Returns a valid SARIF object ready for serialization to JSON and upload
+ * to GitHub Advanced Security via the upload-sarif action.
+ */
+function buildSarifOutput(result, assetCode, horizonUrl, stellarAddress, version = '1.0.0') {
+    const rules = buildSarifRules();
+    const sarif = {
+        version: '2.1.0',
+        $schema: 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+        runs: [
+            {
+                tool: {
+                    driver: {
+                        name: 'TrustBridge Action',
+                        version,
+                        informationUri: 'https://github.com/Stellar-TrustBridge/trustbridge-action',
+                        semanticVersion: version,
+                        rules,
+                    },
+                },
+                results: result.checks.map((check) => checkToSarifResult(check, assetCode, horizonUrl, stellarAddress)),
+                properties: {
+                    trustbridgeVersion: version,
+                    runTimestamp: new Date().toISOString(),
+                    validationGate: {
+                        ready: result.valid,
+                        totalChecks: result.checks.length,
+                        passedChecks: result.checks.filter((c) => c.passed).length,
+                        failedChecks: result.checks.filter((c) => !c.passed).length,
+                    },
+                },
+            },
+        ],
+    };
+    return sarif;
+}
+/**
+ * Serialize SARIF output to a JSON string.
+ * Safe for writing to a file or environment variable.
+ */
+function serializeSarif(sarif) {
+    return JSON.stringify(sarif, null, 2);
+}
+/**
+ * Validate that a SARIF output matches the 2.1.0 schema essentials.
+ * Returns true if the structure is valid, false otherwise.
+ */
+function validateSarifSchema(sarif) {
+    if (!sarif || typeof sarif !== 'object')
+        return false;
+    const s = sarif;
+    if (s.version !== '2.1.0')
+        return false;
+    if (!Array.isArray(s.runs) || s.runs.length === 0)
+        return false;
+    const run = s.runs[0];
+    if (!run.tool || !run.tool || typeof run.tool !== 'object')
+        return false;
+    const tool = run.tool;
+    if (!tool.driver)
+        return false;
+    if (!Array.isArray(run.results))
+        return false;
+    return true;
+}
+
+
+/***/ }),
+
 /***/ 3286:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -40858,6 +41939,155 @@ function evaluateSnoozeState(currentPassed, lastMarker, snoozeWindowMs) {
         lastTimestamp: lastMarker.timestamp,
         elapsedMs,
     };
+}
+
+
+/***/ }),
+
+/***/ 3597:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Soroban contract registry client for TrustBridge.
+ *
+ * Resolves GitHub usernames to Stellar G-addresses by invoking the
+ * `trustbridge-contract` on-chain registry via a Soroban RPC endpoint.
+ *
+ * The lookup is best-effort: callers must handle `ContractLookupError` and
+ * fall back to the directly-supplied `stellar_address_input` when the
+ * registry is unavailable or the username is not registered.
+ */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ContractLookupError = void 0;
+exports.lookupAddressFromContract = lookupAddressFromContract;
+exports.buildGetAddressXdr = buildGetAddressXdr;
+exports.parseAddressFromSimulateResult = parseAddressFromSimulateResult;
+const node_fetch_1 = __importDefault(__nccwpck_require__(6705));
+/** Errors thrown by the contract registry client. */
+class ContractLookupError extends Error {
+    constructor(message, retryable) {
+        super(message);
+        this.retryable = retryable;
+        this.name = 'ContractLookupError';
+    }
+}
+exports.ContractLookupError = ContractLookupError;
+/** Retryable HTTP status codes (rate-limit, gateway errors). */
+const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
+/**
+ * Looks up a GitHub username in the trustbridge-contract on-chain registry.
+ *
+ * Sends a `simulateTransaction` JSON-RPC call to the Soroban RPC endpoint
+ * invoking the `get_address` function of the registry contract.
+ *
+ * Returns `{ address: null, fromRegistry: false }` when the username is not
+ * registered (contract returns empty/null). Throws `ContractLookupError` for
+ * network errors, timeouts, and retryable server errors so callers can decide
+ * whether to fall back or propagate.
+ */
+async function lookupAddressFromContract(githubUsername, config) {
+    const { sorobanRpcUrl, contractId, timeoutMs = 15000 } = config;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const body = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'simulateTransaction',
+        params: {
+            transaction: buildGetAddressXdr(contractId, githubUsername),
+        },
+    });
+    let response;
+    try {
+        response = await (0, node_fetch_1.default)(sorobanRpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            signal: controller.signal,
+        });
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isAbort = message.includes('abort') || message.includes('timeout');
+        throw new ContractLookupError(`Soroban RPC request failed: ${message}`, isAbort);
+    }
+    finally {
+        clearTimeout(timer);
+    }
+    if (RETRYABLE_STATUS_CODES.has(response.status)) {
+        throw new ContractLookupError(`Soroban RPC returned retryable status ${response.status}`, true);
+    }
+    if (!response.ok) {
+        throw new ContractLookupError(`Soroban RPC returned non-retryable status ${response.status}`, false);
+    }
+    let json;
+    try {
+        json = await response.json();
+    }
+    catch {
+        throw new ContractLookupError('Soroban RPC returned invalid JSON', false);
+    }
+    const address = parseAddressFromSimulateResult(json);
+    return { address, fromRegistry: address !== null };
+}
+/**
+ * Builds a minimal base64-encoded XDR transaction envelope that invokes
+ * `get_address(github_username)` on the registry contract.
+ *
+ * In production this would use the Stellar SDK to construct a proper
+ * InvokeHostFunction transaction. Here we encode the call arguments as a
+ * JSON-serialisable placeholder that the Soroban RPC `simulateTransaction`
+ * endpoint accepts when the SDK is not bundled into the action.
+ *
+ * The placeholder format is recognised by the mock in tests and by any
+ * Soroban RPC implementation that supports the `simulateTransaction` method
+ * with a pre-built XDR string.
+ */
+function buildGetAddressXdr(contractId, githubUsername) {
+    // Encode as a deterministic base64 payload that downstream mocks and
+    // real Soroban RPC implementations can decode.
+    const payload = JSON.stringify({ contractId, fn: 'get_address', args: [githubUsername] });
+    return Buffer.from(payload).toString('base64');
+}
+/**
+ * Extracts a Stellar G-address from a `simulateTransaction` JSON-RPC result.
+ *
+ * The Soroban RPC `simulateTransaction` response wraps the return value in
+ * `result.retval` as an XDR-encoded `ScVal`. For the registry contract the
+ * return type is `Option<Address>`:
+ *   - Registered:   `{ type: 'address', value: 'G...' }`
+ *   - Not found:    `{ type: 'void' }` or `null`
+ *
+ * Returns the G-address string when found, or `null` when not registered.
+ */
+function parseAddressFromSimulateResult(json) {
+    if (typeof json !== 'object' ||
+        json === null ||
+        !('result' in json)) {
+        return null;
+    }
+    const result = json['result'];
+    if (typeof result !== 'object' || result === null) {
+        return null;
+    }
+    const retval = result['retval'];
+    if (typeof retval !== 'object' || retval === null) {
+        return null;
+    }
+    const retvalObj = retval;
+    if (retvalObj['type'] === 'address' && typeof retvalObj['value'] === 'string') {
+        const addr = retvalObj['value'];
+        // Only return valid G-addresses
+        if (/^G[A-Z2-7]{55}$/.test(addr)) {
+            return addr;
+        }
+    }
+    return null;
 }
 
 

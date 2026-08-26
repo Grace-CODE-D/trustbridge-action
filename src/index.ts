@@ -1,5 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   CheckConfig,
   detectNetworkMismatch,
@@ -35,9 +37,12 @@ import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
-import { registerCorePlugins } from './corePlugins';
-import { loadPluginsFromAllowlist } from './pluginLoader';
-import { defaultRegistry } from './plugin';
+import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
+import { lookupAddressFromContract, ContractLookupError } from './soroban';
+import { buildSarifOutput, serializeSarif, validateSarifSchema } from './sarif';
+import { runPlugins } from './pluginRunner';
+import { corePlugins } from './corePlugins';
+import { PluginRegistry, CheckPluginContext } from './plugin';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -163,6 +168,9 @@ async function run(): Promise<void> {
   const contractId = core.getInput('contract_id') || '';
   const githubUsername = core.getInput('github_username') || '';
 
+  // Plugin runner flag (Issue #198) — default off
+  const usePluginRunner = parseBooleanInput(core.getInput('use_plugin_runner'), false);
+
   // Onboarding checklist in comments (Issue #154) — default on
   const onboardingChecklist = parseBooleanInput(core.getInput('onboarding_checklist'), true);
 
@@ -259,14 +267,68 @@ async function run(): Promise<void> {
   }
 
 
-  // Effective values (config-file overrides can wire in later; default to action inputs)
-  const effectiveHorizonUrl = horizonUrl;
-  const effectiveHorizonUrlFallback = horizonUrlFallback;
-  const effectiveAssetCode = assetCode;
-  const effectiveAssetIssuer = assetIssuer;
-  const effectiveMinXlmReserveRaw = minXlmReserveRaw;
-  const effectiveRpcFallbackUrl = rpcFallbackUrlRaw;
-  const effectiveFailOnMissing = failOnMissing;
+  // ---------------------------------------------------------------------------
+  // Config-file overlay (Issue #196)
+  // Read the consumer .trustbridge.yml and merge values into action inputs.
+  // Explicit non-empty action inputs always win over config-file values.
+  // ---------------------------------------------------------------------------
+  const configResult = readTrustbridgeConfig(
+    trustbridgeConfigPath,
+    process.env.GITHUB_WORKSPACE || process.cwd(),
+  );
+
+  if (!configResult.validation.valid) {
+    const errMsg = configResult.validation.errors.join('; ');
+    core.setFailed(`Trustbridge config file error: ${errMsg}`);
+    return;
+  }
+
+  if (configResult.found) {
+    core.info(`Loaded trustbridge config from ${configResult.resolvedPath}`);
+    if (debugMode && configResult.redactedSnapshot) {
+      logger.debug('Trustbridge config snapshot (redacted)', {
+        component: 'index',
+        config: configResult.redactedSnapshot,
+      });
+    }
+  }
+
+  // Build set of inputs that were explicitly provided by the workflow author
+  const explicitInputs = new Set<string>();
+  const checkInput = (name: string, raw: string) => {
+    if (raw.trim()) explicitInputs.add(name);
+  };
+  checkInput('horizonUrl', horizonUrl);
+  checkInput('horizonUrlFallback', horizonUrlFallback);
+  checkInput('rpcFallbackUrl', rpcFallbackUrlRaw);
+  checkInput('assetCode', assetCode);
+  checkInput('assetIssuer', assetIssuer);
+  checkInput('minXlmReserveRaw', minXlmReserveRaw);
+  checkInput('failOnMissing', core.getInput('fail_on_missing'));
+
+  // Merge config file values under action inputs
+  const merged = mergeConsumerConfig(
+    {
+      horizonUrl,
+      horizonUrlFallback,
+      rpcFallbackUrl: rpcFallbackUrlRaw,
+      assetCode,
+      assetIssuer,
+      minXlmReserveRaw,
+      failOnMissing,
+    },
+    configResult.config,
+    explicitInputs,
+  );
+
+  // Effective values (config-file overlays applied; explicit inputs win)
+  const effectiveHorizonUrl = merged.horizonUrl as string;
+  const effectiveHorizonUrlFallback = merged.horizonUrlFallback as string;
+  const effectiveAssetCode = merged.assetCode as string;
+  const effectiveAssetIssuer = merged.assetIssuer as string;
+  const effectiveMinXlmReserveRaw = merged.minXlmReserveRaw as string;
+  const effectiveRpcFallbackUrl = merged.rpcFallbackUrl as string;
+  const effectiveFailOnMissing = merged.failOnMissing as boolean;
   const resolvedAddress = stellarAddress;
   const jobController = new AbortController();
   const horizonMaxRequests = parseNumberInput(
@@ -404,7 +466,44 @@ async function run(): Promise<void> {
     ledgerFreshnessFailOnStale,
   };
 
-  core.info(`Checking Stellar account ${resolvedAddress} via ${horizonUrl}`);
+  // ---------------------------------------------------------------------------
+  // Soroban contract registry lookup (Issue #195)
+  // When RPC URL + contract id are set, resolve GitHub username to Stellar
+  // address from the on-chain registry before running Horizon checks.
+  // ---------------------------------------------------------------------------
+  let effectiveResolvedAddress = resolvedAddress;
+  if (sorobanRpcUrl.trim() && contractId.trim() && githubUsername.trim()) {
+    core.info(`Looking up Stellar address for @${githubUsername} from contract registry…`);
+    try {
+      const lookup = await lookupAddressFromContract(githubUsername, {
+        sorobanRpcUrl: sorobanRpcUrl.trim(),
+        contractId: contractId.trim(),
+        timeoutMs: horizonTimeoutMs,
+      });
+      if (lookup.address) {
+        effectiveResolvedAddress = lookup.address;
+        core.info(`Resolved @${githubUsername} → ${effectiveResolvedAddress} from contract registry`);
+        globalMetrics.incrementCounter('soroban_registry_hit');
+      } else {
+        core.warning(
+          `@${githubUsername} is not registered in the contract registry — falling back to stellar_address_input.`,
+        );
+        globalMetrics.incrementCounter('soroban_registry_miss');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof ContractLookupError) {
+        core.warning(
+          `Contract registry lookup failed (${err.retryable ? 'retryable' : 'non-retryable'}): ${msg} — falling back to stellar_address_input.`,
+        );
+      } else {
+        core.warning(`Contract registry lookup failed: ${msg} — falling back to stellar_address_input.`);
+      }
+      globalMetrics.incrementCounter('soroban_registry_error');
+    }
+  }
+
+  core.info(`Checking Stellar account ${effectiveResolvedAddress} via ${horizonUrl}`);
 
   if (waitUntilFunded) {
     core.info(
@@ -481,7 +580,7 @@ async function run(): Promise<void> {
     const account = waitUntilFunded
       ? await waitForFundedAccount(
           horizonUrl,
-          resolvedAddress,
+          effectiveResolvedAddress,
           {
             timeoutMs: waitUntilFundedTimeoutMs,
             pollIntervalMs: waitUntilFundedIntervalMs,
@@ -496,11 +595,21 @@ async function run(): Promise<void> {
           },
           (hUrl, sAddr, opts) => fetchAccount(hUrl, sAddr, { ...horizonOptions, ...opts }),
         )
-      : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
-    globalMetrics.stopTimer('horizon_fetch');
-    globalMetrics.startTimer('checks');
-    result = runAccountChecks(account, checkConfig);
-    globalMetrics.stopTimer('checks');
+      : await fetchAccount(horizonUrl, effectiveResolvedAddress, horizonOptions);
+
+    // Use plugin runner when flag is enabled; fall back to monolith otherwise
+    if (usePluginRunner) {
+      const ctx: CheckPluginContext = {
+        account,
+        config: checkConfig,
+        stellarAddress: effectiveResolvedAddress,
+      };
+      const registry = new PluginRegistry();
+      corePlugins.forEach((p) => registry.register(p));
+      result = runPlugins(ctx, registry);
+    } else {
+      result = runAccountChecks(account, checkConfig);
+    }
   } catch (error) {
     globalMetrics.stopTimer('horizon_fetch');
     if (error instanceof HorizonError && error.statusCode === 404) {
@@ -567,7 +676,7 @@ async function run(): Promise<void> {
   if (writeValidationJsonEnabled) {
     writeValidationJson({
       result,
-      stellarAddress: resolvedAddress,
+      stellarAddress: effectiveResolvedAddress,
       assetCode: effectiveAssetCode,
       assetIssuer: effectiveAssetIssuer,
       horizonUrl: effectiveHorizonUrl,
@@ -575,6 +684,45 @@ async function run(): Promise<void> {
       privacyMode,
     });
     core.info(`Wrote validation JSON artifact to ${validationJsonPath}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // SARIF output (Issue #197)
+  // Write SARIF 2.1.0 to disk when sarif_output_path is set.
+  // ---------------------------------------------------------------------------
+  const sarifOutputPath = core.getInput('sarif_output_path') || '';
+  if (sarifOutputPath.trim()) {
+    const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
+    const resolvedSarifPath = path.isAbsolute(sarifOutputPath)
+      ? sarifOutputPath
+      : path.join(workspaceRoot, sarifOutputPath.trim());
+
+    // Path traversal guard
+    const normalizedWorkspace = path.normalize(workspaceRoot);
+    const normalizedSarif = path.normalize(resolvedSarifPath);
+    if (!normalizedSarif.startsWith(normalizedWorkspace + path.sep) && normalizedSarif !== normalizedWorkspace) {
+      core.warning(
+        `sarif_output_path resolves outside GITHUB_WORKSPACE — SARIF output skipped.`,
+      );
+    } else {
+      try {
+        const sarif = buildSarifOutput(result, effectiveAssetCode, effectiveHorizonUrl, effectiveResolvedAddress);
+        if (!validateSarifSchema(sarif)) {
+          core.warning('Generated SARIF output failed schema validation — skipping SARIF write.');
+        } else {
+          const sarifJson = serializeSarif(sarif);
+          const sarifDir = path.dirname(normalizedSarif);
+          if (!fs.existsSync(sarifDir)) {
+            fs.mkdirSync(sarifDir, { recursive: true });
+          }
+          fs.writeFileSync(normalizedSarif, sarifJson, 'utf8');
+          core.info(`Wrote SARIF 2.1.0 output to ${normalizedSarif}`);
+        }
+      } catch (sarifError) {
+        const msg = sarifError instanceof Error ? sarifError.message : String(sarifError);
+        core.warning(`Failed to write SARIF output (non-fatal): ${msg}`);
+      }
+    }
   }
 
   // Reserved inputs kept for forward-compatible workflows / labels / Soroban.
@@ -601,7 +749,7 @@ async function run(): Promise<void> {
 
   const commentBody = formatCommentBody(result, {
     ...checkConfig,
-    stellarAddress: resolvedAddress,
+    stellarAddress: effectiveResolvedAddress,
     horizonUrl,
     failOnMissing,
     stickyComment,
@@ -703,7 +851,7 @@ async function run(): Promise<void> {
     const issueNumber = github.context.payload.issue?.number ?? null;
     await sendWebhookNotification(
       result,
-      resolvedAddress,
+      effectiveResolvedAddress,
       { webhookUrl, webhookSecret, timeoutMs: webhookTimeoutMs },
       `${owner}/${repo}`,
       issueNumber,
