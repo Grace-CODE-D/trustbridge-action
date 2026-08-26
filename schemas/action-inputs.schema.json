@@ -359,6 +359,20 @@
       "type": "string",
       "description": "Home domain check mode: warn or strict.",
       "default": "warn"
+    },
+    "sarif_output_path": {
+      "type": "string",
+      "description": "Path to write SARIF 2.1.0 output file for GitHub Advanced Security integration. Leave empty to skip.",
+      "default": ""
+    },
+    "use_plugin_runner": {
+      "type": "string",
+      "description": "Use the plugin-based check pipeline instead of the monolith runAccountChecks.",
+      "enum": [
+        "true",
+        "false"
+      ],
+      "default": "false"
     }
   }
 }
