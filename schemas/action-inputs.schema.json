@@ -330,6 +330,29 @@
         "https://github.com/Stellar-TrustBridge/trustbridge-action/blob/main/docs/FAQ.md"
       ]
     },
+    "network": {
+      "type": "string",
+      "description": "Stellar network shorthand: testnet, public, or mainnet. Overrides horizon_url, asset_code, and asset_issuer defaults via campaign preset. (Issue #207)",
+      "default": "",
+      "enum": [
+        "",
+        "testnet",
+        "public",
+        "mainnet"
+      ]
+    },
+    "preset": {
+      "type": "string",
+      "description": "Campaign preset name (testnet, public, testnet-usdc, mainnet). Overrides network input and provides horizon_url, asset_code, asset_issuer defaults. (Issue #207)",
+      "default": "",
+      "enum": [
+        "",
+        "testnet",
+        "testnet-usdc",
+        "public",
+        "mainnet"
+      ]
+    },
     "comment_mode": {
       "type": "string",
       "description": "Comment posting mode: post, dry-run, or off.",

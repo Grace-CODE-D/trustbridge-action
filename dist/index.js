@@ -37645,11 +37645,20 @@ function resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw) 
         '(JSON / file path mapping GitHub usernames to G-addresses).');
 }
 async function run() {
-    const horizonUrl = core.getInput('horizon_url') || 'https://horizon.stellar.org';
-    const assetCode = core.getInput('asset_code') || 'USDC';
+    // Campaign presets (Issue #207) — resolved first so they can provide defaults.
+    const networkInput = core.getInput('network') || '';
+    const presetInput = core.getInput('preset') || '';
+    const presetName = (0, inputs_1.parsePresetInput)(networkInput, presetInput);
+    const campaignPreset = presetName ? (0, assets_1.getCampaignPreset)(presetName) : undefined;
+    if (presetName && !campaignPreset) {
+        throw new Error(`Unknown campaign preset "${presetName}". Valid presets: testnet, testnet-usdc, public, mainnet.`);
+    }
+    const horizonUrl = core.getInput('horizon_url') || campaignPreset?.horizonUrl || 'https://horizon.stellar.org';
+    const assetCode = core.getInput('asset_code') || campaignPreset?.assetCode || 'USDC';
     const assetIssuer = core.getInput('asset_issuer') ||
+        campaignPreset?.assetIssuer ||
         'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
-    const minXlmReserveRaw = core.getInput('min_xlm_reserve') || '1.5';
+    const minXlmReserveRaw = core.getInput('min_xlm_reserve') || campaignPreset?.minXlmReserve || '1.5';
     const stellarAddressInput = core.getInput('stellar_address_input');
     const assigneeAddressMapRaw = core.getInput('assignee_address_map');
     const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
@@ -37830,6 +37839,9 @@ async function run() {
         });
     }
     const normalizedAsset = (0, assets_1.normalizeAssetConfig)({ assetCode, assetIssuer });
+    // Validate network/asset compatibility using the campaign preset (Issue #207).
+    // Catches testnet issuer on public Horizon (or vice versa) and preset conflicts.
+    (0, assets_1.validateNetworkAssetCompatibility)(horizonUrl, normalizedAsset.assetCode, normalizedAsset.assetIssuer, presetName || undefined);
     // Soroban fungible token contracts (SEP-41) use a "C..." contract address
     // as their issuer instead of a classic "G..." account. Validate that
     // shape up front so a malformed contract address fails fast with a clear
@@ -37918,6 +37930,10 @@ async function run() {
         rateBudgetTracker,
         horizonMaxRequests,
     };
+    const horizonFetchStartMs = Date.now();
+    let horizonFetchLatencyMs = 0;
+    let horizonFetchStatusCode;
+    let horizonFetchError;
     try {
         const account = waitUntilFunded
             ? await (0, horizon_1.waitForFundedAccount)(horizonUrl, resolvedAddress, {
@@ -37932,11 +37948,16 @@ async function run() {
                 }),
             }, (hUrl, sAddr, opts) => (0, horizon_1.fetchAccount)(hUrl, sAddr, { ...horizonOptions, ...opts }))
             : await (0, horizon_1.fetchAccount)(horizonUrl, resolvedAddress, horizonOptions);
+        horizonFetchLatencyMs = Date.now() - horizonFetchStartMs;
+        horizonFetchStatusCode = 200;
         result = (0, checks_1.runAccountChecks)(account, checkConfig);
     }
     catch (error) {
+        horizonFetchLatencyMs = Date.now() - horizonFetchStartMs;
         metrics_1.globalMetrics.stopTimer('horizon_fetch');
         if (error instanceof horizon_1.HorizonError && error.statusCode === 404) {
+            horizonFetchStatusCode = 404;
+            horizonFetchError = error.message;
             // #144: attempt cross-network detection before building the result so
             // the comment surfaces a clear mismatch error when the address is active
             // on the opposite network. Fire-and-forget with a short timeout so a
@@ -37949,6 +37970,8 @@ async function run() {
             result = (0, checks_1.unfundedAccountResult)(stellarAddress, checkConfig, mismatchHint);
         }
         else if (error instanceof horizon_1.HorizonError) {
+            horizonFetchStatusCode = error.statusCode;
+            horizonFetchError = error.message;
             core.error(error.message);
             metrics_1.globalMetrics.incrementCounter('errors');
             metrics_1.globalMetrics.recordMetric('horizon_error', error.statusCode, 'http_status');
@@ -37956,6 +37979,7 @@ async function run() {
         }
         else {
             const message = (0, inputs_1.getErrorMessage)(error);
+            horizonFetchError = message;
             core.error(message);
             metrics_1.globalMetrics.incrementCounter('errors');
             result = (0, checks_1.horizonFailureResult)(message, checkConfig);
@@ -37969,6 +37993,8 @@ async function run() {
     if (result == null) {
         return;
     }
+    // Capture the validation timestamp once, used for validated_at output and delta.
+    const validatedAt = new Date().toISOString();
     // Attach the freshness result to every result path so comment.ts can render it.
     if (freshnessResult !== undefined) {
         result = { ...result, ledgerFreshnessResult: freshnessResult };
@@ -38007,6 +38033,30 @@ async function run() {
     else if (delta) {
         core.info(`Validation delta vs previous run: newlyPassed=${delta.newlyPassed.length}, newlyFailed=${delta.newlyFailed.length}, unchanged=${delta.unchanged.length}`);
     }
+    // Build diagnostics config when debug_mode is on (Issue #205).
+    // Never includes secrets; addresses are redacted in the block builder.
+    let diagnosticsConfig;
+    if (debugMode) {
+        diagnosticsConfig = {
+            inputs: {
+                horizonUrl,
+                horizonUrlFallback: horizonUrlFallback || undefined,
+                assetCode: effectiveAssetCode,
+                assetIssuer: effectiveAssetIssuer,
+                minXlmReserve: effectiveMinXlmReserveRaw,
+                horizonTimeoutMs,
+                useCache,
+                cacheTtlMs: horizonCacheTtlMs,
+                allowCrossNetworkFallback,
+                debugMode,
+            },
+            runInfo: {
+                horizonStatusCode: horizonFetchStatusCode,
+                horizonLatencyMs: horizonFetchLatencyMs,
+                horizonError: horizonFetchError,
+            },
+        };
+    }
     const commentBody = (0, comment_1.formatCommentBody)(result, {
         ...checkConfig,
         stellarAddress: resolvedAddress,
@@ -38022,6 +38072,8 @@ async function run() {
         locale,
         debugMode,
         docsBaseUrl: core.getInput('docs_base_url') || undefined,
+        delta,
+        diagnosticsConfig,
     });
     // Detect oversize and write the full report to a workspace file when needed.
     const commentBodyBytes = Buffer.byteLength(commentBody, 'utf8');
@@ -38056,7 +38108,7 @@ async function run() {
             core.warning(`Failed to post issue comment (non-fatal): ${message}`);
         }
     }
-    (0, outputs_1.setValidationOutputs)(result, commentUrl, fullReportPath);
+    (0, outputs_1.setValidationOutputs)(result, commentUrl, fullReportPath, { validatedAt });
     // Signed dashboard webhook notification (Issue #101)
     // Fires after comment posting; failures are isolated and never block the run.
     if (webhookUrl) {
@@ -39537,6 +39589,7 @@ const badge_1 = __nccwpck_require__(3120);
 const delta_1 = __nccwpck_require__(1493);
 function toActionOutputs(result, commentUrl, fullReportPath, extras = {}) {
     const timings = extras.timings ?? {};
+    const validatedAt = extras.validatedAt ?? new Date().toISOString();
     return {
         trustline_exists: String(result.trustlineExists),
         xlm_balance: result.xlmBalance,
@@ -39544,6 +39597,7 @@ function toActionOutputs(result, commentUrl, fullReportPath, extras = {}) {
         comment_url: commentUrl ?? '',
         full_report_path: fullReportPath ?? '',
         ready: String(result.valid),
+        validated_at: validatedAt,
         reason_code: result.reasonCode ?? (result.valid ? 'SUCCESS' : 'FAILED'),
         horizon_url: extras.horizonUrl ?? '',
         asset_code: extras.assetCode ?? '',
