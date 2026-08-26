@@ -1,5 +1,5 @@
 import { SimpleCache } from './cache';
-import { RateBudgetTracker } from './resilience';
+import { RateBudgetTracker, CircuitBreaker } from './resilience';
 export interface HorizonBalanceNative {
     balance: string;
     asset_type: 'native';
@@ -111,6 +111,12 @@ export interface FetchAccountOptions {
     retryMaxDelayMs?: number;
     retryMaxTotalWaitMs?: number;
     rateBudgetTracker?: RateBudgetTracker;
+    /**
+     * Optional circuit breaker for Horizon fetches (Issue #209).
+     * When the circuit is open, requests are fast-failed without reaching
+     * the network. Cache hits bypass the circuit breaker.
+     */
+    circuitBreaker?: CircuitBreaker;
     /**
      * By default, a fallback URL that resolves to a *different* Stellar
      * network than the primary `horizon_url` (public vs testnet, inferred

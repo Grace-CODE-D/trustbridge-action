@@ -36,21 +36,16 @@ import { setValidationOutputs, writeValidationJson } from './outputs';
 import {
   computeValidationDelta,
   loadPreviousValidationArtifact,
+  discoverPreviousValidationArtifact,
 } from './delta';
 import { logger, emitInputsLogRecord } from './logger';
 import { globalMetrics, writeJobSummary } from './metrics';
-import { RateBudgetTracker } from './resilience';
+import { RateBudgetTracker, CircuitBreaker } from './resilience';
 import { validateContractAddress, clearSpans, getSpans } from './validation';
 import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
-import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
 import { lookupAddressFromContract, ContractLookupError } from './soroban';
-import { buildSarifOutput, serializeSarif, validateSarifSchema } from './sarif';
-import { runPlugins } from './pluginRunner';
-import { corePlugins } from './corePlugins';
-import { PluginRegistry, CheckPluginContext } from './plugin';
-import { parseBatchAddresses, runBatchValidation, buildBatchSummary, formatBatchSummaryMarkdown } from './batch';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -81,30 +76,65 @@ function resolveAssigneeLoginFromContext(): string | undefined {
 }
 
 /**
- * Resolve the Stellar G-address to validate: either from assignee_address_map
- * (GitHub username → address roster) or from stellar_address_input.
+ * Resolve the Stellar G-address to validate.
+ *
+ * Issue #219 — Precedence order (winner documented + logged):
+ * 1. Soroban contract registry lookup (when soroban_rpc_url + contract_id are set)
+ * 2. Assignee address map (when assignee_address_map is set)
+ * 3. Direct stellar_address_input
+ *
+ * Each source is tried in order; the first non-empty result wins.
+ * Conflicts are logged as warnings so maintainers know which source won.
  */
 function resolveStellarAddressInput(
   stellarAddressInput: string,
   assigneeAddressMapRaw: string,
+  contractAddress?: string,
 ): string {
+  const resolvedFrom: string[] = [];
+
+  // Source 1: Contract registry lookup
+  if (contractAddress) {
+    resolvedFrom.push('contract');
+    logger.info('Address resolved from contract registry', {
+      component: 'index',
+      source: 'contract',
+    });
+    return contractAddress;
+  }
+
+  // Source 2: Assignee address map
   const mapRaw = assigneeAddressMapRaw.trim();
   if (mapRaw) {
     const map = parseAssigneeAddressMap(mapRaw, {
       workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
     });
     const assigneeLogin = resolveAssigneeLoginFromContext();
-    return resolveAddressFromAssigneeMap(map, assigneeLogin);
+    const address = resolveAddressFromAssigneeMap(map, assigneeLogin);
+    resolvedFrom.push('assignee_map');
+    logger.info('Address resolved from assignee address map', {
+      component: 'index',
+      source: 'assignee_map',
+      assigneeLogin,
+    });
+    return address;
   }
 
+  // Source 3: Direct input
   const direct = stellarAddressInput.trim();
   if (direct) {
+    resolvedFrom.push('direct_input');
+    logger.debug('Address resolved from direct input', {
+      component: 'index',
+      source: 'direct_input',
+    });
     return direct;
   }
 
   throw new Error(
-    'Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
-      '(JSON / file path mapping GitHub usernames to G-addresses).',
+    'Provide stellar_address_input (a Stellar G-address), assignee_address_map ' +
+      '(JSON / file path mapping GitHub usernames to G-addresses), or configure ' +
+      'soroban_rpc_url + contract_id for on-chain registry lookup.',
   );
 }
 
@@ -131,10 +161,38 @@ async function run(): Promise<void> {
     core.getInput('min_xlm_reserve') || campaignPreset?.minXlmReserve || '1.5';
   const stellarAddressInput = core.getInput('stellar_address_input');
   const assigneeAddressMapRaw = core.getInput('assignee_address_map');
-  const stellarAddressesRaw = core.getInput('stellar_addresses') || '';
-  const stellarAddress = stellarAddressesRaw.trim()
-    ? '' // batch mode — address resolved later
-    : resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
+
+  // Issue #219: Contract registry lookup (source 1 of address resolution).
+  const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
+  const contractId = core.getInput('contract_id') || '';
+  let contractResolvedAddress: string | undefined;
+  if (sorobanRpcUrl && contractId) {
+    const assigneeLogin = resolveAssigneeLoginFromContext();
+    if (assigneeLogin) {
+      try {
+        const lookup = await lookupAddressFromContract(assigneeLogin, {
+          sorobanRpcUrl,
+          contractId,
+        });
+        if (lookup.address) {
+          contractResolvedAddress = lookup.address;
+        }
+      } catch (err) {
+        const isRetryable = err instanceof ContractLookupError && err.retryable;
+        logger.warn('Contract registry lookup failed, falling back', {
+          component: 'index',
+          error: err instanceof Error ? err.message : String(err),
+          retryable: isRetryable,
+        });
+      }
+    }
+  }
+
+  const stellarAddress = resolveStellarAddressInput(
+    stellarAddressInput,
+    assigneeAddressMapRaw,
+    contractResolvedAddress,
+  );
   const failOnMissing = parseBooleanInput(core.getInput('fail_on_missing'), true);
   const debugMode = parseBooleanInput(core.getInput('debug_mode'), false);
   const horizonTimeoutMs = parseNumberInput(core.getInput('horizon_timeout_ms'), 15000, {
@@ -185,8 +243,6 @@ async function run(): Promise<void> {
   const assetsJsonRaw = core.getInput('assets_json') || '';
 
   // Soroban contract registry (Issue #7)
-  const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
-  const contractId = core.getInput('contract_id') || '';
   const githubUsername = core.getInput('github_username') || '';
 
   // Plugin runner flag (Issue #198) — default off
@@ -612,7 +668,13 @@ async function run(): Promise<void> {
 
   const rateBudgetTracker = new RateBudgetTracker(horizonMaxRequests);
 
-  globalMetrics.startTimer('horizon_fetch');
+  // Issue #209: Circuit breaker for Horizon fetches.
+  // Trips after 5 consecutive failures; recovers after 30s.
+  const horizonCircuitBreaker = new CircuitBreaker({
+    failureThreshold: 5,
+    recoveryTimeoutMs: 30_000,
+    successThreshold: 2,
+  });
 
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
@@ -623,6 +685,7 @@ async function run(): Promise<void> {
     allowCrossNetworkFallback,
     rateBudgetTracker,
     horizonMaxRequests,
+    circuitBreaker: horizonCircuitBreaker,
   };
 
   let account: HorizonAccount | null = null;
@@ -821,7 +884,15 @@ async function run(): Promise<void> {
     trustbridgeConfigPath,
   });
 
-  const previousArtifact = loadPreviousValidationArtifact(previousValidationPath);
+  // Issue #212: Load previous validation artifact for delta computation.
+  // Try local path first; fall back to auto-discovery via Actions API.
+  let previousArtifact = loadPreviousValidationArtifact(previousValidationPath);
+  if (!previousArtifact && !previousValidationPath.trim()) {
+    previousArtifact = await discoverPreviousValidationArtifact(githubToken);
+    if (previousArtifact) {
+      core.info('Auto-discovered previous validation artifact from prior workflow run.');
+    }
+  }
   const delta = computeValidationDelta(previousArtifact, result);
   if (!previousArtifact && previousValidationPath.trim()) {
     core.info(

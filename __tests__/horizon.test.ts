@@ -504,16 +504,34 @@ describe('Horizon debug log redaction', () => {
       }
     });
 
-    it('throws HorizonRateLimitError if Retry-After exceeds max delay per retry', async () => {
+    it('caps Retry-After at retryMaxDelayMs and still retries on 429', async () => {
       const errBody = { type: 'rate_limit', title: 'Too Many Requests', status: 429, detail: `Rate limited` };
-      const mock = makeMockFetch(async () => makeMockResponse(429, errBody, { headers: { 'retry-after': '120' } })); // 120s = 120000ms
-      
-      await expect(fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
-        maxRetries: 2,
-        cacheTtlMs: 0,
-        retryMaxDelayMs: 60000,
-        fetchFn: mock,
-      })).rejects.toThrow(HorizonRateLimitError);
+      let callCount = 0;
+      const mock = makeMockFetch(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return makeMockResponse(429, errBody, { headers: { 'retry-after': '120' } });
+        }
+        return makeMockResponse(200, { id: TEST_ADDRESS, balances: [{ asset_type: 'native', balance: '100' }] });
+      });
+
+      const origSetTimeout = global.setTimeout;
+      global.setTimeout = ((callback: Parameters<typeof setTimeout>[0]) =>
+        origSetTimeout(callback, 0)) as typeof setTimeout;
+
+      try {
+        const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+          maxRetries: 2,
+          cacheTtlMs: 0,
+          retryMaxDelayMs: 60000,
+          fetchFn: mock,
+        });
+
+        expect(result).toBeDefined();
+        expect(callCount).toBe(2);
+      } finally {
+        global.setTimeout = origSetTimeout;
+      }
     });
 
     it('throws HorizonRateLimitError if total wait exceeds max total wait', async () => {
@@ -1145,19 +1163,25 @@ describe('AbortSignal cancellation', () => {
       ).rejects.toThrow(RateBudgetExhaustedError);
     });
 
-    it('rejects when Retry-After exceeds retryMaxDelayMs', async () => {
+    it('caps Retry-After at retryMaxDelayMs and retries', async () => {
+      let callCount = 0;
       const mock = makeMockFetch(async () => {
-        return makeMockResponse(429, {}, { headers: { 'retry-after': '100' } });
+        callCount += 1;
+        if (callCount === 1) {
+          return makeMockResponse(429, {}, { headers: { 'retry-after': '100' } });
+        }
+        return makeMockResponse(200, { id: TEST_ADDRESS, balances: [{ asset_type: 'native', balance: '100' }] });
       });
 
-      await expect(
-        fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
-          fetchFn: mock,
-          maxRetries: 1,
-          retryMaxDelayMs: 2000,
-          cacheTtlMs: 0,
-        }),
-      ).rejects.toThrow(HorizonRateLimitError);
+      const result = await fetchAccount(PRIMARY_HORIZON, TEST_ADDRESS, {
+        fetchFn: mock,
+        maxRetries: 1,
+        retryMaxDelayMs: 2000,
+        cacheTtlMs: 0,
+      });
+
+      expect(result).toBeDefined();
+      expect(callCount).toBe(2);
     });
   });
 });

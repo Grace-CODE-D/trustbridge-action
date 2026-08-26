@@ -934,6 +934,41 @@ All three inputs (`soroban_rpc_url`, `contract_id`, `github_username`) default t
 
 ---
 
+## Address resolution precedence (Issue #219)
+
+TrustBridge resolves the Stellar G-address to validate using the following precedence order. The **first** source that yields a non-empty address wins; all later sources are skipped.
+
+| Priority | Source | When used | Conflict handling |
+| -------- | ------ | --------- | ----------------- |
+| 1 (highest) | **Soroban contract registry** | `soroban_rpc_url` + `contract_id` are set and `get_address(username)` returns a non-empty result | Wins over assignee map and direct input; contract lookup failure falls through to priority 2 |
+| 2 | **Assignee address map** | `assignee_address_map` is set and the current assignee login matches an entry | Wins over direct input; missing assignee is a hard error |
+| 3 (lowest) | **Direct input** | `stellar_address_input` is set | Used when neither contract nor map produces an address |
+
+### When multiple sources are configured
+
+If you set both `assignee_address_map` and `stellar_address_input`, the map wins (priority 2 > 3). If you set `soroban_rpc_url` + `contract_id` **and** `assignee_address_map`, the contract wins when the lookup succeeds; on failure, the map is used as fallback.
+
+### Conflict logging
+
+When a source other than direct input resolves the address, TrustBridge logs which source won at `info` level so maintainers can audit the resolution path in workflow logs.
+
+### Example — all three sources configured
+
+```yaml
+- uses: Stellar-TrustBridge/trustbridge-action@v1
+  with:
+    # Priority 1: contract registry (used when available)
+    soroban_rpc_url: https://soroban-testnet.stellar.org
+    contract_id: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
+    # Priority 2: assignee map (fallback if contract lookup fails)
+    assignee_address_map: '{"octocat": "GABC...1234"}'
+    # Priority 3: direct input (last resort)
+    stellar_address_input: GABC...1234
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+---
+
 ## Structured Artifacts (Security & Auditing)
 
 TrustBridge can emit a structured JSON artifact summarizing the check results for machine-readability, security reviews, and auditing. This avoids needing to parse markdown comments or action outputs.

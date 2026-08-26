@@ -1,4 +1,4 @@
-require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
+/******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
 /***/ 4914:
@@ -36597,10 +36597,11 @@ exports.corePlugins = [
  * - **Local artifact path (recommended):** workflow downloads the previous
  *   run's artifact to `previous_validation_path`. No extra API scopes; explicit
  *   matching; fails soft when the file is absent (first run).
- * - **GitHub Actions API from inside the action:** would auto-discover the
- *   prior run's artifact, but needs `actions: read`, is brittle around
- *   artifact names / retention / matrix jobs, and couples the action to
- *   Actions API rate limits. Not implemented here.
+ * - **GitHub Actions API auto-discovery (Issue #212):** when no local path is
+ *   provided and `GITHUB_TOKEN` + `GITHUB_REPOSITORY` + `GITHUB_RUN_ID` are
+ *   available, the action queries the Actions API for the most recent completed
+ *   run that uploaded a `validation.json` artifact and downloads it in-memory.
+ *   Fails open on 403 / API errors so delta is never required.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -36644,6 +36645,8 @@ exports.computeValidationDelta = computeValidationDelta;
 exports.loadPreviousValidationArtifact = loadPreviousValidationArtifact;
 exports.buildValidationArtifact = buildValidationArtifact;
 exports.formatDeltaMarkdown = formatDeltaMarkdown;
+exports.discoverPreviousValidationArtifact = discoverPreviousValidationArtifact;
+exports.extractFromZip = extractFromZip;
 const crypto = __importStar(__nccwpck_require__(6982));
 const fs = __importStar(__nccwpck_require__(9896));
 const path = __importStar(__nccwpck_require__(6928));
@@ -36887,6 +36890,154 @@ function formatDeltaMarkdown(delta) {
         lines.push('', '_Improvement — checks newly passing with no new failures._');
     }
     return lines.join('\n');
+}
+// ---------------------------------------------------------------------------
+// Issue #212 — Auto-discover previous validation.json artifact via Actions API
+// ---------------------------------------------------------------------------
+/**
+ * Attempt to auto-discover and download the most recent `validation.json`
+ * artifact from prior workflow runs via the GitHub Actions REST API.
+ *
+ * This is a best-effort, fail-open operation:
+ * - Returns `null` when required context is missing (non-Actions env).
+ * - Returns `null` on API errors (403, rate limit, network).
+ * - Returns `null` when no prior artifact is found (first run).
+ *
+ * Requires `GITHUB_TOKEN` with `actions: read` permission. When the token
+ * lacks this scope, the function returns `null` gracefully so delta is
+ * never a hard requirement.
+ */
+async function discoverPreviousValidationArtifact(githubToken, artifactName = 'validation-json') {
+    const repoFullName = process.env.GITHUB_REPOSITORY;
+    const currentRunId = process.env.GITHUB_RUN_ID;
+    const apiBase = process.env.GITHUB_API_URL || 'https://api.github.com';
+    if (!repoFullName || !currentRunId || !githubToken) {
+        return null;
+    }
+    const [owner, repo] = repoFullName.split('/');
+    if (!owner || !repo)
+        return null;
+    const headers = {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${githubToken}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+    };
+    try {
+        // List recent workflow runs (newest first), excluding the current run.
+        const runsUrl = `${apiBase}/repos/${owner}/${repo}/actions/runs?status=completed&per_page=10&exclude_pull_requests=true`;
+        const runsResp = await fetch(runsUrl, { headers });
+        if (!runsResp.ok)
+            return null;
+        const runsData = (await runsResp.json());
+        const runs = runsData.workflow_runs ?? [];
+        const priorRuns = runs.filter((r) => r.id !== Number(currentRunId));
+        for (const run of priorRuns) {
+            // List artifacts for this run.
+            const artifactsUrl = `${apiBase}/repos/${owner}/${repo}/actions/runs/${run.id}/artifacts?per_page=10`;
+            const artifactsResp = await fetch(artifactsUrl, { headers });
+            if (!artifactsResp.ok)
+                continue;
+            const artifactsData = (await artifactsResp.json());
+            const artifacts = artifactsData.artifacts ?? [];
+            const target = artifacts.find((a) => a.name === artifactName && !a.expired);
+            if (!target)
+                continue;
+            // Download the artifact zip.
+            const downloadUrl = `${apiBase}/repos/${owner}/${repo}/actions/artifacts/${target.id}/zip`;
+            const downloadResp = await fetch(downloadUrl, { headers });
+            if (!downloadResp.ok)
+                continue;
+            // The artifact zip contains the file(s). Parse the zip to extract validation.json.
+            const zipBuffer = Buffer.from(await downloadResp.arrayBuffer());
+            const validationJson = extractFromZip(zipBuffer, 'validation.json');
+            if (!validationJson)
+                continue;
+            const parsed = JSON.parse(validationJson);
+            if (!parsed || typeof parsed !== 'object')
+                continue;
+            const cleaned = stripSensitiveFields(parsed);
+            if (!Array.isArray(cleaned.checks))
+                continue;
+            return {
+                schemaVersion: cleaned.schemaVersion || exports.VALIDATION_ARTIFACT_SCHEMA_VERSION,
+                timestamp: typeof cleaned.timestamp === 'string' ? cleaned.timestamp : '',
+                address: typeof cleaned.address === 'string' ? cleaned.address : '',
+                asset: {
+                    code: cleaned.asset?.code ?? '',
+                    issuer: cleaned.asset?.issuer ?? '',
+                },
+                horizonUrl: cleaned.horizonUrl,
+                readiness: cleaned.readiness ?? {
+                    ready: false,
+                    totalChecks: cleaned.checks.length,
+                    passedChecks: cleaned.checks.filter((c) => c.passed).length,
+                    failedChecks: cleaned.checks.filter((c) => !c.passed).length,
+                    failedLabels: cleaned.checks.filter((c) => !c.passed).map((c) => c.label),
+                },
+                checks: cleaned.checks.map((c) => ({
+                    label: c.label,
+                    passed: Boolean(c.passed),
+                    detail: typeof c.detail === 'string' ? (0, logger_1.redactString)(c.detail) : '',
+                })),
+                balances: {
+                    xlm: cleaned.balances?.xlm ?? 'unknown',
+                },
+                delta: cleaned.delta,
+                privacyMode: cleaned.privacyMode,
+            };
+        }
+        return null;
+    }
+    catch {
+        // Fail open: auto-discovery errors must never block the action.
+        return null;
+    }
+}
+/**
+ * Minimal ZIP extraction for a single named file.
+ * Parses the ZIP local file headers to find and decompress the target file.
+ * Returns the file content as a UTF-8 string, or null if not found.
+ *
+ * @internal Exported for testing.
+ */
+function extractFromZip(zipBuffer, targetFileName) {
+    // ZIP magic number: PK\x03\x04
+    const LOCAL_FILE_HEADERSignature = 0x04034b50;
+    let offset = 0;
+    while (offset + 30 <= zipBuffer.length) {
+        const sig = zipBuffer.readUInt32LE(offset);
+        if (sig !== LOCAL_FILE_HEADERSignature)
+            break;
+        const compressionMethod = zipBuffer.readUInt16LE(offset + 8);
+        const compressedSize = zipBuffer.readUInt32LE(offset + 18);
+        const uncompressedSize = zipBuffer.readUInt32LE(offset + 22);
+        const fileNameLength = zipBuffer.readUInt16LE(offset + 26);
+        const extraFieldLength = zipBuffer.readUInt16LE(offset + 28);
+        const fileName = zipBuffer.toString('utf8', offset + 30, offset + 30 + fileNameLength);
+        const dataStart = offset + 30 + fileNameLength + extraFieldLength;
+        if (fileName === targetFileName || fileName.endsWith('/' + targetFileName)) {
+            const compressedData = zipBuffer.subarray(dataStart, dataStart + compressedSize);
+            if (compressionMethod === 0) {
+                // Stored (no compression)
+                return compressedData.toString('utf8');
+            }
+            else if (compressionMethod === 8) {
+                // Deflate
+                try {
+                    const { inflateSync } = __nccwpck_require__(3106);
+                    const decompressed = inflateSync(compressedData);
+                    return decompressed.toString('utf8');
+                }
+                catch {
+                    return null;
+                }
+            }
+            // Unsupported compression method
+            return null;
+        }
+        offset = dataStart + compressedSize;
+    }
+    return null;
 }
 
 
@@ -37529,7 +37680,7 @@ function safeAccountSummary(account) {
         subentryCount: account.subentry_count,
     };
 }
-async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, retryMaxDelayMs, retryMaxTotalWaitMs, parentSignal, rateBudgetTracker) {
+async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, retryMaxDelayMs, retryMaxTotalWaitMs, parentSignal, rateBudgetTracker, circuitBreaker) {
     const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
     const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
     const safeUrlForLog = (0, logger_1.redactHorizonUrl)(url);
@@ -37564,11 +37715,20 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             if (rateBudgetTracker) {
                 rateBudgetTracker.recordRequest();
             }
-            const response = await fetch(url, {
-                method: 'GET',
-                headers: { Accept: 'application/json' },
-                signal: controller.signal,
-            });
+            // Issue #209: Wrap Horizon fetches with the circuit breaker.
+            // When the circuit is open, this throws CircuitOpenError immediately
+            // without reaching the network. Cache hits bypass the circuit breaker.
+            const response = circuitBreaker
+                ? await circuitBreaker.execute(() => fetch(url, {
+                    method: 'GET',
+                    headers: { Accept: 'application/json' },
+                    signal: controller.signal,
+                }))
+                : await fetch(url, {
+                    method: 'GET',
+                    headers: { Accept: 'application/json' },
+                    signal: controller.signal,
+                });
             const latencyMs = Date.now() - requestStartedAt;
             if (response.status === 404) {
                 logger_1.logger.debug('Horizon account not found (404)', safeHorizonContext({
@@ -37622,9 +37782,18 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                 }
                 if (retryable && attempt < maxRetries) {
                     const retryAfterHeader = parseRetryAfterMs(response);
-                    const retryAfter = retryAfterHeader ?? 1000 * 2 ** attempt;
-                    if (retryAfter > retryMaxDelayMs || totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
-                        throw new HorizonRateLimitError(`Horizon rate limit exceeded (Retry-After ${retryAfter}ms exceeds cap of ${retryMaxDelayMs}ms per-retry or ${retryMaxTotalWaitMs}ms total). Please try again later.`, retryAfter);
+                    // Issue #218: Honor Retry-After on 429s, capped at retryMaxDelayMs.
+                    // When the header is missing or the value exceeds the cap, fall back
+                    // to exponential backoff so the action never waits unbounded.
+                    let retryAfter;
+                    if (retryAfterHeader !== null) {
+                        retryAfter = Math.min(retryAfterHeader, retryMaxDelayMs);
+                    }
+                    else {
+                        retryAfter = Math.min(1000 * 2 ** attempt, retryMaxDelayMs);
+                    }
+                    if (totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
+                        throw new HorizonRateLimitError(`Horizon rate limit exceeded (total wait ${totalWaitMs + retryAfter}ms exceeds cap of ${retryMaxTotalWaitMs}ms). Please try again later.`, retryAfter);
                     }
                     totalWaitMs += retryAfter;
                     logger_1.logger.debug('Horizon retry scheduled', safeHorizonContext({
@@ -37638,6 +37807,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                         attempt,
                         retryAfterMs: retryAfter,
                         retryAfterFromHeader: retryAfterHeader !== null,
+                        retryAfterCapped: retryAfterHeader !== null && retryAfterHeader > retryMaxDelayMs,
                         nextAttempt: attempt + 1,
                     }));
                     await cancellableSleep(retryAfter, parentSignal);
@@ -37680,6 +37850,20 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
         catch (error) {
             if (error instanceof HorizonError || (error instanceof Error && error.name === 'RateBudgetExhaustedError')) {
                 throw error;
+            }
+            // Issue #209: CircuitOpenError means the circuit breaker is open.
+            // Treat as non-retryable — the breaker will transition to half-open
+            // after its recovery timeout.
+            if (error instanceof resilience_1.CircuitOpenError) {
+                logger_1.logger.debug('Horizon request blocked by circuit breaker', safeHorizonContext({
+                    component: 'horizon',
+                    stellarAddress,
+                    horizonUrl: targetHorizonUrl,
+                    endpointKind,
+                    attempt,
+                    final: true,
+                }));
+                throw new HorizonError(`Horizon request blocked by circuit breaker: ${error.message}`, 0, false);
             }
             const tlsCode = tlsErrorCode(error);
             if (tlsCode) {
@@ -37856,8 +38040,9 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         }));
     }
     let primaryError;
+    const circuitBreaker = options.circuitBreaker;
     try {
-        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker);
+        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker, circuitBreaker);
         result.account._servedByUrl = normalizedHorizonUrl;
         if (cachingEnabled) {
             cache.set(cacheKey, result.account, cacheTtlMs);
@@ -37926,7 +38111,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
     }));
     try {
-        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker);
+        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker, circuitBreaker);
         fallbackResult.account._servedByUrl = normalizedFallbackUrl;
         if (cachingEnabled) {
             cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
@@ -38544,7 +38729,7 @@ const validation_1 = __nccwpck_require__(4344);
 const i18n_1 = __nccwpck_require__(4859);
 const webhook_1 = __nccwpck_require__(8378);
 const preflight_1 = __nccwpck_require__(4504);
-const batch_1 = __nccwpck_require__(2983);
+const soroban_1 = __nccwpck_require__(3597);
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
  * Prefers `payload.assignee` (issues.assigned), then the first issue assignee.
@@ -38567,24 +38752,56 @@ function resolveAssigneeLoginFromContext() {
     return undefined;
 }
 /**
- * Resolve the Stellar G-address to validate: either from assignee_address_map
- * (GitHub username → address roster) or from stellar_address_input.
+ * Resolve the Stellar G-address to validate.
+ *
+ * Issue #219 — Precedence order (winner documented + logged):
+ * 1. Soroban contract registry lookup (when soroban_rpc_url + contract_id are set)
+ * 2. Assignee address map (when assignee_address_map is set)
+ * 3. Direct stellar_address_input
+ *
+ * Each source is tried in order; the first non-empty result wins.
+ * Conflicts are logged as warnings so maintainers know which source won.
  */
-function resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw) {
+function resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw, contractAddress) {
+    const resolvedFrom = [];
+    // Source 1: Contract registry lookup
+    if (contractAddress) {
+        resolvedFrom.push('contract');
+        logger_1.logger.info('Address resolved from contract registry', {
+            component: 'index',
+            source: 'contract',
+        });
+        return contractAddress;
+    }
+    // Source 2: Assignee address map
     const mapRaw = assigneeAddressMapRaw.trim();
     if (mapRaw) {
         const map = (0, inputs_1.parseAssigneeAddressMap)(mapRaw, {
             workspaceRoot: process.env.GITHUB_WORKSPACE || process.cwd(),
         });
         const assigneeLogin = resolveAssigneeLoginFromContext();
-        return (0, inputs_1.resolveAddressFromAssigneeMap)(map, assigneeLogin);
+        const address = (0, inputs_1.resolveAddressFromAssigneeMap)(map, assigneeLogin);
+        resolvedFrom.push('assignee_map');
+        logger_1.logger.info('Address resolved from assignee address map', {
+            component: 'index',
+            source: 'assignee_map',
+            assigneeLogin,
+        });
+        return address;
     }
+    // Source 3: Direct input
     const direct = stellarAddressInput.trim();
     if (direct) {
+        resolvedFrom.push('direct_input');
+        logger_1.logger.debug('Address resolved from direct input', {
+            component: 'index',
+            source: 'direct_input',
+        });
         return direct;
     }
-    throw new Error('Provide stellar_address_input (a Stellar G-address) or assignee_address_map ' +
-        '(JSON / file path mapping GitHub usernames to G-addresses).');
+    throw new Error('Provide stellar_address_input (a Stellar G-address), assignee_address_map ' +
+        '(JSON / file path mapping GitHub usernames to G-addresses), or configure ' +
+        'soroban_rpc_url + contract_id for on-chain registry lookup.');
 }
 async function run() {
     // Campaign presets (Issue #207) — resolved first so they can provide defaults.
@@ -38603,10 +38820,33 @@ async function run() {
     const minXlmReserveRaw = core.getInput('min_xlm_reserve') || campaignPreset?.minXlmReserve || '1.5';
     const stellarAddressInput = core.getInput('stellar_address_input');
     const assigneeAddressMapRaw = core.getInput('assignee_address_map');
-    const stellarAddressesRaw = core.getInput('stellar_addresses') || '';
-    const stellarAddress = stellarAddressesRaw.trim()
-        ? '' // batch mode — address resolved later
-        : resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw);
+    // Issue #219: Contract registry lookup (source 1 of address resolution).
+    const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
+    const contractId = core.getInput('contract_id') || '';
+    let contractResolvedAddress;
+    if (sorobanRpcUrl && contractId) {
+        const assigneeLogin = resolveAssigneeLoginFromContext();
+        if (assigneeLogin) {
+            try {
+                const lookup = await (0, soroban_1.lookupAddressFromContract)(assigneeLogin, {
+                    sorobanRpcUrl,
+                    contractId,
+                });
+                if (lookup.address) {
+                    contractResolvedAddress = lookup.address;
+                }
+            }
+            catch (err) {
+                const isRetryable = err instanceof soroban_1.ContractLookupError && err.retryable;
+                logger_1.logger.warn('Contract registry lookup failed, falling back', {
+                    component: 'index',
+                    error: err instanceof Error ? err.message : String(err),
+                    retryable: isRetryable,
+                });
+            }
+        }
+    }
+    const stellarAddress = resolveStellarAddressInput(stellarAddressInput, assigneeAddressMapRaw, contractResolvedAddress);
     const failOnMissing = (0, inputs_1.parseBooleanInput)(core.getInput('fail_on_missing'), true);
     const debugMode = (0, inputs_1.parseBooleanInput)(core.getInput('debug_mode'), false);
     const horizonTimeoutMs = (0, inputs_1.parseNumberInput)(core.getInput('horizon_timeout_ms'), 15000, {
@@ -38642,8 +38882,6 @@ async function run() {
     // Multi-asset trustline validation (Issue #4)
     const assetsJsonRaw = core.getInput('assets_json') || '';
     // Soroban contract registry (Issue #7)
-    const sorobanRpcUrl = core.getInput('soroban_rpc_url') || '';
-    const contractId = core.getInput('contract_id') || '';
     const githubUsername = core.getInput('github_username') || '';
     // Plugin runner flag (Issue #198) — default off
     const usePluginRunner = (0, inputs_1.parseBooleanInput)(core.getInput('use_plugin_runner'), false);
@@ -38964,6 +39202,13 @@ async function run() {
     }
     let result;
     const rateBudgetTracker = new resilience_1.RateBudgetTracker(horizonMaxRequests);
+    // Issue #209: Circuit breaker for Horizon fetches.
+    // Trips after 5 consecutive failures; recovers after 30s.
+    const horizonCircuitBreaker = new resilience_1.CircuitBreaker({
+        failureThreshold: 5,
+        recoveryTimeoutMs: 30000,
+        successThreshold: 2,
+    });
     const horizonOptions = {
         timeoutMs: horizonTimeoutMs,
         horizonUrlFallback: horizonUrlFallback || undefined,
@@ -38973,6 +39218,7 @@ async function run() {
         allowCrossNetworkFallback,
         rateBudgetTracker,
         horizonMaxRequests,
+        circuitBreaker: horizonCircuitBreaker,
     };
     let account = null;
     try {
@@ -39137,7 +39383,15 @@ async function run() {
         githubUsername: githubUsername || undefined,
         trustbridgeConfigPath,
     });
-    const previousArtifact = (0, delta_1.loadPreviousValidationArtifact)(previousValidationPath);
+    // Issue #212: Load previous validation artifact for delta computation.
+    // Try local path first; fall back to auto-discovery via Actions API.
+    let previousArtifact = (0, delta_1.loadPreviousValidationArtifact)(previousValidationPath);
+    if (!previousArtifact && !previousValidationPath.trim()) {
+        previousArtifact = await (0, delta_1.discoverPreviousValidationArtifact)(githubToken);
+        if (previousArtifact) {
+            core.info('Auto-discovered previous validation artifact from prior workflow run.');
+        }
+    }
     const delta = (0, delta_1.computeValidationDelta)(previousArtifact, result);
     if (!previousArtifact && previousValidationPath.trim()) {
         core.info('No previous validation artifact found — omitting delta (first run or missing download).');
@@ -45321,4 +45575,3 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /******/ 	
 /******/ })()
 ;
-//# sourceMappingURL=index.js.map

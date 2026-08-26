@@ -275,3 +275,61 @@ describe('writeValidationJson', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('extractFromZip', () => {
+  it('returns null for an empty buffer', () => {
+    const { extractFromZip } = require('../src/delta');
+    expect(extractFromZip(Buffer.alloc(0), 'test.json')).toBeNull();
+  });
+
+  it('returns null when target file is not found', () => {
+    const { extractFromZip } = require('../src/delta');
+    expect(extractFromZip(Buffer.from('not a zip'), 'test.json')).toBeNull();
+  });
+});
+
+describe('discoverPreviousValidationArtifact', () => {
+  const OLD_ENV = process.env;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...OLD_ENV };
+  });
+
+  afterAll(() => {
+    process.env = OLD_ENV;
+  });
+
+  it('returns null when GITHUB_REPOSITORY is missing', async () => {
+    const { discoverPreviousValidationArtifact } = require('../src/delta');
+    delete process.env.GITHUB_REPOSITORY;
+    process.env.GITHUB_RUN_ID = '123';
+    const result = await discoverPreviousValidationArtifact('ghp_test');
+    expect(result).toBeNull();
+  });
+
+  it('returns null when GITHUB_RUN_ID is missing', async () => {
+    const { discoverPreviousValidationArtifact } = require('../src/delta');
+    process.env.GITHUB_REPOSITORY = 'owner/repo';
+    delete process.env.GITHUB_RUN_ID;
+    const result = await discoverPreviousValidationArtifact('ghp_test');
+    expect(result).toBeNull();
+  });
+
+  it('returns null when github token is empty', async () => {
+    const { discoverPreviousValidationArtifact } = require('../src/delta');
+    process.env.GITHUB_REPOSITORY = 'owner/repo';
+    process.env.GITHUB_RUN_ID = '123';
+    const result = await discoverPreviousValidationArtifact('');
+    expect(result).toBeNull();
+  });
+
+  it('returns null on API error (fail open)', async () => {
+    const { discoverPreviousValidationArtifact } = require('../src/delta');
+    process.env.GITHUB_REPOSITORY = 'owner/repo';
+    process.env.GITHUB_RUN_ID = '123';
+    process.env.GITHUB_API_URL = 'https://httpstat.us';
+    const result = await discoverPreviousValidationArtifact('ghp_test');
+    expect(result).toBeNull();
+  });
+});

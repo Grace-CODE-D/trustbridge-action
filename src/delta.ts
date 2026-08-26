@@ -9,10 +9,11 @@
  * - **Local artifact path (recommended):** workflow downloads the previous
  *   run's artifact to `previous_validation_path`. No extra API scopes; explicit
  *   matching; fails soft when the file is absent (first run).
- * - **GitHub Actions API from inside the action:** would auto-discover the
- *   prior run's artifact, but needs `actions: read`, is brittle around
- *   artifact names / retention / matrix jobs, and couples the action to
- *   Actions API rate limits. Not implemented here.
+ * - **GitHub Actions API auto-discovery (Issue #212):** when no local path is
+ *   provided and `GITHUB_TOKEN` + `GITHUB_REPOSITORY` + `GITHUB_RUN_ID` are
+ *   available, the action queries the Actions API for the most recent completed
+ *   run that uploaded a `validation.json` artifact and downloads it in-memory.
+ *   Fails open on 403 / API errors so delta is never required.
  */
 
 import * as crypto from 'crypto';
@@ -330,4 +331,174 @@ export function formatDeltaMarkdown(delta: ValidationDelta | null | undefined): 
   }
 
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Issue #212 — Auto-discover previous validation.json artifact via Actions API
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempt to auto-discover and download the most recent `validation.json`
+ * artifact from prior workflow runs via the GitHub Actions REST API.
+ *
+ * This is a best-effort, fail-open operation:
+ * - Returns `null` when required context is missing (non-Actions env).
+ * - Returns `null` on API errors (403, rate limit, network).
+ * - Returns `null` when no prior artifact is found (first run).
+ *
+ * Requires `GITHUB_TOKEN` with `actions: read` permission. When the token
+ * lacks this scope, the function returns `null` gracefully so delta is
+ * never a hard requirement.
+ */
+export async function discoverPreviousValidationArtifact(
+  githubToken: string,
+  artifactName: string = 'validation-json',
+): Promise<ValidationArtifact | null> {
+  const repoFullName = process.env.GITHUB_REPOSITORY;
+  const currentRunId = process.env.GITHUB_RUN_ID;
+  const apiBase = process.env.GITHUB_API_URL || 'https://api.github.com';
+
+  if (!repoFullName || !currentRunId || !githubToken) {
+    return null;
+  }
+
+  const [owner, repo] = repoFullName.split('/');
+  if (!owner || !repo) return null;
+
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${githubToken}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+
+  try {
+    // List recent workflow runs (newest first), excluding the current run.
+    const runsUrl = `${apiBase}/repos/${owner}/${repo}/actions/runs?status=completed&per_page=10&exclude_pull_requests=true`;
+    const runsResp = await fetch(runsUrl, { headers });
+    if (!runsResp.ok) return null;
+
+    const runsData = (await runsResp.json()) as {
+      workflow_runs?: Array<{ id: number }>;
+    };
+    const runs = runsData.workflow_runs ?? [];
+    const priorRuns = runs.filter((r) => r.id !== Number(currentRunId));
+
+    for (const run of priorRuns) {
+      // List artifacts for this run.
+      const artifactsUrl = `${apiBase}/repos/${owner}/${repo}/actions/runs/${run.id}/artifacts?per_page=10`;
+      const artifactsResp = await fetch(artifactsUrl, { headers });
+      if (!artifactsResp.ok) continue;
+
+      const artifactsData = (await artifactsResp.json()) as {
+        artifacts?: Array<{ name: string; id: number; expired: boolean }>;
+      };
+      const artifacts = artifactsData.artifacts ?? [];
+      const target = artifacts.find(
+        (a) => a.name === artifactName && !a.expired,
+      );
+      if (!target) continue;
+
+      // Download the artifact zip.
+      const downloadUrl = `${apiBase}/repos/${owner}/${repo}/actions/artifacts/${target.id}/zip`;
+      const downloadResp = await fetch(downloadUrl, { headers });
+      if (!downloadResp.ok) continue;
+
+      // The artifact zip contains the file(s). Parse the zip to extract validation.json.
+      const zipBuffer = Buffer.from(await downloadResp.arrayBuffer());
+      const validationJson = extractFromZip(zipBuffer, 'validation.json');
+      if (!validationJson) continue;
+
+      const parsed = JSON.parse(validationJson) as unknown;
+      if (!parsed || typeof parsed !== 'object') continue;
+
+      const cleaned = stripSensitiveFields(parsed) as Partial<ValidationArtifact>;
+      if (!Array.isArray(cleaned.checks)) continue;
+
+      return {
+        schemaVersion: cleaned.schemaVersion || VALIDATION_ARTIFACT_SCHEMA_VERSION,
+        timestamp: typeof cleaned.timestamp === 'string' ? cleaned.timestamp : '',
+        address: typeof cleaned.address === 'string' ? cleaned.address : '',
+        asset: {
+          code: cleaned.asset?.code ?? '',
+          issuer: cleaned.asset?.issuer ?? '',
+        },
+        horizonUrl: cleaned.horizonUrl,
+        readiness: cleaned.readiness ?? {
+          ready: false,
+          totalChecks: cleaned.checks.length,
+          passedChecks: cleaned.checks.filter((c) => c.passed).length,
+          failedChecks: cleaned.checks.filter((c) => !c.passed).length,
+          failedLabels: cleaned.checks.filter((c) => !c.passed).map((c) => c.label),
+        },
+        checks: cleaned.checks.map((c) => ({
+          label: c.label,
+          passed: Boolean(c.passed),
+          detail: typeof c.detail === 'string' ? redactString(c.detail) : '',
+        })),
+        balances: {
+          xlm: cleaned.balances?.xlm ?? 'unknown',
+        },
+        delta: cleaned.delta,
+        privacyMode: cleaned.privacyMode,
+      };
+    }
+
+    return null;
+  } catch {
+    // Fail open: auto-discovery errors must never block the action.
+    return null;
+  }
+}
+
+/**
+ * Minimal ZIP extraction for a single named file.
+ * Parses the ZIP local file headers to find and decompress the target file.
+ * Returns the file content as a UTF-8 string, or null if not found.
+ *
+ * @internal Exported for testing.
+ */
+export function extractFromZip(
+  zipBuffer: Buffer,
+  targetFileName: string,
+): string | null {
+  // ZIP magic number: PK\x03\x04
+  const LOCAL_FILE_HEADERSignature = 0x04034b50;
+  let offset = 0;
+
+  while (offset + 30 <= zipBuffer.length) {
+    const sig = zipBuffer.readUInt32LE(offset);
+    if (sig !== LOCAL_FILE_HEADERSignature) break;
+
+    const compressionMethod = zipBuffer.readUInt16LE(offset + 8);
+    const compressedSize = zipBuffer.readUInt32LE(offset + 18);
+    const uncompressedSize = zipBuffer.readUInt32LE(offset + 22);
+    const fileNameLength = zipBuffer.readUInt16LE(offset + 26);
+    const extraFieldLength = zipBuffer.readUInt16LE(offset + 28);
+    const fileName = zipBuffer.toString('utf8', offset + 30, offset + 30 + fileNameLength);
+    const dataStart = offset + 30 + fileNameLength + extraFieldLength;
+
+    if (fileName === targetFileName || fileName.endsWith('/' + targetFileName)) {
+      const compressedData = zipBuffer.subarray(dataStart, dataStart + compressedSize);
+
+      if (compressionMethod === 0) {
+        // Stored (no compression)
+        return compressedData.toString('utf8');
+      } else if (compressionMethod === 8) {
+        // Deflate
+        try {
+          const { inflateSync } = require('zlib');
+          const decompressed = inflateSync(compressedData);
+          return decompressed.toString('utf8');
+        } catch {
+          return null;
+        }
+      }
+      // Unsupported compression method
+      return null;
+    }
+
+    offset = dataStart + compressedSize;
+  }
+
+  return null;
 }
