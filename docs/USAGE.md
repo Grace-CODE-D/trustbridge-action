@@ -1912,6 +1912,45 @@ jobs:
 
 ---
 
+## Horizon Retry & Exponential Backoff Configuration (Issue #203)
+
+TrustBridge includes full plumbing for configurable retry attempts and exponential backoff parameters on Horizon API requests (including 429 rate limits, 502/503/504 gateway errors, and transient network timeouts).
+
+### Inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_retries` | number | `3` | Maximum number of retry attempts for retryable Horizon responses (0 to 20). |
+| `retry_base_delay_ms` | number | `1000` | Initial base delay in milliseconds for exponential backoff (`base * 2^attempt`). |
+| `retry_max_delay_ms` | number | `30000` | Maximum cap in milliseconds for any single backoff delay. |
+
+### Example configuration
+
+```yaml
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.extract.outputs.address }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          max_retries: 5
+          retry_base_delay_ms: 500
+          retry_max_delay_ms: 15000
+```
+
+### Behavior & Guarantees
+
+- **Respects `Retry-After`:** When Horizon returns HTTP 429 with a `Retry-After` header, TrustBridge uses the header value (capped at `retry_max_delay_ms`).
+- **Zero Retries Supported:** Setting `max_retries: 0` disables retries and fails immediately on the first error.
+- **Failover Compatibility:** Works seamlessly with `horizon_url_fallback` and `rpc_fallback_url`.
+
+---
+
 ## Validation & Testing
 
 TrustBridge runs a comprehensive test suite covering all features:

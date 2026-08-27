@@ -37646,8 +37646,9 @@ function tlsErrorCode(error) {
 }
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 const DEFAULT_CACHE_TTL_MS = 60000;
-const DEFAULT_RETRY_MAX_DELAY_MS = 60000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 30000;
 const DEFAULT_RETRY_MAX_TOTAL_WAIT_MS = 120000;
 function normalizeHorizonUrl(baseUrl) {
     const trimmed = baseUrl.trim();
@@ -37786,7 +37787,7 @@ function safeAccountSummary(account) {
         subentryCount: account.subentry_count,
     };
 }
-async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, retryMaxDelayMs, retryMaxTotalWaitMs, parentSignal, rateBudgetTracker, circuitBreaker) {
+async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeoutMs, maxRetries, endpointKind, retryMaxDelayMs, retryMaxTotalWaitMs, parentSignal, rateBudgetTracker, circuitBreaker, retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS) {
     const normalizedHorizonUrl = normalizeHorizonUrl(targetHorizonUrl);
     const url = `${normalizedHorizonUrl}/accounts/${stellarAddress}`;
     const safeUrlForLog = (0, logger_1.redactHorizonUrl)(url);
@@ -37896,7 +37897,7 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
                         retryAfter = Math.min(retryAfterHeader, retryMaxDelayMs);
                     }
                     else {
-                        retryAfter = Math.min(1000 * 2 ** attempt, retryMaxDelayMs);
+                        retryAfter = Math.min(retryBaseDelayMs * (2 ** attempt), retryMaxDelayMs);
                     }
                     if (totalWaitMs + retryAfter > retryMaxTotalWaitMs) {
                         throw new HorizonRateLimitError(`Horizon rate limit exceeded (total wait ${totalWaitMs + retryAfter}ms exceeds cap of ${retryMaxTotalWaitMs}ms). Please try again later.`, retryAfter);
@@ -38017,8 +38018,8 @@ async function fetchAccountOnce(fetch, targetHorizonUrl, stellarAddress, timeout
             }
             lastError = new HorizonError(message, isAbort ? 408 : 0, true);
             if (attempt < maxRetries) {
-                const backoffMs = 1000 * 2 ** attempt;
-                if (backoffMs > retryMaxDelayMs || totalWaitMs + backoffMs > retryMaxTotalWaitMs) {
+                const backoffMs = Math.min(retryBaseDelayMs * (2 ** attempt), retryMaxDelayMs);
+                if (totalWaitMs + backoffMs > retryMaxTotalWaitMs) {
                     throw lastError;
                 }
                 totalWaitMs += backoffMs;
@@ -38071,6 +38072,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     const fetch = options.fetchFn ?? (await Promise.resolve().then(() => __importStar(__nccwpck_require__(6705)))).default;
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    const retryBaseDelayMs = options.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
     const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     const retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
     const retryMaxTotalWaitMs = options.retryMaxTotalWaitMs ?? DEFAULT_RETRY_MAX_TOTAL_WAIT_MS;
@@ -38148,7 +38150,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
     let primaryError;
     const circuitBreaker = options.circuitBreaker;
     try {
-        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker, circuitBreaker);
+        const result = await fetchAccountOnce(fetch, normalizedHorizonUrl, stellarAddress, timeoutMs, maxRetries, 'primary', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker, circuitBreaker, retryBaseDelayMs);
         result.account._servedByUrl = normalizedHorizonUrl;
         if (cachingEnabled) {
             cache.set(cacheKey, result.account, cacheTtlMs);
@@ -38217,7 +38219,7 @@ async function fetchAccount(horizonUrl, stellarAddress, options = {}) {
         primaryErrorMessage: primaryError ? (0, logger_1.redactString)(primaryError.message) : undefined,
     }));
     try {
-        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker, circuitBreaker);
+        const fallbackResult = await fetchAccountOnce(fetch, normalizedFallbackUrl, stellarAddress, timeoutMs, maxRetries, 'fallback', retryMaxDelayMs, retryMaxTotalWaitMs, signal, rateBudgetTracker, circuitBreaker, retryBaseDelayMs);
         fallbackResult.account._servedByUrl = normalizedFallbackUrl;
         if (cachingEnabled) {
             cache.set(cacheKey, fallbackResult.account, cacheTtlMs);
@@ -39139,6 +39141,14 @@ async function run() {
         min: 0, // 0 = unlimited (matches action.yml)
         max: 10000,
     });
+    const maxRetries = (0, inputs_1.parseNumberInput)(core.getInput('max_retries') || '3', 3, {
+        min: 0,
+        max: 20,
+    });
+    const retryBaseDelayMs = (0, inputs_1.parseNumberInput)(core.getInput('retry_base_delay_ms') || '1000', 1000, {
+        min: 0,
+        max: 60000,
+    });
     const retryMaxDelayMs = (0, inputs_1.parseNumberInput)(core.getInput('retry_max_delay_ms') || '30000', 30000, {
         min: 0,
         max: 600000,
@@ -39219,6 +39229,8 @@ async function run() {
             horizonCacheTtlMs,
             useCache,
             horizonMaxRequests,
+            maxRetries,
+            retryBaseDelayMs,
             retryMaxDelayMs,
             allowCrossNetworkFallback,
             logInputs,
@@ -39267,6 +39279,9 @@ async function run() {
         const batchResults = await (0, batch_1.runBatchValidation)(batchAddresses, batchCheckConfig, effectiveHorizonUrl, {
             fetchOptions: {
                 timeoutMs: horizonTimeoutMs,
+                maxRetries,
+                retryBaseDelayMs,
+                retryMaxDelayMs,
             },
         });
         const batchSummary = (0, batch_1.buildBatchSummary)(batchResults);
@@ -39366,6 +39381,9 @@ async function run() {
     });
     const horizonOptions = {
         timeoutMs: horizonTimeoutMs,
+        maxRetries,
+        retryBaseDelayMs,
+        retryMaxDelayMs,
         horizonUrlFallback: horizonUrlFallback || undefined,
         fallbackUrls,
         cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
@@ -39573,6 +39591,9 @@ async function run() {
                 useCache,
                 cacheTtlMs: horizonCacheTtlMs,
                 allowCrossNetworkFallback,
+                maxRetries,
+                retryBaseDelayMs,
+                retryMaxDelayMs,
                 debugMode,
             },
             runInfo: {
@@ -40645,6 +40666,8 @@ function buildInputsLogRecord(inputs) {
         horizonCacheTtlMs: inputs.horizonCacheTtlMs,
         useCache: inputs.useCache,
         horizonMaxRequests: inputs.horizonMaxRequests,
+        maxRetries: inputs.maxRetries,
+        retryBaseDelayMs: inputs.retryBaseDelayMs,
         retryMaxDelayMs: inputs.retryMaxDelayMs,
         logInputs: inputs.logInputs,
         allowCrossNetworkFallback: inputs.allowCrossNetworkFallback ?? false,

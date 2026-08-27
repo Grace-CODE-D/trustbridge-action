@@ -451,6 +451,14 @@ async function run(): Promise<void> {
       max: 10000,
     },
   );
+  const maxRetries = parseNumberInput(core.getInput('max_retries') || '3', 3, {
+    min: 0,
+    max: 20,
+  });
+  const retryBaseDelayMs = parseNumberInput(core.getInput('retry_base_delay_ms') || '1000', 1000, {
+    min: 0,
+    max: 60_000,
+  });
   const retryMaxDelayMs = parseNumberInput(core.getInput('retry_max_delay_ms') || '30000', 30000, {
     min: 0,
     max: 600_000,
@@ -540,6 +548,8 @@ async function run(): Promise<void> {
       horizonCacheTtlMs,
       useCache,
       horizonMaxRequests,
+      maxRetries,
+      retryBaseDelayMs,
       retryMaxDelayMs,
       allowCrossNetworkFallback,
       logInputs,
@@ -605,6 +615,9 @@ async function run(): Promise<void> {
     const batchResults = await runBatchValidation(batchAddresses, batchCheckConfig, effectiveHorizonUrl, {
       fetchOptions: {
         timeoutMs: horizonTimeoutMs,
+        maxRetries,
+        retryBaseDelayMs,
+        retryMaxDelayMs,
       },
     });
 
@@ -713,6 +726,9 @@ async function run(): Promise<void> {
 
   const horizonOptions = {
     timeoutMs: horizonTimeoutMs,
+    maxRetries,
+    retryBaseDelayMs,
+    retryMaxDelayMs,
     horizonUrlFallback: horizonUrlFallback || undefined,
     fallbackUrls,
     cacheTtlMs: useCache ? horizonCacheTtlMs : 0,
@@ -958,6 +974,9 @@ async function run(): Promise<void> {
         useCache,
         cacheTtlMs: horizonCacheTtlMs,
         allowCrossNetworkFallback,
+        maxRetries,
+        retryBaseDelayMs,
+        retryMaxDelayMs,
         debugMode,
       },
       runInfo: {
