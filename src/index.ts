@@ -16,7 +16,15 @@ import {
 import { fetchAccount, HorizonError, waitForFundedAccount, applyWalletLabels } from './horizon';
 import type { HorizonAccount, HorizonBalance } from './horizon';
 import { checkLedgerFreshness } from './freshness';
-import { formatCommentBody, postIssueComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
+import {
+  formatCommentBody,
+  postIssueComment,
+  postDiscussionComment,
+  resolveDiscussionNodeId,
+  COMMENT_SIZE_LIMIT_BYTES,
+  buildTruncatedCommentBody,
+  writeFullReport,
+} from './comment';
 import {
   normalizeAssetConfig,
   parseAssetsJson,
@@ -46,6 +54,19 @@ import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
 import { lookupAddressFromContract, ContractLookupError } from './soroban';
+import { updateProjectV2Status } from './projects';
+import { registerCorePlugins } from './corePlugins';
+import { loadPluginsFromAllowlist } from './pluginLoader';
+import { defaultRegistry } from './plugin';
+import { readTrustbridgeConfig, mergeConsumerConfig } from './configReader';
+import {
+  parseBatchAddresses,
+  runBatchValidation,
+  buildBatchSummary,
+  formatBatchSummaryMarkdown,
+} from './batch';
+import { buildSarifOutput, validateSarifSchema, serializeSarif } from './sarif';
+import { DiagnosticsConfig } from './diagnostics';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -271,6 +292,9 @@ async function run(): Promise<void> {
   const localeInput = core.getInput('locale') || 'en';
   const locale = parseLocaleInput(localeInput);
 
+  // Batch validation (Issue #199)
+  const stellarAddressesRaw = core.getInput('stellar_addresses') || '';
+
   // Full-report artifact path (used when comment exceeds size limit)
   const reportOutputPath = core.getInput('report_output_path') || 'trustbridge-report.md';
 
@@ -302,6 +326,13 @@ async function run(): Promise<void> {
     min: 100,
     max: 30000,
   });
+
+  // GitHub Projects v2 integration (Issue #222)
+  const projectId = core.getInput('project_id') || '';
+  const projectStatusField = core.getInput('project_status_field') || 'Status';
+  const projectStatusPass = core.getInput('project_status_pass') || '';
+  const projectStatusFail = core.getInput('project_status_fail') || '';
+  const projectToken = core.getInput('project_token') || githubToken;
 
   // Clear validation spans from any prior run in the same process (safety).
   clearSpans();
@@ -407,6 +438,7 @@ async function run(): Promise<void> {
   const effectiveRpcFallbackUrl = merged.rpcFallbackUrl as string;
   const effectiveFailOnMissing = merged.failOnMissing as boolean;
   const resolvedAddress = stellarAddress;
+  const effectiveResolvedAddress = resolvedAddress;
   const jobController = new AbortController();
   const horizonMaxRequests = parseNumberInput(
     core.getInput('horizon_max_requests') || '0',
@@ -689,6 +721,10 @@ async function run(): Promise<void> {
   };
 
   let account: HorizonAccount | null = null;
+  let horizonFetchLatencyMs = 0;
+  let horizonFetchStatusCode = 0;
+  let horizonFetchError: string | undefined;
+  const horizonFetchStartMs = Date.now();
 
   try {
     account = waitUntilFunded
@@ -1041,6 +1077,61 @@ async function run(): Promise<void> {
       } catch (labelError) {
         const msg = labelError instanceof Error ? labelError.message : String(labelError);
         core.warning(`Failed to apply wallet label (non-fatal): ${msg}`);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // GitHub Projects v2 status updates (Issue #222)
+  // When project_id is configured and status pass/fail values are provided,
+  // update the issue/PR item's status in the Project board.
+  // ---------------------------------------------------------------------------
+  if (projectId) {
+    const targetProjectStatus = result.valid ? projectStatusPass : projectStatusFail;
+    if (targetProjectStatus) {
+      let contentNodeId =
+        (github.context.payload.issue as any)?.node_id ||
+        (github.context.payload.pull_request as any)?.node_id ||
+        (github.context.payload.discussion as any)?.node_id;
+
+      if (!contentNodeId && github.context.payload.issue?.number) {
+        try {
+          const projectOctokit = github.getOctokit(projectToken);
+          const { owner, repo } = github.context.repo;
+          const issueQuery = `
+            query getIssueNodeId($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $number) {
+                  id
+                }
+              }
+            }
+          `;
+          const res = await projectOctokit.graphql<{
+            repository?: { issue?: { id: string } };
+          }>(issueQuery, {
+            owner,
+            repo,
+            number: github.context.payload.issue.number,
+          });
+          contentNodeId = res?.repository?.issue?.id;
+        } catch (queryErr) {
+          const msg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+          logger.warn(`Could not resolve issue node_id for Projects v2: ${msg}`, {
+            component: 'projects',
+          });
+        }
+      }
+
+      if (contentNodeId) {
+        const projectOctokit = github.getOctokit(projectToken);
+        await updateProjectV2Status({
+          octokit: projectOctokit,
+          projectId,
+          contentNodeId,
+          statusFieldName: projectStatusField,
+          targetStatusValue: targetProjectStatus,
+        });
       }
     }
   }

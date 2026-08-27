@@ -408,6 +408,37 @@ inputs:
     required: false
     default: 'false'
 
+  project_id:
+    description: >-
+      Optional GitHub Projects v2 ID (node ID e.g. PVT_...) to update item status
+      when validation passes or fails. (Issue #222)
+    required: false
+    default: ''
+
+  project_status_field:
+    description: >-
+      Name of the status field in the GitHub Projects v2 board. Default "Status". (Issue #222)
+    required: false
+    default: 'Status'
+
+  project_status_pass:
+    description: >-
+      Value/option to set on the project status field when validation passes. (Issue #222)
+    required: false
+    default: ''
+
+  project_status_fail:
+    description: >-
+      Value/option to set on the project status field when validation fails. (Issue #222)
+    required: false
+    default: ''
+
+  project_token:
+    description: >-
+      Optional GitHub token with `project` or `write:org` scope if different from github_token. (Issue #222)
+    required: false
+    default: ''
+
 outputs:
   # ── Legacy outputs (kept for backward compatibility) ──────────────────────
   trustline_exists:

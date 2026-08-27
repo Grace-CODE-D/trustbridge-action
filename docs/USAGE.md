@@ -1763,6 +1763,52 @@ All outputs are **strings** (GitHub Actions limitation). Consume them as:
 
 ---
 
+## GitHub Projects v2 status updates (Issue #222)
+
+Maintainer project boards frequently track bounty issues or contributor tasks. TrustBridge can automatically update an issue or pull request's status field on a GitHub Projects v2 board based on the validation result.
+
+### Example configuration
+
+```yaml
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      # If using default GITHUB_TOKEN for organization-level projects, ensure project permissions:
+      # project: write (for GitHub App/PAT)
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.extract.outputs.address }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          project_id: 'PVT_kwDOAB1234567890'
+          project_status_field: 'Status'
+          project_status_pass: 'Ready to Pay'
+          project_status_fail: 'Needs Wallet'
+          # If your GITHUB_TOKEN lacks organization project scopes, pass a PAT:
+          project_token: ${{ secrets.PROJECTS_PAT || secrets.GITHUB_TOKEN }}
+```
+
+### Inputs
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `project_id` | string | `""` | Optional ProjectV2 Node ID (e.g. `PVT_...`). When empty, project updates are skipped. |
+| `project_status_field` | string | `"Status"` | The name of the project field to update (supports Single-Select and Text fields). |
+| `project_status_pass` | string | `""` | Value/option name to set when all validation checks pass. |
+| `project_status_fail` | string | `""` | Value/option name to set when validation checks fail. |
+| `project_token` | string | `""` | Optional token with `project` or `write:org` permissions if different from `github_token`. |
+
+### Behavior & Error Handling
+
+- **Opt-in only:** When `project_id` is omitted or empty, no GraphQL project operations run.
+- **Automatic Item Enrollment:** If the issue is not yet an item on the project board, TrustBridge will automatically add it before updating the status field.
+- **Fail-open:** Missing permissions or Project API errors emit clear warnings (e.g. reminding maintainers about the required `project` scope) and will **never** fail the workflow step or wallet validation checks.
+
+---
+
 ## Validation & Testing
 
 TrustBridge runs a comprehensive test suite covering all features:
