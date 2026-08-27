@@ -12,6 +12,7 @@ import {
   formatCommentBody,
   isTrustBridgeComment,
   postIssueComment,
+  resolveIssueOrPullRequestNumber,
   resolveDiscussionNodeId,
   findStickyDiscussionComment,
   postDiscussionComment,
@@ -392,6 +393,101 @@ describe('postIssueComment', () => {
     expect(url).toBe('https://github.com/o/r/issues/7#issuecomment-3');
     expect(octokit.rest.issues.createComment).toHaveBeenCalled();
     expect(octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // pull_request / pull_request_target events (Issue #220)
+  // -------------------------------------------------------------------------
+
+  it('posts a new comment on a pull_request event (payload.pull_request.number, no payload.issue)', async () => {
+    mockedGithub.context.payload = { pull_request: { number: 55 } } as never;
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([]);
+    octokit.rest.issues.createComment.mockResolvedValue({
+      data: { html_url: 'https://github.com/o/r/pull/55#issuecomment-1' },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postIssueComment('token', 'pr body', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/pull/55#issuecomment-1');
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
+      expect.objectContaining({ issue_number: 55, body: 'pr body' }),
+    );
+  });
+
+  it('finds and updates the sticky comment on a pull_request event', async () => {
+    mockedGithub.context.payload = { pull_request: { number: 55 } } as never;
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([
+      { id: 200, body: `${STICKY_COMMENT_MARKER}\nold result` },
+    ]);
+    octokit.rest.issues.updateComment.mockResolvedValue({
+      data: { html_url: 'https://github.com/o/r/pull/55#issuecomment-200' },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    const url = await postIssueComment('token', 'updated pr body', { sticky: true });
+
+    expect(url).toBe('https://github.com/o/r/pull/55#issuecomment-200');
+    expect(octokit.paginate).toHaveBeenCalledWith(
+      octokit.rest.issues.listComments,
+      expect.objectContaining({ issue_number: 55 }),
+    );
+    expect(octokit.rest.issues.updateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ comment_id: 200, body: 'updated pr body' }),
+    );
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
+  it('prefers payload.issue over payload.pull_request when both are present (issue_comment on a PR)', async () => {
+    mockedGithub.context.payload = {
+      issue: { number: 7, pull_request: {} },
+      pull_request: { number: 999 },
+    } as never;
+    const octokit = makeOctokit();
+    octokit.paginate.mockResolvedValue([]);
+    octokit.rest.issues.createComment.mockResolvedValue({
+      data: { html_url: 'https://github.com/o/r/issues/7#issuecomment-1' },
+    });
+    mockedGithub.getOctokit.mockReturnValue(octokit);
+
+    await postIssueComment('token', 'body', { sticky: true });
+
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
+      expect.objectContaining({ issue_number: 7 }),
+    );
+  });
+});
+
+describe('resolveIssueOrPullRequestNumber', () => {
+  it('resolves from payload.issue.number for an issues event', () => {
+    expect(resolveIssueOrPullRequestNumber({ issue: { number: 7 } })).toBe(7);
+  });
+
+  it('resolves from payload.pull_request.number for a pull_request/pull_request_target event', () => {
+    expect(resolveIssueOrPullRequestNumber({ pull_request: { number: 55 } })).toBe(55);
+  });
+
+  it('prefers payload.issue.number when both are present', () => {
+    expect(
+      resolveIssueOrPullRequestNumber({
+        issue: { number: 7 },
+        pull_request: { number: 55 },
+      }),
+    ).toBe(7);
+  });
+
+  it('returns undefined for payloads with neither an issue nor a pull_request', () => {
+    expect(resolveIssueOrPullRequestNumber({})).toBeUndefined();
+    expect(resolveIssueOrPullRequestNumber(null)).toBeUndefined();
+    expect(resolveIssueOrPullRequestNumber(undefined)).toBeUndefined();
+    expect(resolveIssueOrPullRequestNumber('not-an-object')).toBeUndefined();
+  });
+
+  it('returns undefined when the number field is missing or non-numeric', () => {
+    expect(resolveIssueOrPullRequestNumber({ issue: {} })).toBeUndefined();
+    expect(resolveIssueOrPullRequestNumber({ pull_request: { number: '55' } })).toBeUndefined();
   });
 });
 
