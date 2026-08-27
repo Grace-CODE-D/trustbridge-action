@@ -1809,6 +1809,50 @@ jobs:
 
 ---
 
+## OIDC Federation for Dashboard Webhooks (Issue #224)
+
+By default, dashboard webhook notifications use HMAC-SHA256 signatures with a long-lived shared secret (`webhook_secret`). To eliminate the risk of leaked secrets in fork workflows and repository settings, TrustBridge supports **OpenID Connect (OIDC) federation** with `trustbridge-dashboard`.
+
+When `webhook_auth_mode: oidc` is configured, TrustBridge requests a short-lived OIDC ID token directly from GitHub's OIDC provider (with `id-token: write` permission) and sends it in the HTTP `Authorization: Bearer <token>` header.
+
+### Example configuration
+
+```yaml
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      id-token: write  # required for OIDC federation
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: ${{ steps.extract.outputs.address }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          webhook_url: 'https://dashboard.stellar-trustbridge.org/api/v1/webhook'
+          webhook_auth_mode: 'oidc'
+          webhook_oidc_audience: 'trustbridge-dashboard'  # default audience
+```
+
+### OIDC Claims & Dashboard Verification Contract
+
+The minted GitHub OIDC token contains standard JWT claims that the receiver validates:
+- `iss`: `https://token.actions.githubusercontent.com`
+- `aud`: Configured audience (default `trustbridge-dashboard`)
+- `repository`: Current GitHub repository (`owner/repo`)
+- `repository_owner`: Repository owner login
+- `workflow`: Workflow name
+- `actor`: Initiating GitHub user or bot
+
+**Security Guarantees:**
+- **Zero long-lived secrets:** No shared webhook secret needs to be stored or rotated in GitHub Secrets.
+- **Never logged:** The action registers the minted OIDC token with `core.setSecret()` to prevent accidental exposure in runner logs.
+- **HMAC remains default:** Workflows without `webhook_auth_mode: oidc` continue using HMAC-SHA256 signing transparently.
+- **Fail-open delivery:** OIDC token errors or network timeouts log non-fatal warnings and never block comment posting or validation results.
+
+---
+
 ## Validation & Testing
 
 TrustBridge runs a comprehensive test suite covering all features:

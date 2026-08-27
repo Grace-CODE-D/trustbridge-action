@@ -326,6 +326,9 @@ async function run(): Promise<void> {
     min: 100,
     max: 30000,
   });
+  const webhookAuthModeRaw = (core.getInput('webhook_auth_mode') || 'hmac').trim().toLowerCase();
+  const webhookAuthMode: 'hmac' | 'oidc' = webhookAuthModeRaw === 'oidc' ? 'oidc' : 'hmac';
+  const webhookOidcAudience = core.getInput('webhook_oidc_audience') || 'trustbridge-dashboard';
 
   // GitHub Projects v2 integration (Issue #222)
   const projectId = core.getInput('project_id') || '';
@@ -1144,7 +1147,13 @@ async function run(): Promise<void> {
     await sendWebhookNotification(
       result,
       effectiveResolvedAddress,
-      { webhookUrl, webhookSecret, timeoutMs: webhookTimeoutMs },
+      {
+        webhookUrl,
+        webhookSecret,
+        timeoutMs: webhookTimeoutMs,
+        authMode: webhookAuthMode,
+        oidcAudience: webhookOidcAudience,
+      },
       `${owner}/${repo}`,
       issueNumber,
     );

@@ -253,6 +253,20 @@ inputs:
       Default 5000 (5 seconds). (Issue #101)
     required: false
     default: '5000'
+  webhook_auth_mode:
+    description: >-
+      Authentication mechanism for dashboard webhook notifications: "hmac" (default)
+      using HMAC-SHA256 signature with webhook_secret, or "oidc" to mint a GitHub OIDC
+      ID token and send as `Authorization: Bearer <token>`. Requires `id-token: write`
+      permission when set to "oidc". (Issue #224)
+    required: false
+    default: 'hmac'
+  webhook_oidc_audience:
+    description: >-
+      Expected audience for GitHub OIDC token when webhook_auth_mode is "oidc".
+      Default "trustbridge-dashboard". (Issue #224)
+    required: false
+    default: 'trustbridge-dashboard'
   docs_base_url:
     description: >-
       Optional base URL for FAQ/docs deep links embedded in failing check

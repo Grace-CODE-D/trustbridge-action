@@ -39041,6 +39041,9 @@ async function run() {
         min: 100,
         max: 30000,
     });
+    const webhookAuthModeRaw = (core.getInput('webhook_auth_mode') || 'hmac').trim().toLowerCase();
+    const webhookAuthMode = webhookAuthModeRaw === 'oidc' ? 'oidc' : 'hmac';
+    const webhookOidcAudience = core.getInput('webhook_oidc_audience') || 'trustbridge-dashboard';
     // GitHub Projects v2 integration (Issue #222)
     const projectId = core.getInput('project_id') || '';
     const projectStatusField = core.getInput('project_status_field') || 'Status';
@@ -39741,7 +39744,13 @@ async function run() {
     if (webhookUrl) {
         const { owner, repo } = github.context.repo;
         const issueNumber = github.context.payload.issue?.number ?? null;
-        await (0, webhook_1.sendWebhookNotification)(result, effectiveResolvedAddress, { webhookUrl, webhookSecret, timeoutMs: webhookTimeoutMs }, `${owner}/${repo}`, issueNumber);
+        await (0, webhook_1.sendWebhookNotification)(result, effectiveResolvedAddress, {
+            webhookUrl,
+            webhookSecret,
+            timeoutMs: webhookTimeoutMs,
+            authMode: webhookAuthMode,
+            oidcAudience: webhookOidcAudience,
+        }, `${owner}/${repo}`, issueNumber);
     }
     if (debugMode) {
         logger_1.logger.debug('Metrics summary (JSON artifact)', { component: 'metrics' });
@@ -44104,7 +44113,12 @@ async function deliverWebhook(payload, config, fetchFn = fetch) {
         'Content-Type': 'application/json',
         'User-Agent': 'trustbridge-action/1',
     };
-    if (config.webhookSecret) {
+    if (config.authMode === 'oidc' || config.oidcToken) {
+        if (config.oidcToken) {
+            headers['Authorization'] = `Bearer ${config.oidcToken}`;
+        }
+    }
+    else if (config.webhookSecret) {
         headers['X-TrustBridge-Signature'] = computeWebhookSignature(body, config.webhookSecret);
     }
     const controller = new AbortController();
@@ -44143,10 +44157,25 @@ async function sendWebhookNotification(result, stellarAddress, config, repositor
         return;
     // Redact the URL for log output so any embedded credentials are masked.
     const safeUrl = (0, logger_1.redactHorizonUrl)(config.webhookUrl);
+    let effectiveConfig = { ...config };
+    if (config.authMode === 'oidc' && !config.oidcToken) {
+        const audience = config.oidcAudience || 'trustbridge-dashboard';
+        try {
+            const token = await core.getIDToken(audience);
+            if (token) {
+                core.setSecret(token);
+                effectiveConfig.oidcToken = token;
+            }
+        }
+        catch (oidcError) {
+            const msg = oidcError instanceof Error ? oidcError.message : String(oidcError);
+            core.warning(`[TrustBridge] OIDC token minting failed for audience "${audience}": ${msg}. Ensure the workflow has 'permissions: id-token: write'.`);
+        }
+    }
     const payload = buildWebhookPayload(result, stellarAddress, repository, issueNumber);
-    const delivery = await deliverWebhook(payload, config);
+    const delivery = await deliverWebhook(payload, effectiveConfig);
     if (delivery.sent) {
-        core.info(`[TrustBridge] Webhook delivered to ${safeUrl} — HTTP ${delivery.statusCode ?? 'unknown'}.`);
+        core.info(`[TrustBridge] Webhook delivered to ${safeUrl} (${config.authMode === 'oidc' ? 'OIDC' : 'HMAC'}) — HTTP ${delivery.statusCode ?? 'unknown'}.`);
     }
     else {
         core.warning(`[TrustBridge] Webhook delivery to ${safeUrl} failed (non-fatal): ${delivery.error ?? 'unknown error'}. Comment posting continues.`);
