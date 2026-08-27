@@ -16,15 +16,7 @@ import {
 import { fetchAccount, HorizonError, waitForFundedAccount, applyWalletLabels } from './horizon';
 import type { HorizonAccount, HorizonBalance } from './horizon';
 import { checkLedgerFreshness } from './freshness';
-import {
-  formatCommentBody,
-  postIssueComment,
-  postDiscussionComment,
-  resolveDiscussionNodeId,
-  COMMENT_SIZE_LIMIT_BYTES,
-  buildTruncatedCommentBody,
-  writeFullReport,
-} from './comment';
+import { formatCommentBody, postIssueComment, resolveDiscussionNodeId, postDiscussionComment, COMMENT_SIZE_LIMIT_BYTES, buildTruncatedCommentBody, writeFullReport } from './comment';
 import {
   normalizeAssetConfig,
   parseAssetsJson,
@@ -54,7 +46,6 @@ import { parseLocaleInput } from './i18n';
 import { sendWebhookNotification } from './webhook';
 import { runIssuesPreflight } from './preflight';
 import { lookupAddressFromContract, ContractLookupError } from './soroban';
-import { updateProjectV2Status } from './projects';
 import { registerCorePlugins } from './corePlugins';
 import { loadPluginsFromAllowlist } from './pluginLoader';
 import { defaultRegistry } from './plugin';
@@ -66,7 +57,7 @@ import {
   formatBatchSummaryMarkdown,
 } from './batch';
 import { buildSarifOutput, validateSarifSchema, serializeSarif } from './sarif';
-import { DiagnosticsConfig } from './diagnostics';
+import type { DiagnosticsConfig } from './diagnostics';
 
 /**
  * Resolve the GitHub assignee login from the current Actions event payload.
@@ -442,6 +433,7 @@ async function run(): Promise<void> {
   const effectiveFailOnMissing = merged.failOnMissing as boolean;
   const resolvedAddress = stellarAddress;
   const effectiveResolvedAddress = resolvedAddress;
+  const stellarAddressesRaw = core.getInput('stellar_addresses') || '';
   const jobController = new AbortController();
   const horizonMaxRequests = parseNumberInput(
     core.getInput('horizon_max_requests') || '0',
@@ -740,10 +732,11 @@ async function run(): Promise<void> {
   };
 
   let account: HorizonAccount | null = null;
-  let horizonFetchLatencyMs = 0;
-  let horizonFetchStatusCode = 0;
+  let horizonFetchStatusCode: number | undefined;
+  let horizonFetchLatencyMs: number | undefined;
   let horizonFetchError: string | undefined;
   const horizonFetchStartMs = Date.now();
+  globalMetrics.startTimer('horizon_fetch');
 
   try {
     account = waitUntilFunded
@@ -767,6 +760,7 @@ async function run(): Promise<void> {
       : await fetchAccount(horizonUrl, resolvedAddress, horizonOptions);
     horizonFetchLatencyMs = Date.now() - horizonFetchStartMs;
     horizonFetchStatusCode = 200;
+    globalMetrics.stopTimer('horizon_fetch');
     result = runAccountChecks(account, checkConfig);
   } catch (error) {
     horizonFetchLatencyMs = Date.now() - horizonFetchStartMs;

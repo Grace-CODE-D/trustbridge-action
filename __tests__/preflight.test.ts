@@ -1,14 +1,18 @@
 /**
  * #145 — issues:write preflight tests
+ * #220 — extended to pull_request / pull_request_target events
  *
  * Validates that:
- *   - Non-issue events return skip=true with an informational message.
+ *   - Events with no issue/PR context return skip=true with an informational message.
+ *   - pull_request/pull_request_target events resolve the PR number and run the same
+ *     preflight as issues events (Issue #220).
  *   - 401 responses throw PreflightError with clear token guidance.
- *   - 403 responses throw PreflightError with permissions block guidance.
- *   - 404 responses throw PreflightError identifying the missing issue.
+ *   - 403 responses throw PreflightError with permissions block guidance (plus a
+ *     fork-PR hint on `pull_request` events from a fork).
+ *   - 404 responses throw PreflightError identifying the missing issue/PR.
  *   - 5xx responses throw PreflightError (fail fast).
- *   - 200 responses return skip=false with the issue number.
- *   - PreflightError distinguishes missing permissions from non-issue context.
+ *   - 200 responses return skip=false with the issue/PR number.
+ *   - PreflightError distinguishes missing permissions from no issue/PR context.
  */
 
 import { runIssuesPreflight, PreflightError } from '../src/preflight';
@@ -22,6 +26,7 @@ const mockListComments = jest.fn();
 jest.mock('@actions/github', () => ({
   context: {
     payload: {},
+    eventName: 'issues',
     repo: { owner: 'test-owner', repo: 'test-repo' },
   },
   getOctokit: jest.fn(() => ({
@@ -39,6 +44,15 @@ import * as github from '@actions/github';
 function setIssueContext(issueNumber: number | undefined) {
    
   (github.context as any).payload = issueNumber !== undefined ? { issue: { number: issueNumber } } : {};
+  (github.context as any).eventName = 'issues';
+}
+
+function setPullRequestContext(prNumber: number | undefined, opts: { fork?: boolean } = {}) {
+  (github.context as any).payload =
+    prNumber !== undefined
+      ? { pull_request: { number: prNumber, head: { repo: { fork: opts.fork ?? false } } } }
+      : {};
+  (github.context as any).eventName = 'pull_request';
 }
 
 // ---------------------------------------------------------------------------
@@ -51,11 +65,57 @@ describe('runIssuesPreflight — no issue context', () => {
   it('returns skip=true when there is no issue in the event payload', async () => {
     const result = await runIssuesPreflight('fake-token');
     expect(result.skip).toBe(true);
-    expect(result.message).toMatch(/no issue context/i);
+    expect(result.message).toMatch(/no issue or pull request context/i);
   });
 
   it('does not call the GitHub API when there is no issue context', async () => {
     await runIssuesPreflight('fake-token');
+    expect(mockListComments).not.toHaveBeenCalled();
+  });
+});
+
+describe('runIssuesPreflight — pull_request / pull_request_target events (Issue #220)', () => {
+  beforeEach(() => {
+    mockListComments.mockReset();
+  });
+
+  it('resolves the PR number and returns skip=false when listComments succeeds', async () => {
+    setPullRequestContext(123);
+    mockListComments.mockResolvedValueOnce({ data: [] });
+
+    const result = await runIssuesPreflight('valid-token');
+
+    expect(result.skip).toBe(false);
+    expect(result.issueNumber).toBe(123);
+    expect(mockListComments).toHaveBeenCalledWith(
+      expect.objectContaining({ issue_number: 123 }),
+    );
+  });
+
+  it('adds a fork-PR hint to the 403 message on a pull_request event from a fork', async () => {
+    setPullRequestContext(123, { fork: true });
+    mockListComments.mockRejectedValue({ status: 403, message: 'Forbidden' });
+
+    await expect(runIssuesPreflight('bad-token')).rejects.toMatchObject({
+      statusCode: 403,
+      message: expect.stringContaining('pull_request_target'),
+    });
+  });
+
+  it('does not add the fork-PR hint when the pull_request is not from a fork', async () => {
+    setPullRequestContext(123, { fork: false });
+    mockListComments.mockRejectedValue({ status: 403, message: 'Forbidden' });
+
+    await expect(runIssuesPreflight('bad-token')).rejects.toMatchObject({
+      statusCode: 403,
+      message: expect.not.stringContaining('pull_request_target'),
+    });
+  });
+
+  it('skips with an informational message when the pull_request payload has no number', async () => {
+    setPullRequestContext(undefined);
+    const result = await runIssuesPreflight('token');
+    expect(result.skip).toBe(true);
     expect(mockListComments).not.toHaveBeenCalled();
   });
 });

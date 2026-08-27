@@ -262,7 +262,7 @@ describe('postIssueComment with explicit issueNumber (Wave #29)', () => {
 
     expect(url).toBeUndefined();
     expect(mockCore.warning).toHaveBeenCalledWith(
-      expect.stringContaining('No issue context found'),
+      expect.stringContaining('No issue or pull request context found'),
     );
     expect(octokit._mocks.createCommentMock).not.toHaveBeenCalled();
   });

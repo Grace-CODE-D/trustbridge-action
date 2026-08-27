@@ -139,7 +139,7 @@ export async function loadPlugin(
 
   // Step 4: dynamically import the module
   // Use file:// URL to ensure cross-platform compatibility
-  let moduleExport: any;
+  let moduleExport: Record<string, unknown>;
   try {
     const fileUrl = new URL(`file://${absolutePath}`).href;
     // On Windows, file:// URLs need special handling; node's import() handles this

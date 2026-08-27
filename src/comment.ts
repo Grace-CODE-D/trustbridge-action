@@ -528,13 +528,51 @@ export interface UpsertCommentOptions {
    */
   snoozeWindowMs?: number;
   /**
-   * Explicit issue number override (e.g. from workflow_dispatch input).
-   * When omitted, falls back to `github.context.payload.issue.number`.
+   * Explicit issue/PR number override (e.g. from workflow_dispatch input).
+   * When omitted, falls back to `resolveIssueOrPullRequestNumber(github.context.payload)`.
    */
   issueNumber?: number;
 }
 
 type Octokit = ReturnType<typeof github.getOctokit>;
+
+/**
+ * Resolve the issue or pull-request number a comment should be posted to.
+ *
+ * `pull_request` (and `pull_request_target`) events carry the number under
+ * `payload.pull_request.number`, not `payload.issue.number` — `payload.issue`
+ * is only populated for `issues`/`issue_comment` events. GitHub treats every
+ * PR as an issue under the hood, so the REST issues API (`createComment`,
+ * `updateComment`, `listComments`) works identically for both once the
+ * correct number is resolved (Issue #220).
+ *
+ * Only the numeric identifier is read from the payload here — never the PR
+ * title/body — so this cannot leak untrusted fork-PR content into anything
+ * built from the result (e.g. Horizon request URLs).
+ *
+ * Checks `issue` first so that `issue_comment` events on a PR (which set
+ * *both* `payload.issue` and `payload.issue.pull_request`) keep resolving
+ * the same way they always have.
+ *
+ * @internal Exported for testing.
+ */
+export function resolveIssueOrPullRequestNumber(payload: unknown): number | undefined {
+  if (payload && typeof payload === 'object') {
+    const typedPayload = payload as {
+      issue?: { number?: unknown };
+      pull_request?: { number?: unknown };
+    };
+    const issueNumber = typedPayload.issue?.number;
+    if (typeof issueNumber === 'number') {
+      return issueNumber;
+    }
+    const prNumber = typedPayload.pull_request?.number;
+    if (typeof prNumber === 'number') {
+      return prNumber;
+    }
+  }
+  return undefined;
+}
 
 /**
  * Returns true when a comment body matches any of the TrustBridge
@@ -591,12 +629,14 @@ export async function postIssueComment(
   const context = github.context;
   // Prefer an explicitly-supplied issue number (e.g. from workflow_dispatch
   // input) over the event context payload so manual benchmark runs can
-  // target a specific issue.
-  const issueNumber = options.issueNumber ?? context.payload.issue?.number;
+  // target a specific issue. Otherwise resolve from either an `issues` event
+  // (`payload.issue.number`) or a `pull_request`/`pull_request_target` event
+  // (`payload.pull_request.number`) — see resolveIssueOrPullRequestNumber (Issue #220).
+  const issueNumber = options.issueNumber ?? resolveIssueOrPullRequestNumber(context.payload);
 
   if (!issueNumber) {
     core.warning(
-      'No issue context found — skipping comment. Pass `issue_number` as a workflow_dispatch input or run this action on an `issues` event.',
+      'No issue or pull request context found — skipping comment. Pass `issue_number` as a workflow_dispatch input or run this action on an `issues`, `pull_request`, or `pull_request_target` event.',
   );
     return undefined;
   }

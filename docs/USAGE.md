@@ -10,7 +10,7 @@ Related docs: [README](../README.md) · [Architecture](ARCHITECTURE.md) · [Erro
 
 1. A GitHub repository with Actions enabled
 2. A Stellar **G-address** to validate (contributor wallet)
-3. Workflow permissions allowing issue comments (`issues: write`) or discussion comments (`discussions: write` — see [GitHub Discussions — bounty threads](#github-discussions--bounty-threads-issue-221))
+3. Workflow permissions allowing issue/PR comments (`issues: write`) or discussion comments (`discussions: write` — see [GitHub Discussions — bounty threads](#github-discussions--bounty-threads-issue-221))
 
 ---
 
@@ -63,7 +63,50 @@ jobs:
           fail_on_missing: false   # warn only for manual checks
 ```
 
-> **Note:** Comments are only posted when the workflow runs in an **issue** context. For standalone `workflow_dispatch` without an open issue, checks still run and outputs are set; comment posting is skipped with a warning.
+> **Note:** Comments are only posted when the workflow runs in an **issue**, **pull_request**, or **pull_request_target** context (or when `issue_number` is supplied for `workflow_dispatch`). For standalone `workflow_dispatch` without one of those, checks still run and outputs are set; comment posting is skipped with a warning.
+
+---
+
+## Pull request wallet checks (Issue #220)
+
+TrustBridge can post (and sticky-upsert) its validation comment directly on a **pull request's conversation tab**, not just on issues. PRs are issues under the hood as far as GitHub's REST comment API is concerned, so the same `postIssueComment` path — sticky lookup, snooze, size limits — works unchanged; TrustBridge just needs the PR's number instead of an issue's.
+
+```yaml
+name: Verify Stellar wallet on PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  trustbridge:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: Stellar-TrustBridge/trustbridge-action@v1
+        with:
+          stellar_address_input: GCONTRIBUTORADDRESSHERE
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### How it works
+
+- On a `pull_request` (or `pull_request_target`) event, TrustBridge resolves the target from `github.event.pull_request.number` — `github.event.issue` is only populated for `issues`/`issue_comment` events, so relying on it alone silently skipped every PR before this fix.
+- Only the numeric PR number is read from the event payload; the PR title/body are never inspected by TrustBridge and can't leak into comment content or Horizon requests.
+- Sticky comments, snoozing, and truncation all behave identically to the issue path — nothing about the comment lifecycle changes for PRs.
+- The `issues` event path is unchanged: when both `payload.issue` and `payload.pull_request` are present (an `issue_comment` event fired on a PR), TrustBridge keeps preferring `payload.issue.number`, matching its existing behaviour.
+
+### Permissions
+
+| Trigger | Required permission |
+|---------|--------------------|
+| `issues` events | `issues: write` |
+| `pull_request` / `pull_request_target` events | `issues: write` (GitHub's REST API treats PR conversation comments as issue comments) |
+
+> **Fork PRs:** on a plain `pull_request` trigger, GitHub gives the automatic `GITHUB_TOKEN` **read-only** access when the PR comes from a fork, regardless of the `permissions:` block above — so comment posting will fail with a 403 even though the preflight's read-only check can pass. If you need TrustBridge to comment on fork PRs, use `pull_request_target` instead, and review [GitHub's security guidance](https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/) first, since `pull_request_target` runs with the base branch's workflow file and a token that has write access even for untrusted fork code.
 
 ---
 
@@ -96,13 +139,13 @@ jobs:
 - Discussion events carry a **GraphQL node id** (e.g. `DIC_…`), **not an issue number**. The REST issues API 404s on a discussion id — or, worse, comments on the wrong issue when the id happens to be numeric.
 - When `github.event_name` is a discussion event, TrustBridge posts the comment through the GitHub **GraphQL API** (`addDiscussionComment` / `updateDiscussionComment` mutations) instead of the REST issues API.
 - **Sticky comments work the same way as issues**: with `sticky_comment: true` (default), the previous TrustBridge comment on the discussion is found (paginated via GraphQL) and updated in place.
-- Issue and PR comment paths are **unchanged**; the discussion path is only taken for discussion events.
+- The issue and PR comment paths (see [Pull request wallet checks](#pull-request-wallet-checks-issue-220)) are **unchanged**; the discussion path is only taken for discussion events.
 
 ### Permissions
 
 | Target | Required permission |
 |--------|--------------------|
-| Issue / PR comments (REST) | `issues: write` |
+| Issue / PR comments (REST) | `issues: write` (add `pull-requests: write` too for PR triggers, per [Pull request wallet checks](#pull-request-wallet-checks-issue-220)) |
 | Discussion comments (GraphQL) | `discussions: write` |
 
 A token that only has `issues: write` cannot post discussion comments — the GraphQL mutation fails with a 403-style error. TrustBridge logs this as a non-fatal warning (checks still run, outputs are still set). The action **never falls back to the issues API for a discussion event**, so it cannot accidentally comment on the wrong issue.
