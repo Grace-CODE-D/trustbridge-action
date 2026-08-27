@@ -1853,6 +1853,65 @@ The minted GitHub OIDC token contains standard JWT claims that the receiver vali
 
 ---
 
+## Reusable Workflow & Required Status Checks (Issue #223)
+
+To simplify adoption across multiple repositories and prevent permission misconfigurations, TrustBridge provides a blessed reusable workflow at `.github/workflows/trustbridge-reusable.yml`.
+
+Organizations can invoke this reusable workflow with `workflow_call` and configure it as a **required status check** in GitHub Branch Protection rules.
+
+### Reusable Workflow Caller Example
+
+Create a workflow file in your repository (e.g. `.github/workflows/wallet-check.yml`):
+
+```yaml
+name: Contributor Wallet Validation Gate
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  issues:
+    types: [assigned]
+  workflow_dispatch:
+    inputs:
+      stellar_address:
+        description: 'Stellar G-address'
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  id-token: write
+
+jobs:
+  verify-wallet:
+    name: verify-wallet
+    uses: Stellar-TrustBridge/trustbridge-action/.github/workflows/trustbridge-reusable.yml@v1
+    secrets: inherit
+    with:
+      stellar_address_input: ${{ github.event.inputs.stellar_address || 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' }}
+      fail_on_missing: true
+```
+
+### Configuring as a Required Status Check
+
+1. In your GitHub repository, navigate to **Settings** → **Branches** (or **Rules** → **Rulesets**).
+2. Under **Branch protection rules**, select or add a rule for your target branch (e.g. `main`).
+3. Enable **Require status checks to pass before merging**.
+4. In the search box, search for the status check name:
+   `verify-wallet / TrustBridge Status Check` (or `<job-id> / TrustBridge Status Check`).
+5. Select the check and save changes.
+
+### Security and Best Practices
+
+- **Minimal Permissions:** The reusable workflow requests only `contents: read`, `issues: write`, `pull-requests: read`, and `id-token: write`.
+- **Pinned Version:** Always pin the reusable workflow to a major version tag (e.g. `@v1`) or a specific commit SHA.
+- **Pass-through Secrets:** Using `secrets: inherit` automatically forwards `GITHUB_TOKEN` to post/update sticky issue comments without hardcoding personal access tokens.
+- **Merge Queue Support:** Works seamlessly with `merge_group` trigger events.
+
+---
+
 ## Validation & Testing
 
 TrustBridge runs a comprehensive test suite covering all features:
